@@ -20,12 +20,18 @@ through GitHub Actions.
 - Markup in column R is created as `(unit price - cost) * quantity`.
 - Dropdown validation is configured for Nova Poshta status, sender and payment method.
 - Individual source failures are logged and do not stop the other marketplaces.
+- Orders are grouped into operational-day sections. At local midnight the previous day
+  receives formula-driven daily, month-to-date and month forecast rows, then a new day
+  section is created automatically.
+- The sheet uses concise Ukrainian headers, centered wrapped content, fixed readable
+  column widths, status colors and hidden technical columns U:W.
 
 ## Google Sheet contract
 
 The current template is spreadsheet `<GOOGLE_SPREADSHEET_ID_REMOVED>`,
-worksheet `БСК`, with headers on row 4. Columns A:T remain the business template;
-column U is added as a hidden technical key.
+worksheet `БСК`, with the first headers on row 4. Columns A:T are business fields.
+Columns U:W are hidden technical fields for duplicate protection, row type and the
+operational date used by daily reports.
 
 The service account email must have **Editor** access to the spreadsheet.
 
@@ -91,9 +97,10 @@ Dry-run does not add the technical column, validations, rows or status updates.
 ## GitHub Actions
 
 The workflow is in `.github/workflows/cron.yml` and runs at minutes 7, 22, 37 and 52.
-This is every 15 minutes while avoiding the start of the hour. It also supports manual
-`workflow_dispatch` with a `dry_run` checkbox. A concurrency group prevents overlapping
-writes.
+This is every 15 minutes while avoiding the start of the hour. Additional UTC schedules
+cover 00:00 in `Europe/Kyiv` in both summer and winter time; date rollover is idempotent.
+The workflow also supports manual `workflow_dispatch` with a `dry_run` checkbox. A
+concurrency group prevents overlapping writes.
 
 ## Prom.ua
 
