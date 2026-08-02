@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=78"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marketplace-crm-sync"
+version = "0.1.0"
+description = "MVP CRM sync for Prom, Rozetka, ocStore, Nova Poshta and Google Sheets"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.32,<3",
+  "gspread>=6.2,<7",
+  "google-auth>=2.40,<3",
+  "tzdata>=2025.2",
+]
+
+[project.scripts]
+crm-sync = "crm_sync.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
