@@ -53,6 +53,7 @@ def test_extract_ttn() -> None:
         ("RR123456789UA", "RR123456789UA"),
         ("MEEST-123-456789", "MEEST-123-456789"),
         ("123-456789012", "123-456789012"),
+        ("ABC-456789012", "ABC-456789012"),
     ],
 )
 def test_find_tracking_number_supports_multiple_carriers(raw: str, expected: str) -> None:
