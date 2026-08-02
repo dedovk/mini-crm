@@ -28,6 +28,7 @@ class Order:
     note: str
     sender: str
     items: list[OrderItem] = field(default_factory=list)
+    advertising_cost: Decimal = Decimal(0)
 
     @property
     def sync_key(self) -> str:

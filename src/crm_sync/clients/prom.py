@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -76,40 +75,7 @@ class PromClient:
         normalized: list[Order] = []
         without_tracking = 0
         without_items = 0
-        diagnostic_order_fields: set[str] = set()
-        diagnostic_product_fields: set[str] = set()
-        diagnostic_values: dict[str, set[str]] = {}
-
-        def describe(value: Any) -> str:
-            if isinstance(value, dict):
-                return repr(value)[:120]
-            if isinstance(value, list):
-                return f"list[{len(value)}]"
-            return repr(value)[:80]
-
         for raw in raw_orders:
-            diagnostic_order_fields.update(
-                key
-                for key in raw
-                if any(marker in key.casefold() for marker in ("price", "cost", "sum", "sale", "catalog", "commission", "cpa"))
-            )
-            for key in diagnostic_order_fields:
-                if key in raw:
-                    diagnostic_values.setdefault(f"order.{key}", set()).add(describe(raw.get(key)))
-            for product in raw.get("products") or []:
-                if not isinstance(product, dict):
-                    continue
-                interesting = {
-                    key
-                    for key in product
-                    if any(
-                        marker in key.casefold()
-                        for marker in ("price", "cost", "sum", "sale", "catalog", "commission", "cpa", "sku", "external", "id")
-                    )
-                }
-                diagnostic_product_fields.update(interesting)
-                for key in interesting:
-                    diagnostic_values.setdefault(f"product.{key}", set()).add(describe(product.get(key)))
             try:
                 order = self._normalize(raw)
             except (ValueError, TypeError) as exc:
@@ -130,12 +96,6 @@ class PromClient:
             without_tracking,
             without_items,
         )
-        LOGGER.info(
-            "Prom commercial diagnostics: order_fields=%s product_fields=%s values=%s",
-            sorted(diagnostic_order_fields),
-            sorted(diagnostic_product_fields),
-            {key: sorted(values)[:5] for key, values in sorted(diagnostic_values.items())},
-        )
         return normalized
 
     def _normalize(self, raw: dict[str, Any]) -> Order:
@@ -147,16 +107,10 @@ class PromClient:
             quantity = decimal_value(first_value(product, "quantity", "count", default=1), Decimal(1))
             unit_price = decimal_value(first_value(product, "price", "unit_price"))
             line_total = decimal_value(first_value(product, "total_price", "total", "sum"), quantity * unit_price)
-            product_url = str(first_value(product, "url"))
-            url_code = re.search(r"/p(\d+)(?:-|\.html|$)", product_url)
             items.append(
                 OrderItem(
                     name=str(first_value(product, "name", "title", "product_name")),
-                    product_code=(
-                        url_code.group(1)
-                        if url_code
-                        else str(first_value(product, "product_id", "id", "external_id", "sku", "article"))
-                    ),
+                    product_code=str(first_value(product, "sku", "article", "external_id", "product_id", "id")),
                     quantity=quantity,
                     unit_price=unit_price,
                     line_total=line_total,
@@ -184,6 +138,9 @@ class PromClient:
         payment_text = (
             str(first_value(payment, "name", "title")) if isinstance(payment, dict) else str(payment or "")
         )
+        prosale = raw.get("prosale_commission")
+        cpa_commission = raw.get("cpa_commission")
+        advertising_cost = decimal_value(prosale) or decimal_value(cpa_commission)
         recipient_name = " ".join(
             str(first_value(recipient, key)).strip()
             for key in ("last_name", "first_name", "second_name")
@@ -221,4 +178,5 @@ class PromClient:
             note=note,
             sender=str(first_value(delivery, "sender", "sender_name")),
             items=items,
+            advertising_cost=advertising_cost,
         )

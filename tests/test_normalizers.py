@@ -97,7 +97,7 @@ def test_rozetka_normalizer_formats_nested_user_name_object() -> None:
     assert order.customer_name == "Зенькович Олександр Михайлович"
 
 
-def test_prom_normalizer_uses_product_id_as_product_code() -> None:
+def test_prom_normalizer_uses_sku_as_product_code() -> None:
     client = PromClient(
         HttpClient(max_retries=0),
         token="test",
@@ -118,6 +118,7 @@ def test_prom_normalizer_uses_product_id_as_product_code() -> None:
                 "first_name": "Отримувач",
             },
             "full_price": 100,
+            "prosale_commission": {"value": 69.3},
             "products": [
                 {
                     "id": "5110513990",
@@ -135,7 +136,9 @@ def test_prom_normalizer_uses_product_id_as_product_code() -> None:
     assert order.tracking_number == "20 4515 0157 2223"
     assert order.city == "Київ"
     assert order.customer_name == "Тестовий Отримувач"
-    assert order.items[0].product_code == "608037110"
+    assert order.items[0].product_code == "JX27"
+    assert order.items[0].unit_price == 100
+    assert order.advertising_cost == Decimal("69.3")
 
 
 def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
@@ -174,3 +177,4 @@ def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
     assert order.sync_key == "opencart:501"
     assert order.payment_method == "смешанная"
     assert order.items[0].product_code == "10"
+from decimal import Decimal

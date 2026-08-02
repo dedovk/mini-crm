@@ -5,6 +5,7 @@ import pytest
 from crm_sync.utils import (
     classify_payment,
     customer_display,
+    decimal_value,
     extract_ttn,
     find_tracking_number,
     normalize_phone,
@@ -66,3 +67,8 @@ def test_tracking_number_rejects_internal_hyphenated_identifier() -> None:
 
 def test_customer_display_keeps_city_surname_and_first_name() -> None:
     assert customer_display("Самар", "Зенькович Олександр Михайлович") == "Самар, Зенькович Олександр"
+
+
+def test_decimal_value_parses_prom_currency_and_nested_amount() -> None:
+    assert decimal_value("1\u00a0149 грн") == Decimal(1149)
+    assert decimal_value({"amount": "69.30"}) == Decimal("69.30")

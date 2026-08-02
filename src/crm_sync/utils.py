@@ -24,9 +24,14 @@ PREPAYMENT_RE = re.compile(
 def decimal_value(value: Any, default: Decimal = Decimal(0)) -> Decimal:
     if value is None or value == "":
         return default
+    if isinstance(value, dict):
+        return decimal_value(first_value(value, "amount", "value", "price"), default)
     normalized = str(value).replace("\u00a0", "").replace(" ", "").replace(",", ".")
+    match = re.search(r"-?\d+(?:\.\d+)?", normalized)
+    if not match:
+        return default
     try:
-        return Decimal(normalized)
+        return Decimal(match.group(0))
     except (InvalidOperation, ValueError):
         return default
 
