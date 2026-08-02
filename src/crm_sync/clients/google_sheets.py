@@ -496,27 +496,6 @@ class GoogleSheetsGateway:
                         },
                     ]
                 )
-                if row_type == ROW_DAY:
-                    requests.append(
-                        {
-                            "repeatCell": {
-                                "range": {
-                                    "sheetId": sheet_id,
-                                    "startRowIndex": row_number - 1,
-                                    "endRowIndex": row_number,
-                                    "startColumnIndex": 1,
-                                    "endColumnIndex": 2,
-                                },
-                                "cell": {
-                                    "userEnteredFormat": {
-                                        "numberFormat": {"type": "DATE", "pattern": "dd.mm.yyyy"}
-                                    }
-                                },
-                                "fields": "userEnteredFormat.numberFormat",
-                            }
-                        }
-                    )
-
         for row_number in typed_rows.get(ROW_ORDER, []):
             if row_number % 2:
                 continue
@@ -568,6 +547,27 @@ class GoogleSheetsGateway:
                             "endColumnIndex": column,
                         },
                         "cell": {"userEnteredFormat": {"numberFormat": {"type": format_type, "pattern": pattern}}},
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                }
+            )
+
+        for row_number in typed_rows.get(ROW_DAY, []):
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": row_number - 1,
+                            "endRowIndex": row_number,
+                            "startColumnIndex": 1,
+                            "endColumnIndex": 2,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {"type": "DATE", "pattern": "dd.mm.yyyy"}
+                            }
+                        },
                         "fields": "userEnteredFormat.numberFormat",
                     }
                 }
