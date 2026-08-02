@@ -81,7 +81,14 @@ def test_prom_normalizer_uses_product_id_as_product_code() -> None:
         {
             "id": 1,
             "date_created": "2026-08-02 12:00:00",
-            "ttn": "ЕН 20 4515 0157 2223",
+            "delivery_provider_data": {
+                "declaration_number": "ЕН 20 4515 0157 2223",
+                "recipient_address": "м. Київ, Відділення №1",
+            },
+            "delivery_recipient": {
+                "last_name": "Тестовий",
+                "first_name": "Отримувач",
+            },
             "full_price": 100,
             "products": [
                 {
@@ -96,6 +103,8 @@ def test_prom_normalizer_uses_product_id_as_product_code() -> None:
     )
 
     assert order.tracking_number == "20 4515 0157 2223"
+    assert order.city == "Київ"
+    assert order.customer_name == "Тестовий Отримувач"
     assert order.items[0].product_code == "608037110"
 
 

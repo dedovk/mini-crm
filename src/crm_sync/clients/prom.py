@@ -11,10 +11,10 @@ from crm_sync.models import Order, OrderItem
 from crm_sync.utils import (
     classify_payment,
     decimal_value,
+    city_from_address,
     display_text,
     find_tracking_number,
     first_value,
-    nested_value,
     normalize_phone,
     parse_datetime,
 )
@@ -101,9 +101,12 @@ class PromClient:
             (
                 order
                 for order in raw_orders
-                if any(
+                if any(token in key.casefold() and value for key, value in order.items() for token in ("ttn", "declar", "track", "waybill", "consignment"))
+                or any(
                     token in key.casefold() and value
-                    for key, value in order.items()
+                    for field in (order.get("delivery_provider_data"), order.get("delivery_data"))
+                    if isinstance(field, dict)
+                    for key, value in field.items()
                     for token in ("ttn", "declar", "track", "waybill", "consignment")
                 )
             ),
@@ -122,6 +125,10 @@ class PromClient:
             if isinstance(diagnostic_order.get("delivery_recipient"), dict)
             else {}
         )
+        diagnostic_product = next(
+            (product for product in diagnostic_order.get("products", []) if isinstance(product, dict)),
+            {},
+        )
 
         def masked_fields(mapping: dict[str, Any]) -> dict[str, str]:
             return {
@@ -132,12 +139,18 @@ class PromClient:
             }
 
         LOGGER.info(
-            "Prom tracking field diagnostics (masked): order=%s delivery=%s; schema order=%s delivery=%s recipient=%s",
+            "Prom field diagnostics (masked): order=%s delivery=%s product_ids=%s; schema order=%s delivery=%s recipient=%s product=%s",
             masked_fields(diagnostic_order),
             masked_fields(diagnostic_delivery),
+            {
+                key: re.sub(r"\d", "#", str(diagnostic_product.get(key)))[:60]
+                for key in ("product_id", "id", "sku", "external_id")
+                if diagnostic_product.get(key) not in (None, "")
+            },
             sorted(diagnostic_order.keys()),
             sorted(diagnostic_delivery.keys()),
             sorted(diagnostic_recipient.keys()),
+            sorted(diagnostic_product.keys()),
         )
         return normalized
 
@@ -181,7 +194,12 @@ class PromClient:
         payment_text = (
             str(first_value(payment, "name", "title")) if isinstance(payment, dict) else str(payment or "")
         )
-        name = " ".join(
+        recipient_name = " ".join(
+            str(first_value(recipient, key)).strip()
+            for key in ("last_name", "first_name", "second_name")
+            if first_value(recipient, key)
+        )
+        client_name = " ".join(
             str(first_value(raw, key)).strip()
             for key in ("client_last_name", "client_first_name", "client_second_name")
             if first_value(raw, key)
@@ -202,20 +220,10 @@ class PromClient:
             source=self.source,
             external_id=str(first_value(raw, "id", "order_id")),
             created_at=parse_datetime(first_value(raw, "date_created", "created_at", "created"), self.timezone),
-            customer_name=name or str(first_value(raw, "client_name", "customer_name")),
-            city=display_text(
-                first_value(
-                    recipient,
-                    "city_name",
-                    "city",
-                    "locality",
-                    default=nested_value(
-                        raw,
-                        (("delivery_address", "city"), ("delivery_data", "city"), ("delivery_data", "city_name")),
-                        default=first_value(raw, "delivery_city", "city"),
-                    ),
-                )
-            ),
+            customer_name=recipient_name or client_name or str(first_value(raw, "client_name", "customer_name")),
+            city=display_text(first_value(recipient, "city_name", "city", "locality"))
+            or city_from_address(first_value(delivery, "recipient_address"))
+            or city_from_address(first_value(raw, "delivery_address")),
             phone=normalize_phone(first_value(raw, "phone", "client_phone", "customer_phone")),
             tracking_number=ttn,
             total=decimal_value(first_value(raw, "full_price", "total_price", "price", "total")),

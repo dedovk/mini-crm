@@ -55,6 +55,16 @@ def display_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def city_from_address(value: Any) -> str:
+    raw = display_text(value)
+    if not raw:
+        return ""
+    match = re.search(r"(?:^|,\s*)(?:м\.|г\.|с\.|смт\.?|село)\s*([^,]+)", raw, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return raw.split(",", 1)[0].strip()
+
+
 def normalize_phone(value: Any) -> str:
     digits = re.sub(r"\D", "", str(value or ""))
     digits = digits.removeprefix("00")
