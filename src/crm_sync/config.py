@@ -94,7 +94,7 @@ class Settings:
             rozetka_token=_env("ROZETKA_API_TOKEN"),
             rozetka_username=_env("ROZETKA_USERNAME"),
             rozetka_password=_env("ROZETKA_PASSWORD"),
-            rozetka_base_url=_env("ROZETKA_API_BASE_URL", "https://api.seller.rozetka.com.ua"),
+            rozetka_base_url=_env("ROZETKA_API_BASE_URL", "https://api-seller.rozetka.com.ua"),
             opencart_base_url=_env("OPENCART_BASE_URL"),
             opencart_api_key=_env("OPENCART_API_KEY"),
             opencart_orders_endpoint=_env("OPENCART_ORDERS_ENDPOINT", "/index.php?route=api/crm_orders"),
@@ -109,4 +109,3 @@ class Settings:
             sender_options=sender_options or (sender_default,),
             dry_run=_env_bool("DRY_RUN"),
         )
-

@@ -106,6 +106,8 @@ normalizes product rows and retains only orders containing a 14-digit TTN. It sc
 The client uses `GET /orders/search` with `expand=user,delivery,purchases,status_data`,
 handles pagination and retains only orders with a TTN. It accepts an existing token and
 supports `/site/login` fallback when login/password secrets are configured.
+The current official base URL is `https://api-seller.rozetka.com.ua`; the former
+`api.seller.rozetka.com.ua` hostname serves an expired certificate and is not used.
 
 ## ocStore 2.1.0.2.1
 
