@@ -10,7 +10,8 @@ from crm_sync.models import Order, OrderItem
 from crm_sync.utils import (
     classify_payment,
     decimal_value,
-    extract_ttn,
+    display_text,
+    find_tracking_number,
     first_value,
     nested_value,
     normalize_phone,
@@ -72,14 +73,29 @@ class PromClient:
             last_id = next_last_id
 
         normalized: list[Order] = []
+        without_tracking = 0
+        without_items = 0
         for raw in raw_orders:
             try:
                 order = self._normalize(raw)
             except (ValueError, TypeError) as exc:
                 LOGGER.warning("Prom order skipped because normalization failed: %s", exc)
                 continue
-            if order.created_at >= since - timedelta(days=1) and order.tracking_number and order.items:
-                normalized.append(order)
+            if order.created_at < since - timedelta(days=1):
+                continue
+            if not order.tracking_number:
+                without_tracking += 1
+                continue
+            if not order.items:
+                without_items += 1
+                continue
+            normalized.append(order)
+        LOGGER.info(
+            "Prom fetched %s raw order(s): %s without tracking number, %s without products",
+            len(raw_orders),
+            without_tracking,
+            without_items,
+        )
         return normalized
 
     def _normalize(self, raw: dict[str, Any]) -> Order:
@@ -94,7 +110,7 @@ class PromClient:
             items.append(
                 OrderItem(
                     name=str(first_value(product, "name", "title", "product_name")),
-                    sku=str(first_value(product, "sku", "external_id", "article", "id")),
+                    product_code=str(first_value(product, "product_id", "id", "sku", "external_id", "article")),
                     quantity=quantity,
                     unit_price=unit_price,
                     line_total=line_total,
@@ -119,7 +135,7 @@ class PromClient:
             for key in ("client_last_name", "client_first_name", "client_second_name")
             if first_value(raw, key)
         )
-        ttn = extract_ttn(
+        ttn = find_tracking_number(
             first_value(raw, "ttn", "declaration_number", "delivery_declaration_id"),
             first_value(delivery, "ttn", "declaration_number", "declaration_id"),
             note,
@@ -129,7 +145,7 @@ class PromClient:
             external_id=str(first_value(raw, "id", "order_id")),
             created_at=parse_datetime(first_value(raw, "date_created", "created_at", "created"), self.timezone),
             customer_name=name or str(first_value(raw, "client_name", "customer_name")),
-            city=str(
+            city=display_text(
                 nested_value(
                     raw,
                     (("delivery_data", "city"), ("delivery_data", "city_name"), ("delivery_address", "city")),

@@ -5,6 +5,7 @@ import pytest
 from crm_sync.utils import (
     classify_payment,
     extract_ttn,
+    find_tracking_number,
     normalize_phone,
     parse_prepayment,
 )
@@ -40,4 +41,17 @@ def test_mixed_payment_from_prepayment_and_cod() -> None:
 
 def test_extract_ttn() -> None:
     assert extract_ttn("ТТН 20451234567890 створена") == "20451234567890"
+    assert extract_ttn("ЕН 20 4515 0157 2223") == "20451501572223"
 
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("ТТН: 20 4515 0157 2223", "20 4515 0157 2223"),
+        ("RMP-483122083", "RMP-483122083"),
+        ("RR123456789UA", "RR123456789UA"),
+        ("MEEST-123-456789", "MEEST-123-456789"),
+    ],
+)
+def test_find_tracking_number_supports_multiple_carriers(raw: str, expected: str) -> None:
+    assert find_tracking_number(raw) == expected

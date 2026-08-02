@@ -11,7 +11,7 @@ from crm_sync.utils import (
     classify_payment,
     decimal_value,
     display_text,
-    extract_ttn,
+    find_tracking_number,
     first_value,
     nested_value,
     normalize_phone,
@@ -138,7 +138,14 @@ class RozetkaClient:
             items.append(
                 OrderItem(
                     name=str(first_value(purchase, "item_name", default=first_value(item, "name", "name_ua"))),
-                    sku=str(first_value(item, "article", "price_offer_id", default=first_value(purchase, "item_id"))),
+                    product_code=str(
+                        first_value(
+                            purchase,
+                            "item_id",
+                            "product_id",
+                            default=first_value(item, "id", "item_id", "article", "price_offer_id"),
+                        )
+                    ),
                     quantity=quantity,
                     unit_price=unit_price,
                     line_total=line_total,
@@ -157,6 +164,20 @@ class RozetkaClient:
         user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
         delivery = raw.get("delivery") if isinstance(raw.get("delivery"), dict) else {}
         locality = delivery.get("locality") if isinstance(delivery.get("locality"), dict) else {}
+        recipient = delivery.get("recipient") if isinstance(delivery.get("recipient"), dict) else {}
+        recipient_name = first_value(
+            raw,
+            "user_title",
+            "recipient_title",
+            "recipient_name",
+            default=first_value(
+                delivery,
+                "recipient_title",
+                "recipient_name",
+                "contact_person",
+                default=first_value(recipient, "name", "full_name", "title"),
+            ),
+        )
         payment_text = str(first_value(raw, "payment_type_name", "payment_type", "payment_status"))
         return Order(
             source=self.source,
@@ -167,14 +188,26 @@ class RozetkaClient:
                     user,
                     "name",
                     "full_name",
-                    default=" ".join(
-                        part for part in (str(user.get("surname", "")), str(user.get("first_name", ""))) if part
+                    "title",
+                    default=recipient_name
+                    or " ".join(
+                        part
+                        for part in (
+                            str(user.get("surname", "")),
+                            str(user.get("first_name", "")),
+                            str(user.get("patronymic", "")),
+                        )
+                        if part
                     ),
                 )
             ),
             city=display_text(first_value(locality, "title", "name_ua", "name", default=first_value(delivery, "city"))),
             phone=normalize_phone(first_value(raw, "user_phone", default=first_value(user, "phone"))),
-            tracking_number=extract_ttn(first_value(raw, "ttn"), first_value(delivery, "ttn"), note),
+            tracking_number=find_tracking_number(
+                first_value(raw, "ttn", "tracking_number", "declaration_number"),
+                first_value(delivery, "ttn", "tracking_number", "declaration_number", "document_number"),
+                note,
+            ),
             total=decimal_value(first_value(raw, "cost_with_discount", "cost", "amount_with_discount", "amount")),
             payment_method=classify_payment(payment_text, note),
             note=note,

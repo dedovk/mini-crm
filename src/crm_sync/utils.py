@@ -7,7 +7,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
-TTN_RE = re.compile(r"(?<!\d)(\d{14})(?!\d)")
+TTN_RE = re.compile(r"(?<!\d)((?:\d[\s-]*){14})(?!\d)")
+RMP_RE = re.compile(r"\bRMP-\d+\b", re.IGNORECASE)
+INTERNATIONAL_TRACKING_RE = re.compile(r"\b[A-Z]{2}\d{9}[A-Z]{2}\b", re.IGNORECASE)
+UKRPOST_DOMESTIC_RE = re.compile(r"(?<!\d)\d{13}(?!\d)")
+HYPHENATED_TRACKING_RE = re.compile(r"\b[A-Z0-9]{2,}(?:-[A-Z0-9]{2,})+\b", re.IGNORECASE)
 PREPAYMENT_RE = re.compile(
     r"(?:\bперед\b|\bпредоплат\w*\b)\s*[-:=]?\s*(\d[\d\s]*(?:[.,]\d{1,2})?)",
     re.IGNORECASE,
@@ -69,7 +73,38 @@ def extract_ttn(*values: Any) -> str:
             continue
         match = TTN_RE.search(str(value))
         if match:
-            return match.group(1)
+            digits = re.sub(r"\D", "", match.group(1))
+            if len(digits) == 14:
+                return digits
+    return ""
+
+
+def normalize_tracking_number(value: Any) -> str:
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    raw = " ".join(str(value).replace("\u00a0", " ").split()).strip()
+    if not raw:
+        return ""
+    raw = re.sub(
+        r"^(?:ттн|ttn|ен\s*№|ен|декларац(?:ія|ии)|номер\s+(?:ттн|накладної))\s*[:№#-]?\s*",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    for pattern in (RMP_RE, INTERNATIONAL_TRACKING_RE, TTN_RE, UKRPOST_DOMESTIC_RE, HYPHENATED_TRACKING_RE):
+        match = pattern.search(raw)
+        if match:
+            return " ".join(match.group(0).split()).strip(" ,;.")
+    if re.fullmatch(r"[A-ZА-ЯІЇЄ0-9-]{6,64}", raw, re.IGNORECASE) and re.search(r"\d", raw):
+        return raw.strip(" ,;.")
+    return ""
+
+
+def find_tracking_number(*values: Any) -> str:
+    for value in values:
+        normalized = normalize_tracking_number(value)
+        if normalized:
+            return normalized
     return ""
 
 

@@ -11,7 +11,7 @@ from crm_sync.models import Order, OrderItem
 from crm_sync.utils import (
     classify_payment,
     decimal_value,
-    extract_ttn,
+    find_tracking_number,
     first_value,
     normalize_phone,
     parse_datetime,
@@ -43,6 +43,9 @@ class OpenCartClient:
             LOGGER.info("OpenCart sync skipped: endpoint or API key is not configured")
             return []
         orders: list[Order] = []
+        raw_count = 0
+        without_tracking = 0
+        without_items = 0
         offset = 0
         limit = 500
         while True:
@@ -59,6 +62,7 @@ class OpenCartClient:
             if not isinstance(payload, dict) or not payload.get("success"):
                 raise ApiError(f"OpenCart CRM endpoint failed: {payload}")
             raw_orders = payload.get("orders") or []
+            raw_count += len(raw_orders)
             for raw in raw_orders:
                 if not isinstance(raw, dict):
                     continue
@@ -67,11 +71,22 @@ class OpenCartClient:
                 except (ValueError, TypeError) as exc:
                     LOGGER.warning("OpenCart order skipped because normalization failed: %s", exc)
                     continue
-                if order.tracking_number and order.items:
-                    orders.append(order)
+                if not order.tracking_number:
+                    without_tracking += 1
+                    continue
+                if not order.items:
+                    without_items += 1
+                    continue
+                orders.append(order)
             if len(raw_orders) < limit:
                 break
             offset += limit
+        LOGGER.info(
+            "OpenCart fetched %s raw order(s): %s without tracking number, %s without products",
+            raw_count,
+            without_tracking,
+            without_items,
+        )
         return orders
 
     def _normalize(self, raw: dict[str, Any]) -> Order:
@@ -86,7 +101,7 @@ class OpenCartClient:
             items.append(
                 OrderItem(
                     name=str(first_value(product, "name")),
-                    sku=str(first_value(product, "model", "sku", "product_id")),
+                    product_code=str(first_value(product, "product_id", "id", "model", "sku")),
                     quantity=quantity,
                     unit_price=unit_price,
                     line_total=line_total,
@@ -111,7 +126,7 @@ class OpenCartClient:
             customer_name=full_name,
             city=str(first_value(raw, "shipping_city", "payment_city")),
             phone=normalize_phone(first_value(raw, "telephone", "phone")),
-            tracking_number=extract_ttn(
+            tracking_number=find_tracking_number(
                 first_value(
                     raw,
                     "novaposhta_cn_number",

@@ -8,7 +8,7 @@ from decimal import Decimal
 @dataclass(slots=True)
 class OrderItem:
     name: str
-    sku: str
+    product_code: str
     quantity: Decimal
     unit_price: Decimal
     line_total: Decimal
@@ -39,4 +39,3 @@ class ShipmentStatus:
     tracking_number: str
     status: str
     status_code: str = ""
-
