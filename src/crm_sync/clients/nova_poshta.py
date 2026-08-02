@@ -50,9 +50,10 @@ class NovaPoshtaClient:
                 number = str(first_value(item, "Number", "DocumentNumber", "IntDocNumber"))
                 if not number:
                     continue
+                status = str(first_value(item, "Status", "StatusDescription")).strip() or "Невідомо"
                 result[number] = ShipmentStatus(
                     tracking_number=number,
-                    status=str(first_value(item, "Status", "StatusDescription", default="Невідомо")),
+                    status=status,
                     status_code=str(first_value(item, "StatusCode", "StateId")),
                 )
         return result
