@@ -47,8 +47,8 @@ jobs:
       HTTP_TIMEOUT_SECONDS: "30"
       HTTP_MAX_RETRIES: "4"
       LOG_LEVEL: "INFO"
-      SENDER_DEFAULT: ${{ secrets.SENDER_DEFAULT || 'imaxi-com' }}
-      SENDER_OPTIONS: ${{ secrets.SENDER_OPTIONS || 'imaxi-com' }}
+      SENDER_DEFAULT: "-"
+      SENDER_OPTIONS: ${{ secrets.SENDER_OPTIONS || '-,imaxi-com' }}
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
 
     steps:
