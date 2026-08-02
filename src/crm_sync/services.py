@@ -41,8 +41,6 @@ class SyncService:
     def run(self) -> None:
         now = datetime.now(ZoneInfo(self.timezone))
         self.sheets.ensure_schema(apply_changes=not self.dry_run)
-        if not self.dry_run:
-            self.sheets.prepare_daily_layout(now.date())
         existing_keys = self.sheets.read_existing_sync_keys()
         since = now - timedelta(days=self.lookback_days)
 

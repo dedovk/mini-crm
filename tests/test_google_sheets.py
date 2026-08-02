@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from crm_sync.clients.google_sheets import COLUMNS, GoogleSheetsGateway
@@ -18,6 +18,30 @@ class StubWorksheet:
         self.updates = updates
 
 
+class LayoutWorksheet(StubWorksheet):
+    id = 123
+    row_count = 1000
+
+    def batch_clear(self, ranges) -> None:
+        self.cleared_ranges = ranges
+
+    def update(self, *, values, range_name, raw) -> None:
+        self.written_values = values
+        self.written_range = range_name
+        self.written_raw = raw
+
+    def add_rows(self, count) -> None:
+        self.row_count += count
+
+
+class StubSpreadsheet:
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+
+    def batch_update(self, payload) -> None:
+        self.requests.extend(payload["requests"])
+
+
 def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_formula() -> None:
     rows = [[""] * COLUMNS.operational_date for _ in range(5)]
     rows[4][COLUMNS.row_type - 1] = ROW_ORDER
@@ -29,7 +53,7 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     order = Order(
         source="prom",
         external_id="1",
-        created_at=datetime(2026, 8, 3),
+        created_at=datetime(2026, 8, 3, tzinfo=UTC),
         customer_name="Тестовий Отримувач",
         city="Київ",
         phone="+380501234567",
@@ -57,3 +81,40 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     assert updates["F5"] == "Київ, Тестовий Отримувач"
     assert updates["I5"] == "608037110"
     assert updates["R5"] == "=(L5-Q5)*K5"
+
+
+def test_append_orders_rebuilds_sections_by_actual_order_date_with_requested_gaps() -> None:
+    rows = [[""] * COLUMNS.operational_date for _ in range(5)]
+    old = rows[4]
+    old[COLUMNS.source - 1] = "prom"
+    old[COLUMNS.tracking_number - 1] = "20451234567890"
+    old[COLUMNS.order_date - 1] = "01.07.2026 10:00"
+    old[COLUMNS.order_number - 1] = "1"
+    old[COLUMNS.customer - 1] = "Київ, Прізвище Ім'я По-батькові"
+    old[COLUMNS.sync_key - 1] = "prom:1"
+    old[COLUMNS.row_type - 1] = ROW_ORDER
+
+    worksheet = LayoutWorksheet(rows)
+    spreadsheet = StubSpreadsheet()
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.spreadsheet = spreadsheet
+    gateway.header_row = 4
+    gateway._apply_professional_formatting = lambda last_used_row: None
+
+    added = gateway.append_orders([], {}, sender_default="-", operational_day=date(2026, 8, 3))
+
+    written = worksheet.written_values
+    order_row = next(row for row in written if row[COLUMNS.row_type - 1] == ROW_ORDER)
+    assert order_row[COLUMNS.operational_date - 1] != date(2026, 8, 3)
+    assert order_row[COLUMNS.customer - 1] == "Київ, Прізвище Ім'я"
+    day_indexes = [index for index, row in enumerate(written) if row[COLUMNS.row_type - 1] == "DAY"]
+    assert all(row[COLUMNS.row_type - 1] == "" for row in written[day_indexes[1] - 4 : day_indexes[1]])
+    report_indexes = [
+        index
+        for index, row in enumerate(written)
+        if row[COLUMNS.row_type - 1] in {"REPORT_DAY", "REPORT_MTD", "REPORT_FORECAST"}
+    ]
+    assert written[report_indexes[0] + 1][COLUMNS.row_type - 1] == ""
+    assert written[report_indexes[1] + 1][COLUMNS.row_type - 1] == ""
+    assert added == 0

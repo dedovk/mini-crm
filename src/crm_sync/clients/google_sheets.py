@@ -23,11 +23,18 @@ from crm_sync.sheet_layout import (
     ROW_REPORT_MTD,
     clean_customer_display,
     month_period_label,
+    parse_order_day,
     parse_sheet_date,
     report_formulas,
     sheet_serial,
 )
-from crm_sync.utils import decimal_for_sheet, extract_ttn, parse_prepayment
+from crm_sync.utils import (
+    customer_display,
+    decimal_for_sheet,
+    extract_ttn,
+    normalize_tracking_number,
+    parse_prepayment,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -354,6 +361,7 @@ class GoogleSheetsGateway:
     def _apply_professional_formatting(self, last_used_row: int) -> None:
         values = self.worksheet.get(f"A1:W{last_used_row}", value_render_option="UNFORMATTED_VALUE")
         typed_rows: dict[str, list[int]] = {}
+        order_groups: dict[str, list[int]] = {}
         for row_number, row in enumerate(values, start=1):
             row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
             if (
@@ -365,6 +373,10 @@ class GoogleSheetsGateway:
                 row_type = ROW_HEADER
             if row_type:
                 typed_rows.setdefault(row_type, []).append(row_number)
+            if row_type == ROW_ORDER and len(row) >= COLUMNS.sync_key:
+                sync_key = str(row[COLUMNS.sync_key - 1]).strip().casefold()
+                if sync_key:
+                    order_groups.setdefault(sync_key, []).append(row_number)
 
         sheet_id = self.worksheet.id
         row_count = self.worksheet.row_count
@@ -394,15 +406,30 @@ class GoogleSheetsGateway:
                     "cell": {
                         "userEnteredFormat": {
                             "textFormat": {"fontFamily": "Arial", "fontSize": 10},
+                            "backgroundColorStyle": {"rgbColor": self._hex_color("#FFFFFF")},
                             "horizontalAlignment": "CENTER",
                             "verticalAlignment": "MIDDLE",
                             "wrapStrategy": "WRAP",
-                            "borders": {
-                                "bottom": {"style": "SOLID", "color": {"red": 0.85, "green": 0.88, "blue": 0.91}}
-                            },
                         }
                     },
-                    "fields": "userEnteredFormat(textFormat,horizontalAlignment,verticalAlignment,wrapStrategy,borders.bottom)",
+                    "fields": "userEnteredFormat(textFormat,backgroundColorStyle,horizontalAlignment,verticalAlignment,wrapStrategy)",
+                }
+            },
+            {
+                "updateBorders": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": last_used_row,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": COLUMNS.operational_date,
+                    },
+                    "top": {"style": "NONE"},
+                    "bottom": {"style": "NONE"},
+                    "left": {"style": "NONE"},
+                    "right": {"style": "NONE"},
+                    "innerHorizontal": {"style": "NONE"},
+                    "innerVertical": {"style": "NONE"},
                 }
             },
             {
@@ -497,9 +524,7 @@ class GoogleSheetsGateway:
                         },
                     ]
                 )
-        for row_number in typed_rows.get(ROW_ORDER, []):
-            if row_number % 2:
-                continue
+        for order_index, row_number in enumerate(typed_rows.get(ROW_ORDER, [])):
             requests.append(
                 {
                     "repeatCell": {
@@ -512,10 +537,51 @@ class GoogleSheetsGateway:
                         },
                         "cell": {
                             "userEnteredFormat": {
-                                "backgroundColorStyle": {"rgbColor": self._hex_color("#F3F8FC")}
+                                "backgroundColorStyle": {
+                                    "rgbColor": self._hex_color("#F3F8FC" if order_index % 2 else "#FFFFFF")
+                                },
+                                "borders": {
+                                    "bottom": {
+                                        "style": "SOLID",
+                                        "colorStyle": {"rgbColor": self._hex_color("#D9E0E7")},
+                                    }
+                                },
                             }
                         },
-                        "fields": "userEnteredFormat.backgroundColorStyle",
+                        "fields": "userEnteredFormat(backgroundColorStyle,borders.bottom)",
+                    }
+                }
+            )
+
+        for group_rows in order_groups.values():
+            if len(group_rows) < 2:
+                continue
+            requests.append(
+                {
+                    "updateBorders": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": min(group_rows) - 1,
+                            "endRowIndex": max(group_rows),
+                            "startColumnIndex": 0,
+                            "endColumnIndex": len(BUSINESS_HEADERS),
+                        },
+                        "top": {
+                            "style": "SOLID_MEDIUM",
+                            "colorStyle": {"rgbColor": self._hex_color("#000000")},
+                        },
+                        "bottom": {
+                            "style": "SOLID_MEDIUM",
+                            "colorStyle": {"rgbColor": self._hex_color("#000000")},
+                        },
+                        "left": {
+                            "style": "SOLID_MEDIUM",
+                            "colorStyle": {"rgbColor": self._hex_color("#000000")},
+                        },
+                        "right": {
+                            "style": "SOLID_MEDIUM",
+                            "colorStyle": {"rgbColor": self._hex_color("#000000")},
+                        },
                     }
                 }
             )
@@ -708,9 +774,7 @@ class GoogleSheetsGateway:
             order = order_by_key.get(key)
             customer = ""
             if order:
-                customer = ", ".join(
-                    dict.fromkeys(part.strip() for part in (order.city, order.customer_name) if part.strip())
-                )
+                customer = customer_display(order.city, order.customer_name)
             for item_index, (row_number, row) in enumerate(sheet_rows):
                 if order and order.tracking_number:
                     current = row[COLUMNS.tracking_number - 1].strip() if len(row) >= COLUMNS.tracking_number else ""
@@ -725,6 +789,10 @@ class GoogleSheetsGateway:
                     current = row[COLUMNS.product_code - 1].strip() if len(row) >= COLUMNS.product_code else ""
                     if current != product_code:
                         updates.append({"range": f"I{row_number}", "values": [[product_code]]})
+                if order and order.payment_method:
+                    current = row[COLUMNS.payment_method - 1].strip() if len(row) >= COLUMNS.payment_method else ""
+                    if current != order.payment_method:
+                        updates.append({"range": f"O{row_number}", "values": [[order.payment_method]]})
                 formula = f"=(L{row_number}-Q{row_number})*K{row_number}"
                 current_formula = row[COLUMNS.markup - 1].strip() if len(row) >= COLUMNS.markup else ""
                 if current_formula != formula:
@@ -742,20 +810,47 @@ class GoogleSheetsGateway:
         sender_default: str,
         operational_day: date,
     ) -> int:
-        if not orders:
-            return 0
-        existing_values = self.worksheet.get_all_values()
-        start_row = max(self.header_row + 1, len(existing_values) + 1)
-        rows: list[list[Any]] = []
-        merge_requests: list[dict[str, Any]] = []
-        formula_updates: list[dict[str, Any]] = []
-        current_row = start_row
+        existing_values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        groups: dict[str, list[list[Any]]] = {}
+        group_days: dict[str, date] = {}
+        group_sort_values: dict[str, str] = {}
 
+        for row in existing_values[self.header_row :]:
+            padded: list[Any] = list(row[: COLUMNS.operational_date]) + [""] * max(
+                0, COLUMNS.operational_date - len(row)
+            )
+            row_type = str(padded[COLUMNS.row_type - 1]).strip()
+            if row_type != ROW_ORDER:
+                continue
+            key = str(padded[COLUMNS.sync_key - 1]).strip().casefold()
+            order_day = parse_order_day(padded[COLUMNS.order_date - 1])
+            tracking = normalize_tracking_number(padded[COLUMNS.tracking_number - 1])
+            if not key or not order_day or not tracking:
+                continue
+            padded[COLUMNS.tracking_number - 1] = tracking
+            padded[COLUMNS.customer - 1] = clean_customer_display(padded[COLUMNS.customer - 1])
+            if not str(padded[COLUMNS.payment_method - 1]).strip() and str(
+                padded[COLUMNS.source - 1]
+            ).casefold() == "rozetka":
+                padded[COLUMNS.payment_method - 1] = "наложка"
+            padded[COLUMNS.row_type - 1] = ROW_ORDER
+            padded[COLUMNS.operational_date - 1] = sheet_serial(order_day)
+            groups.setdefault(key, []).append(padded)
+            group_days[key] = order_day
+            group_sort_values[key] = str(padded[COLUMNS.order_date - 1])
+
+        existing_keys = set(groups)
+        added_rows = 0
         for order in orders:
-            order_start = current_row
-            shipment_status = shipment_statuses.get(order.tracking_number)
+            key = order.sync_key.casefold()
+            if key in existing_keys:
+                continue
+            shipment_status = shipment_statuses.get(extract_ttn(order.tracking_number)) or shipment_statuses.get(
+                order.tracking_number
+            )
             prepayment = parse_prepayment(order.note)
             sender = order.sender.strip() or sender_default
+            order_rows: list[list[Any]] = []
             for item in order.items:
                 row: list[Any] = [""] * COLUMNS.operational_date
                 row[COLUMNS.source - 1] = order.source
@@ -767,7 +862,7 @@ class GoogleSheetsGateway:
                 )
                 row[COLUMNS.order_date - 1] = order.created_at.strftime("%d.%m.%Y %H:%M")
                 row[COLUMNS.order_number - 1] = order.external_id
-                row[COLUMNS.customer - 1] = ", ".join(part for part in (order.city, order.customer_name) if part)
+                row[COLUMNS.customer - 1] = customer_display(order.city, order.customer_name)
                 row[COLUMNS.phone - 1] = order.phone
                 row[COLUMNS.product - 1] = item.name
                 row[COLUMNS.product_code - 1] = item.product_code
@@ -776,48 +871,135 @@ class GoogleSheetsGateway:
                 row[COLUMNS.unit_price - 1] = decimal_for_sheet(item.unit_price)
                 row[COLUMNS.line_total - 1] = decimal_for_sheet(item.line_total)
                 row[COLUMNS.order_total - 1] = decimal_for_sheet(order.total)
-                row[COLUMNS.payment_method - 1] = order.payment_method
+                row[COLUMNS.payment_method - 1] = order.payment_method or (
+                    "наложка" if order.source.casefold() == "rozetka" else ""
+                )
                 row[COLUMNS.prepayment - 1] = decimal_for_sheet(prepayment) if prepayment > Decimal(0) else ""
                 row[COLUMNS.sync_key - 1] = order.sync_key
                 row[COLUMNS.row_type - 1] = ROW_ORDER
-                row[COLUMNS.operational_date - 1] = sheet_serial(operational_day)
-                rows.append(row)
-                formula_updates.append(
-                    {
-                        "range": rowcol_to_a1(current_row, COLUMNS.markup),
-                        "values": [[f"=(L{current_row}-Q{current_row})*K{current_row}"]],
-                    }
-                )
-                current_row += 1
+                row[COLUMNS.operational_date - 1] = sheet_serial(order.created_at.date())
+                order_rows.append(row)
+            if order_rows:
+                groups[key] = order_rows
+                group_days[key] = order.created_at.date()
+                group_sort_values[key] = order.created_at.strftime("%d.%m.%Y %H:%M")
+                existing_keys.add(key)
+                added_rows += len(order_rows)
 
-            if current_row - order_start > 1:
-                for column in (COLUMNS.order_number, COLUMNS.order_total):
-                    merge_requests.append(
-                        {
-                            "mergeCells": {
-                                "range": {
-                                    "sheetId": self.worksheet.id,
-                                    "startRowIndex": order_start - 1,
-                                    "endRowIndex": current_row - 1,
-                                    "startColumnIndex": column - 1,
-                                    "endColumnIndex": column,
-                                },
-                                "mergeType": "MERGE_ALL",
+        earliest_day = min([operational_day, *group_days.values()])
+        groups_by_day: dict[date, list[tuple[str, list[list[Any]]]]] = {}
+        for key, group in groups.items():
+            groups_by_day.setdefault(group_days[key], []).append((key, group))
+        for day_groups in groups_by_day.values():
+            day_groups.sort(key=lambda pair: (group_sort_values[pair[0]], pair[0]))
+
+        rows: list[list[Any]] = []
+        merge_requests: list[dict[str, Any]] = []
+        report_rows: list[tuple[int, str, date]] = []
+        current_day = earliest_day
+        current_month: tuple[int, int] | None = None
+        while current_day <= operational_day:
+            month = (current_day.year, current_day.month)
+            if month != current_month:
+                month_row = [""] * COLUMNS.operational_date
+                month_row[0] = "Місяць"
+                month_row[1] = month_period_label(current_day)
+                month_row[COLUMNS.row_type - 1] = ROW_MONTH
+                month_row[COLUMNS.operational_date - 1] = sheet_serial(current_day.replace(day=1))
+                rows.extend([month_row, [""] * COLUMNS.operational_date])
+                current_month = month
+
+            day_row = [""] * COLUMNS.operational_date
+            day_row[0] = "Дата дня"
+            day_row[1] = sheet_serial(current_day)
+            day_row[COLUMNS.row_type - 1] = ROW_DAY
+            day_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)
+            rows.extend([day_row, list(ALL_HEADERS)])
+
+            for _, group in groups_by_day.get(current_day, []):
+                order_start = len(rows) + 1
+                first_order_number = group[0][COLUMNS.order_number - 1]
+                first_order_total = group[0][COLUMNS.order_total - 1]
+                for item_index, row in enumerate(group):
+                    final_row = len(rows) + 1
+                    row[COLUMNS.markup - 1] = f"=(L{final_row}-Q{final_row})*K{final_row}"
+                    if item_index:
+                        row[COLUMNS.order_number - 1] = ""
+                        row[COLUMNS.order_total - 1] = ""
+                    else:
+                        row[COLUMNS.order_number - 1] = first_order_number
+                        row[COLUMNS.order_total - 1] = first_order_total
+                    rows.append(row)
+                order_end = len(rows)
+                if order_end > order_start:
+                    for column in (COLUMNS.order_number, COLUMNS.order_total):
+                        merge_requests.append(
+                            {
+                                "mergeCells": {
+                                    "range": {
+                                        "sheetId": self.worksheet.id,
+                                        "startRowIndex": order_start - 1,
+                                        "endRowIndex": order_end,
+                                        "startColumnIndex": column - 1,
+                                        "endColumnIndex": column,
+                                    },
+                                    "mergeType": "MERGE_ALL",
+                                }
+                            }
+                        )
+
+            if current_day < operational_day:
+                labels = {
+                    ROW_REPORT_DAY: f"Підсумок за {current_day:%d.%m.%Y}",
+                    ROW_REPORT_MTD: f"Разом за {current_day.day} дн. місяця",
+                    ROW_REPORT_FORECAST: "Прогноз на місяць",
+                }
+                for index, row_type in enumerate((ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST)):
+                    if index:
+                        rows.append([""] * COLUMNS.operational_date)
+                    report_row = [""] * COLUMNS.operational_date
+                    report_row[0] = labels[row_type]
+                    report_row[COLUMNS.row_type - 1] = row_type
+                    report_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)
+                    rows.append(report_row)
+                    report_rows.append((len(rows), row_type, current_day))
+
+            if current_day < operational_day:
+                rows.extend([[""] * COLUMNS.operational_date for _ in range(4)])
+            current_day += timedelta(days=1)
+
+        last_used_row = len(rows)
+        for row_number, row_type, report_day in report_rows:
+            formulas = report_formulas(report_day, first_data_row=1, last_data_row=last_used_row)
+            for column, formula in formulas[row_type].items():
+                rows[row_number - 1][column - 1] = formula
+
+        if last_used_row > self.worksheet.row_count:
+            self.worksheet.add_rows(last_used_row - self.worksheet.row_count)
+        self.spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "unmergeCells": {
+                            "range": {
+                                "sheetId": self.worksheet.id,
+                                "startRowIndex": 0,
+                                "endRowIndex": self.worksheet.row_count,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": COLUMNS.operational_date,
                             }
                         }
-                    )
-
-        end_row = start_row + len(rows) - 1
-        if end_row > self.worksheet.row_count:
-            self.worksheet.add_rows(end_row - self.worksheet.row_count)
+                    }
+                ]
+            }
+        )
+        self.worksheet.batch_clear([f"A1:W{self.worksheet.row_count}"])
         self.worksheet.update(
             values=rows,
-            range_name=f"A{start_row}:W{end_row}",
-            raw=True,
+            range_name=f"A1:W{last_used_row}",
+            raw=False,
         )
-        if formula_updates:
-            self.worksheet.batch_update(formula_updates, raw=False)
         if merge_requests:
             self.spreadsheet.batch_update({"requests": merge_requests})
-        self._apply_professional_formatting(end_row)
-        return len(rows)
+        self._apply_professional_formatting(last_used_row)
+        return added_rows
