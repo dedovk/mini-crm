@@ -14,7 +14,8 @@ through GitHub Actions.
 - Tracking numbers preserve the marketplace value and support Nova Poshta numbers with
   spaces, Rozetka Delivery `RMP-...`, Ukrposhta and hyphenated Meest identifiers. Only
   14-digit Nova Poshta numbers are sent to the Nova Poshta tracking API.
-- Column I contains the platform product code/ID rather than the seller SKU or price-list ID.
+- Column I contains the marketplace product code. For Prom.ua this is the exact
+  `products[].sku` value shown as `Артикул` in the seller cabinet.
 - Monetary fields are numeric and do not contain `грн`.
 - Duplicate key is `source:order_id`; it is stored in hidden column U (`Sync Key`).
 - Nova Poshta statuses are refreshed for every non-final TTN already present in the sheet.
@@ -22,6 +23,8 @@ through GitHub Actions.
 - A note such as `перед - 500` is parsed into numeric prepayment `500`.
 - Existing manual cost, advertising and manager-note cells are never overwritten.
 - Markup in column R is created as `(unit price - cost) * quantity`.
+- Prom.ua ProSale commission is written to advertising expenses in column S from
+  `prosale_commission.value` (with `cpa_commission.amount` as a compatibility fallback).
 - Existing order rows are refreshed from their source for tracking number, combined
   `city, surname first name`, product code, payment method and the markup formula without
   overwriting manual costs.
@@ -113,8 +116,10 @@ concurrency group prevents overlapping writes.
 ## Prom.ua
 
 The client uses `GET /orders/list` with `Authorization: Bearer ...`, handles pagination,
-normalizes product rows and retains only orders containing a 14-digit TTN. It scans a
-30-day lookback window by default; duplicate filtering makes the overlap safe.
+normalizes product rows and retains only orders containing a supported TTN. Prom prices
+such as `1 149 грн` are converted to numeric values, the product code comes from `sku`,
+and the ProSale commission is recorded as advertising expense. It scans a 30-day
+lookback window by default; duplicate filtering makes the overlap safe.
 
 ## Rozetka
 
