@@ -45,6 +45,12 @@ def nested_value(mapping: dict[str, Any], paths: Iterable[tuple[str, ...]], defa
     return default
 
 
+def display_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(first_value(value, "name_ua", "name", "title", "region_title", default="")).strip()
+    return str(value or "").strip()
+
+
 def normalize_phone(value: Any) -> str:
     digits = re.sub(r"\D", "", str(value or ""))
     digits = digits.removeprefix("00")

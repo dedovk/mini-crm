@@ -41,6 +41,30 @@ def test_rozetka_normalizer_creates_item_rows() -> None:
     assert order.items[0].sku == "SKU-10"
 
 
+def test_rozetka_normalizer_extracts_city_name_from_delivery_object() -> None:
+    client = RozetkaClient(
+        HttpClient(max_retries=0),
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    order = client._normalize(
+        {
+            "id": 1,
+            "created": "2026-08-01 10:20:59",
+            "cost": 100,
+            "ttn": "20451234567890",
+            "delivery": {"city": {"id": 330, "name": "Київ"}},
+            "purchases": [{"item_name": "Товар", "quantity": 1, "price": 100}],
+        }
+    )
+
+    assert order.city == "Київ"
+
+
 def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
     client = OpenCartClient(
         HttpClient(max_retries=0),

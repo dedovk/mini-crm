@@ -10,6 +10,7 @@ from crm_sync.models import Order, OrderItem
 from crm_sync.utils import (
     classify_payment,
     decimal_value,
+    display_text,
     extract_ttn,
     first_value,
     nested_value,
@@ -171,7 +172,7 @@ class RozetkaClient:
                     ),
                 )
             ),
-            city=str(first_value(locality, "title", "name_ua", "name", default=first_value(delivery, "city"))),
+            city=display_text(first_value(locality, "title", "name_ua", "name", default=first_value(delivery, "city"))),
             phone=normalize_phone(first_value(raw, "user_phone", default=first_value(user, "phone"))),
             tracking_number=extract_ttn(first_value(raw, "ttn"), first_value(delivery, "ttn"), note),
             total=decimal_value(first_value(raw, "cost_with_discount", "cost", "amount_with_discount", "amount")),
