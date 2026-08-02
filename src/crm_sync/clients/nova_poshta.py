@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.models import ShipmentStatus
-from crm_sync.utils import first_value
+from crm_sync.utils import extract_ttn, first_value
 
 LOGGER = logging.getLogger(__name__)
 
@@ -17,7 +17,13 @@ class NovaPoshtaClient:
         self.url = url
 
     def get_statuses(self, tracking_numbers: Iterable[str]) -> dict[str, ShipmentStatus]:
-        numbers = list(dict.fromkeys(number for number in tracking_numbers if number))
+        numbers = list(
+            dict.fromkeys(
+                normalized
+                for value in tracking_numbers
+                if (normalized := extract_ttn(value))
+            )
+        )
         if not numbers or not self.api_key:
             if numbers and not self.api_key:
                 LOGGER.warning("Nova Poshta status update skipped: NP_API_TOKEN is not configured")

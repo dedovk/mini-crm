@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 from gspread.utils import rowcol_to_a1
 
 from crm_sync.models import Order, ShipmentStatus
-from crm_sync.utils import decimal_for_sheet, parse_prepayment
+from crm_sync.utils import decimal_for_sheet, extract_ttn, parse_prepayment
 
 LOGGER = logging.getLogger(__name__)
 
@@ -171,7 +171,8 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values()
         numbers: list[str] = []
         for row in values[self.header_row :]:
-            tracking = row[COLUMNS.tracking_number - 1].strip() if len(row) >= COLUMNS.tracking_number else ""
+            raw_tracking = row[COLUMNS.tracking_number - 1].strip() if len(row) >= COLUMNS.tracking_number else ""
+            tracking = extract_ttn(raw_tracking)
             status = row[COLUMNS.shipment_status - 1].strip().casefold() if len(row) >= COLUMNS.shipment_status else ""
             if tracking and not self._is_final_status(status):
                 numbers.append(tracking)
@@ -187,7 +188,8 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values()
         updates: list[dict[str, Any]] = []
         for row_number, row in enumerate(values[self.header_row :], start=self.header_row + 1):
-            tracking = row[COLUMNS.tracking_number - 1].strip() if len(row) >= COLUMNS.tracking_number else ""
+            raw_tracking = row[COLUMNS.tracking_number - 1].strip() if len(row) >= COLUMNS.tracking_number else ""
+            tracking = extract_ttn(raw_tracking)
             status = statuses.get(tracking)
             if not status:
                 continue
