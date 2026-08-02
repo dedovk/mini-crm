@@ -1,0 +1,67 @@
+name: Marketplace CRM sync
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Fetch and validate without writing to Google Sheets"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: marketplace-crm-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PYTHONUNBUFFERED: "1"
+      GOOGLE_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}
+      GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+      GOOGLE_WORKSHEET_NAME: ${{ secrets.GOOGLE_WORKSHEET_NAME }}
+      GOOGLE_HEADER_ROW: "4"
+      PROM_API_TOKEN: ${{ secrets.PROM_API_TOKEN }}
+      PROM_API_BASE_URL: "https://my.prom.ua/api/v1"
+      ROZETKA_API_TOKEN: ${{ secrets.ROZETKA_API_TOKEN }}
+      ROZETKA_USERNAME: ${{ secrets.ROZETKA_USERNAME }}
+      ROZETKA_PASSWORD: ${{ secrets.ROZETKA_PASSWORD }}
+      ROZETKA_API_BASE_URL: "https://api.seller.rozetka.com.ua"
+      OPENCART_BASE_URL: ${{ secrets.OPENCART_BASE_URL }}
+      OPENCART_API_KEY: ${{ secrets.OPENCART_API_KEY }}
+      OPENCART_ORDERS_ENDPOINT: "/index.php?route=api/crm_orders"
+      NP_API_TOKEN: ${{ secrets.NP_API_TOKEN }}
+      NOVA_POSHTA_API_URL: "https://api.novaposhta.ua/v2.0/json/"
+      APP_TIMEZONE: ${{ secrets.APP_TIMEZONE }}
+      SYNC_LOOKBACK_DAYS: "30"
+      HTTP_TIMEOUT_SECONDS: "30"
+      HTTP_MAX_RETRIES: "4"
+      LOG_LEVEL: "INFO"
+      SENDER_DEFAULT: ${{ secrets.SENDER_DEFAULT || 'imaxi-com' }}
+      SENDER_OPTIONS: ${{ secrets.SENDER_OPTIONS || 'imaxi-com' }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Synchronize orders
+        run: python -m crm_sync.main
+        env:
+          PYTHONPATH: src
