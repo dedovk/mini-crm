@@ -71,6 +71,8 @@ class RozetkaClient:
         headers = {"Authorization": f"Bearer {token}"}
         page_number = 1
         orders: list[Order] = []
+        payment_keys: set[str] = set()
+        payment_samples: set[str] = set()
         while True:
             payload = self.http.request_json(
                 "GET",
@@ -112,6 +114,19 @@ class RozetkaClient:
             for raw in raw_orders:
                 if not isinstance(raw, dict):
                     continue
+                payment_keys.update(key for key in raw if "payment" in key.casefold())
+                for key in ("payment_type_name", "payment_type", "payment_status", "payment_method"):
+                    value = raw.get(key)
+                    if value is not None and not isinstance(value, (dict, list, tuple, set)):
+                        payment_samples.add(f"{key}={value}")
+                payment = raw.get("payment")
+                if isinstance(payment, dict):
+                    payment_keys.update(f"payment.{key}" for key in payment)
+                    payment_samples.update(
+                        f"payment.{key}={value}"
+                        for key, value in payment.items()
+                        if value is not None and not isinstance(value, (dict, list, tuple, set))
+                    )
                 try:
                     order = self._normalize(raw)
                 except (ValueError, TypeError) as exc:
@@ -124,6 +139,11 @@ class RozetkaClient:
             if page_number >= page_count:
                 break
             page_number += 1
+        LOGGER.info(
+            "Rozetka payment diagnostics: keys=%s values=%s",
+            sorted(payment_keys),
+            sorted(payment_samples),
+        )
         return orders
 
     def _normalize(self, raw: dict[str, Any]) -> Order:
