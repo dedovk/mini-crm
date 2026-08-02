@@ -5,6 +5,7 @@ from crm_sync.sheet_layout import (
     ROW_REPORT_FORECAST,
     clean_customer_display,
     month_period_label,
+    parse_order_day,
     parse_sheet_date,
     report_formulas,
     sheet_serial,
@@ -17,6 +18,7 @@ def test_sheet_dates_and_month_label() -> None:
     assert parse_sheet_date(sheet_serial(day)) == day
     assert parse_sheet_date("03.08.2026") == day
     assert month_period_label(day) == "01.08.2026 — 31.08.2026"
+    assert parse_order_day(sheet_serial(day) + 0.5) == day
 
 
 def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:

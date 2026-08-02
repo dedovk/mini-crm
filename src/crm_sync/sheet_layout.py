@@ -67,9 +67,15 @@ def parse_sheet_date(value: Any) -> date | None:
 
 
 def parse_order_day(value: Any) -> date | None:
+    if isinstance(value, (int, float)):
+        return parse_sheet_date(value)
     raw = str(value or "").strip()
     if not raw:
         return None
+    try:
+        return parse_sheet_date(float(raw))
+    except ValueError:
+        pass
     return parse_sheet_date(raw[:10])
 
 
