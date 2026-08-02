@@ -23,12 +23,14 @@ through GitHub Actions.
 - Existing manual cost, advertising and manager-note cells are never overwritten.
 - Markup in column R is created as `(unit price - cost) * quantity`.
 - Existing order rows are refreshed from their source for tracking number, combined
-  `city, recipient`, product code and the markup formula without overwriting manual costs.
+  `city, surname first name`, product code, payment method and the markup formula without
+  overwriting manual costs.
 - Dropdown validation is configured for Nova Poshta status, sender and payment method.
 - Individual source failures are logged and do not stop the other marketplaces.
-- Orders are grouped into operational-day sections. At local midnight the previous day
-  receives formula-driven daily, month-to-date and month forecast rows, then a new day
-  section is created automatically.
+- Orders are grouped by their actual marketplace order date. At local midnight the previous
+  day receives formula-driven daily, month-to-date and month forecast rows. Summary rows
+  have one blank row between them, and day sections have four blank rows between them.
+- Multi-item orders receive a black outer border across the complete order block.
 - The sheet uses concise Ukrainian headers, centered wrapped content, fixed readable
   column widths, status colors and hidden technical columns U:W.
 
@@ -60,8 +62,8 @@ OPENCART_API_KEY
 Optional sender dropdown configuration:
 
 ```text
-SENDER_DEFAULT=imaxi-com
-SENDER_OPTIONS=imaxi-com,another-sender
+SENDER_DEFAULT=-
+SENDER_OPTIONS=-,imaxi-com,another-sender
 ```
 
 Strongly recommended for Rozetka JWT renewal:
