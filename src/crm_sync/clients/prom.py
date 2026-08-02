@@ -76,7 +76,36 @@ class PromClient:
         normalized: list[Order] = []
         without_tracking = 0
         without_items = 0
+        diagnostic_order_fields: set[str] = set()
+        diagnostic_product_fields: set[str] = set()
+        diagnostic_values: set[str] = set()
+
+        def describe(value: Any) -> str:
+            if isinstance(value, dict):
+                return f"dict({','.join(sorted(value))})"
+            if isinstance(value, list):
+                return f"list[{len(value)}]"
+            return repr(value)[:80]
+
         for raw in raw_orders:
+            diagnostic_order_fields.update(
+                key
+                for key in raw
+                if any(marker in key.casefold() for marker in ("price", "cost", "sum", "sale", "catalog", "commission", "cpa"))
+            )
+            for product in raw.get("products") or []:
+                if not isinstance(product, dict):
+                    continue
+                interesting = {
+                    key
+                    for key in product
+                    if any(
+                        marker in key.casefold()
+                        for marker in ("price", "cost", "sum", "sale", "catalog", "commission", "cpa", "sku", "external", "id")
+                    )
+                }
+                diagnostic_product_fields.update(interesting)
+                diagnostic_values.update(f"product.{key}={describe(product.get(key))}" for key in interesting)
             try:
                 order = self._normalize(raw)
             except (ValueError, TypeError) as exc:
@@ -96,6 +125,12 @@ class PromClient:
             len(raw_orders),
             without_tracking,
             without_items,
+        )
+        LOGGER.info(
+            "Prom commercial diagnostics: order_fields=%s product_fields=%s values=%s",
+            sorted(diagnostic_order_fields),
+            sorted(diagnostic_product_fields),
+            sorted(diagnostic_values)[:40],
         )
         return normalized
 
