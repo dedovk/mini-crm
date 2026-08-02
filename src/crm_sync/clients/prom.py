@@ -109,9 +109,17 @@ class PromClient:
             ),
             raw_orders[0] if raw_orders else {},
         )
-        diagnostic_delivery = (
-            diagnostic_order.get("delivery_data")
-            if isinstance(diagnostic_order.get("delivery_data"), dict)
+        diagnostic_delivery = next(
+            (
+                diagnostic_order.get(key)
+                for key in ("delivery_provider_data", "delivery_data")
+                if isinstance(diagnostic_order.get(key), dict)
+            ),
+            {},
+        )
+        diagnostic_recipient = (
+            diagnostic_order.get("delivery_recipient")
+            if isinstance(diagnostic_order.get("delivery_recipient"), dict)
             else {}
         )
 
@@ -124,11 +132,12 @@ class PromClient:
             }
 
         LOGGER.info(
-            "Prom tracking field diagnostics (masked): order=%s delivery=%s; schema order=%s delivery=%s",
+            "Prom tracking field diagnostics (masked): order=%s delivery=%s; schema order=%s delivery=%s recipient=%s",
             masked_fields(diagnostic_order),
             masked_fields(diagnostic_delivery),
             sorted(diagnostic_order.keys()),
             sorted(diagnostic_delivery.keys()),
+            sorted(diagnostic_recipient.keys()),
         )
         return normalized
 
@@ -159,7 +168,15 @@ class PromClient:
             )
             if value
         )
-        delivery = raw.get("delivery_data") if isinstance(raw.get("delivery_data"), dict) else {}
+        delivery = next(
+            (
+                raw.get(key)
+                for key in ("delivery_provider_data", "delivery_data")
+                if isinstance(raw.get(key), dict)
+            ),
+            {},
+        )
+        recipient = raw.get("delivery_recipient") if isinstance(raw.get("delivery_recipient"), dict) else {}
         payment = raw.get("payment_option")
         payment_text = (
             str(first_value(payment, "name", "title")) if isinstance(payment, dict) else str(payment or "")
@@ -170,8 +187,15 @@ class PromClient:
             if first_value(raw, key)
         )
         ttn = find_tracking_number(
-            first_value(raw, "ttn", "declaration_number", "delivery_declaration_id"),
-            first_value(delivery, "ttn", "declaration_number", "declaration_id"),
+            first_value(
+                delivery,
+                "ttn",
+                "declaration_number",
+                "tracking_number",
+                "document_number",
+                "waybill_number",
+            ),
+            first_value(raw, "ttn", "declaration_number", "tracking_number", "document_number"),
             note,
         )
         return Order(
@@ -180,10 +204,16 @@ class PromClient:
             created_at=parse_datetime(first_value(raw, "date_created", "created_at", "created"), self.timezone),
             customer_name=name or str(first_value(raw, "client_name", "customer_name")),
             city=display_text(
-                nested_value(
-                    raw,
-                    (("delivery_data", "city"), ("delivery_data", "city_name"), ("delivery_address", "city")),
-                    default=first_value(raw, "delivery_city", "city"),
+                first_value(
+                    recipient,
+                    "city_name",
+                    "city",
+                    "locality",
+                    default=nested_value(
+                        raw,
+                        (("delivery_address", "city"), ("delivery_data", "city"), ("delivery_data", "city_name")),
+                        default=first_value(raw, "delivery_city", "city"),
+                    ),
                 )
             ),
             phone=normalize_phone(first_value(raw, "phone", "client_phone", "customer_phone")),
