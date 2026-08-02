@@ -34,15 +34,25 @@ class PromClient:
             LOGGER.info("Prom sync skipped: PROM_API_TOKEN is not configured")
             return []
         raw_orders: list[dict[str, Any]] = []
-        offset = 0
         limit = 100
+        last_id: int | None = None
+        seen_cursors: set[int] = set()
         headers = {"Authorization": f"Bearer {self.token}"}
+        date_from = (since - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        date_to = datetime.now(since.tzinfo).strftime("%Y-%m-%dT%H:%M:%S")
         while True:
+            params: dict[str, Any] = {
+                "limit": limit,
+                "date_from": date_from,
+                "date_to": date_to,
+            }
+            if last_id is not None:
+                params["last_id"] = last_id
             payload = self.http.request_json(
                 "GET",
                 f"{self.base_url}/orders/list",
                 headers=headers,
-                params={"limit": limit, "offset": offset},
+                params=params,
             )
             if not isinstance(payload, dict):
                 raise ApiError("Prom orders response must be an object")
@@ -52,7 +62,14 @@ class PromClient:
             raw_orders.extend(order for order in page if isinstance(order, dict))
             if len(page) < limit:
                 break
-            offset += limit
+            try:
+                next_last_id = min(int(order["id"]) for order in page if isinstance(order, dict)) - 1
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ApiError("Prom pagination requires numeric order IDs") from exc
+            if next_last_id in seen_cursors or (last_id is not None and next_last_id >= last_id):
+                raise ApiError("Prom pagination cursor did not advance")
+            seen_cursors.add(next_last_id)
+            last_id = next_last_id
 
         normalized: list[Order] = []
         for raw in raw_orders:
@@ -127,4 +144,3 @@ class PromClient:
             sender=str(first_value(delivery, "sender", "sender_name")),
             items=items,
         )
-
