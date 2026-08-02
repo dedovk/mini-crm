@@ -11,7 +11,7 @@ TTN_RE = re.compile(r"(?<!\d)((?:\d[\s-]*){14})(?!\d)")
 RMP_RE = re.compile(r"\bRMP-\d+\b", re.IGNORECASE)
 INTERNATIONAL_TRACKING_RE = re.compile(r"\b[A-Z]{2}\d{9}[A-Z]{2}\b", re.IGNORECASE)
 UKRPOST_DOMESTIC_RE = re.compile(r"(?<!\d)\d{13}(?!\d)")
-MEEST_TRACKING_RE = re.compile(r"\b(?:MEEST-)?\d{3}-\d{6}\b", re.IGNORECASE)
+MEEST_TRACKING_RE = re.compile(r"\b(?:MEEST-)?\d{3}-\d{6,9}\b", re.IGNORECASE)
 PREPAYMENT_RE = re.compile(
     r"(?:\bперед\b|\bпредоплат\w*\b)\s*[-:=]?\s*(\d[\d\s]*(?:[.,]\d{1,2})?)",
     re.IGNORECASE,
