@@ -71,16 +71,22 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
                 line_total=Decimal(100),
             )
         ],
+        advertising_cost=Decimal(10),
     )
 
     changed = gateway.refresh_order_details([order])
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
-    assert changed == 4
+    assert changed == 9
     assert updates["B5"] == "RMP-483122083"
     assert updates["F5"] == "Київ, Тестовий Отримувач"
     assert updates["I5"] == "608037110"
+    assert updates["K5"] == 1
+    assert updates["L5"] == 100
+    assert updates["M5"] == 100
+    assert updates["N5"] == 100
     assert updates["R5"] == "=(L5-Q5)*K5"
+    assert updates["S5"] == 10
 
 
 def test_append_orders_rebuilds_sections_by_actual_order_date_with_requested_gaps() -> None:

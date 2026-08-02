@@ -100,8 +100,8 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
         11: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{day_filter})",
         14: f"=SUMIFS({range_for('N')};{order_filter};{day_filter})",
         17: (
-            f"=SUMPRODUCT(({range_for('V')}=\"{ROW_ORDER}\")*"
-            f"({range_for('W')}={day_expr})*IFERROR({range_for('K')}*{range_for('Q')};0))"
+            f"=SUMPRODUCT(N({range_for('V')}=\"{ROW_ORDER}\");"
+            f"N({range_for('W')}={day_expr});N({range_for('K')});N({range_for('Q')}))"
         ),
         18: f"=SUMIFS({range_for('R')};{order_filter};{day_filter})",
         19: f"=SUMIFS({range_for('S')};{order_filter};{day_filter})",
@@ -110,9 +110,9 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
         11: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{mtd_filter})",
         14: f"=SUMIFS({range_for('N')};{order_filter};{mtd_filter})",
         17: (
-            f"=SUMPRODUCT(({range_for('V')}=\"{ROW_ORDER}\")*"
-            f"({range_for('W')}>={month_start})*({range_for('W')}<={day_expr})*"
-            f"IFERROR({range_for('K')}*{range_for('Q')};0))"
+            f"=SUMPRODUCT(N({range_for('V')}=\"{ROW_ORDER}\");"
+            f"N({range_for('W')}>={month_start});N({range_for('W')}<={day_expr});"
+            f"N({range_for('K')});N({range_for('Q')}))"
         ),
         18: f"=SUMIFS({range_for('R')};{order_filter};{mtd_filter})",
         19: f"=SUMIFS({range_for('S')};{order_filter};{mtd_filter})",

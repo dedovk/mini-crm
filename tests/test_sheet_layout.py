@@ -28,6 +28,8 @@ def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
     assert "DATE(2026;8;2)" in formulas[ROW_REPORT_DAY][14]
     assert formulas[ROW_REPORT_FORECAST][11].startswith("=ROUNDUP(")
     assert formulas[ROW_REPORT_FORECAST][14].endswith("*31/2")
+    assert "SUMPRODUCT(N(" in formulas[ROW_REPORT_DAY][17]
+    assert ";N($K$5:$K$30);N($Q$5:$Q$30))" in formulas[ROW_REPORT_DAY][17]
 
 
 def test_clean_customer_display_removes_serialized_rozetka_city() -> None:

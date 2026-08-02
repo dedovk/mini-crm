@@ -31,6 +31,7 @@ from crm_sync.sheet_layout import (
 from crm_sync.utils import (
     customer_display,
     decimal_for_sheet,
+    decimal_value,
     extract_ttn,
     normalize_tracking_number,
     parse_prepayment,
@@ -477,9 +478,9 @@ class GoogleSheetsGateway:
             ROW_MONTH: ("#17365D", "#FFFFFF", 15, 52),
             ROW_DAY: ("#D9EAF7", "#17365D", 12, 32),
             ROW_HEADER: ("#2F75B5", "#FFFFFF", 10, 58),
-            ROW_REPORT_DAY: ("#E2F0D9", "#375623", 10, 32),
-            ROW_REPORT_MTD: ("#DDEBF7", "#1F4E78", 10, 32),
-            ROW_REPORT_FORECAST: ("#FCE4D6", "#9C5700", 10, 32),
+            ROW_REPORT_DAY: ("#E2F0D9", "#375623", 10, 42),
+            ROW_REPORT_MTD: ("#DDEBF7", "#1F4E78", 10, 42),
+            ROW_REPORT_FORECAST: ("#FCE4D6", "#9C5700", 10, 42),
         }
         for row_type, (fill_hex, font_hex, font_size, height) in style_by_type.items():
             for row_number in typed_rows.get(row_type, []):
@@ -785,10 +786,37 @@ class GoogleSheetsGateway:
                     if current != customer:
                         updates.append({"range": f"F{row_number}", "values": [[customer]]})
                 if order and item_index < len(order.items) and order.items[item_index].product_code:
-                    product_code = order.items[item_index].product_code
+                    item = order.items[item_index]
+                    product_code = item.product_code
                     current = row[COLUMNS.product_code - 1].strip() if len(row) >= COLUMNS.product_code else ""
                     if current != product_code:
                         updates.append({"range": f"I{row_number}", "values": [[product_code]]})
+                    numeric_updates = {
+                        COLUMNS.quantity: item.quantity,
+                        COLUMNS.unit_price: item.unit_price,
+                        COLUMNS.line_total: item.line_total,
+                    }
+                    for column, expected in numeric_updates.items():
+                        current = row[column - 1] if len(row) >= column else ""
+                        if decimal_value(current) != expected:
+                            updates.append(
+                                {
+                                    "range": rowcol_to_a1(row_number, column),
+                                    "values": [[decimal_for_sheet(expected)]],
+                                }
+                            )
+                if order and item_index == 0:
+                    current_total = row[COLUMNS.order_total - 1] if len(row) >= COLUMNS.order_total else ""
+                    if decimal_value(current_total) != order.total:
+                        updates.append({"range": f"N{row_number}", "values": [[decimal_for_sheet(order.total)]]})
+                    current_advertising = row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
+                    if order.advertising_cost > 0 and decimal_value(current_advertising) == 0:
+                        updates.append(
+                            {
+                                "range": f"S{row_number}",
+                                "values": [[decimal_for_sheet(order.advertising_cost)]],
+                            }
+                        )
                 if order and order.payment_method:
                     current = row[COLUMNS.payment_method - 1].strip() if len(row) >= COLUMNS.payment_method else ""
                     if current != order.payment_method:
@@ -875,6 +903,8 @@ class GoogleSheetsGateway:
                     "наложка" if order.source.casefold() == "rozetka" else ""
                 )
                 row[COLUMNS.prepayment - 1] = decimal_for_sheet(prepayment) if prepayment > Decimal(0) else ""
+                if not order_rows and order.advertising_cost > 0:
+                    row[COLUMNS.advertising - 1] = decimal_for_sheet(order.advertising_cost)
                 row[COLUMNS.sync_key - 1] = order.sync_key
                 row[COLUMNS.row_type - 1] = ROW_ORDER
                 row[COLUMNS.operational_date - 1] = sheet_serial(order.created_at.date())
@@ -962,7 +992,22 @@ class GoogleSheetsGateway:
                     report_row[COLUMNS.row_type - 1] = row_type
                     report_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)
                     rows.append(report_row)
-                    report_rows.append((len(rows), row_type, current_day))
+                    report_row_number = len(rows)
+                    report_rows.append((report_row_number, row_type, current_day))
+                    merge_requests.append(
+                        {
+                            "mergeCells": {
+                                "range": {
+                                    "sheetId": self.worksheet.id,
+                                    "startRowIndex": report_row_number - 1,
+                                    "endRowIndex": report_row_number,
+                                    "startColumnIndex": 0,
+                                    "endColumnIndex": 2,
+                                },
+                                "mergeType": "MERGE_ALL",
+                            }
+                        }
+                    )
 
             if current_day < operational_day:
                 rows.extend([[""] * COLUMNS.operational_date for _ in range(4)])
