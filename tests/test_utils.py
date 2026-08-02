@@ -4,6 +4,7 @@ import pytest
 
 from crm_sync.utils import (
     classify_payment,
+    customer_display,
     extract_ttn,
     find_tracking_number,
     normalize_phone,
@@ -55,3 +56,11 @@ def test_extract_ttn() -> None:
 )
 def test_find_tracking_number_supports_multiple_carriers(raw: str, expected: str) -> None:
     assert find_tracking_number(raw) == expected
+
+
+def test_tracking_number_rejects_internal_hyphenated_identifier() -> None:
+    assert find_tracking_number("909-46-65") == ""
+
+
+def test_customer_display_keeps_city_surname_and_first_name() -> None:
+    assert customer_display("Самар", "Зенькович Олександр Михайлович") == "Самар, Зенькович Олександр"

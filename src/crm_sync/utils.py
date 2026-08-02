@@ -11,7 +11,7 @@ TTN_RE = re.compile(r"(?<!\d)((?:\d[\s-]*){14})(?!\d)")
 RMP_RE = re.compile(r"\bRMP-\d+\b", re.IGNORECASE)
 INTERNATIONAL_TRACKING_RE = re.compile(r"\b[A-Z]{2}\d{9}[A-Z]{2}\b", re.IGNORECASE)
 UKRPOST_DOMESTIC_RE = re.compile(r"(?<!\d)\d{13}(?!\d)")
-HYPHENATED_TRACKING_RE = re.compile(r"\b[A-Z0-9]{2,}(?:-[A-Z0-9]{2,})+\b", re.IGNORECASE)
+MEEST_TRACKING_RE = re.compile(r"\b(?:MEEST-)?\d{3}-\d{6}\b", re.IGNORECASE)
 PREPAYMENT_RE = re.compile(
     r"(?:\bперед\b|\bпредоплат\w*\b)\s*[-:=]?\s*(\d[\d\s]*(?:[.,]\d{1,2})?)",
     re.IGNORECASE,
@@ -70,6 +70,17 @@ def person_name(value: Any) -> str:
     )
 
 
+def short_person_name(value: Any) -> str:
+    """Keep only surname and first name for the operational sheet."""
+    normalized = person_name(value)
+    return " ".join(normalized.replace(",", " ").split()[:2])
+
+
+def customer_display(city: Any, customer_name: Any) -> str:
+    parts = [display_text(city), short_person_name(customer_name)]
+    return ", ".join(dict.fromkeys(part for part in parts if part))
+
+
 def city_from_address(value: Any) -> str:
     raw = display_text(value)
     if not raw:
@@ -116,12 +127,10 @@ def normalize_tracking_number(value: Any) -> str:
         raw,
         flags=re.IGNORECASE,
     )
-    for pattern in (RMP_RE, INTERNATIONAL_TRACKING_RE, TTN_RE, UKRPOST_DOMESTIC_RE, HYPHENATED_TRACKING_RE):
+    for pattern in (RMP_RE, INTERNATIONAL_TRACKING_RE, TTN_RE, UKRPOST_DOMESTIC_RE, MEEST_TRACKING_RE):
         match = pattern.search(raw)
         if match:
             return " ".join(match.group(0).split()).strip(" ,;.")
-    if re.fullmatch(r"[A-ZА-ЯІЇЄ0-9-]{6,64}", raw, re.IGNORECASE) and re.search(r"\d", raw):
-        return raw.strip(" ,;.")
     return ""
 
 

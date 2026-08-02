@@ -29,6 +29,6 @@ def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
 
 
 def test_clean_customer_display_removes_serialized_rozetka_city() -> None:
-    value = "{'id': 330, 'name': 'Київ', 'name_ua': 'Київ'}, Тестовий Клієнт"
+    value = "{'id': 330, 'name': 'Київ', 'name_ua': 'Київ'}, Тестовий Клієнт По-батькові"
 
     assert clean_customer_display(value) == "Київ, Тестовий Клієнт"

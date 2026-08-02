@@ -3,8 +3,10 @@ from __future__ import annotations
 import ast
 import calendar
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
+
+from crm_sync.utils import customer_display, short_person_name
 
 BUSINESS_HEADERS = (
     "Джерело",
@@ -53,12 +55,22 @@ def parse_sheet_date(value: Any) -> date | None:
     raw = str(value or "").strip()
     if not raw:
         return None
-    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(raw, fmt).date()
-        except ValueError:
-            continue
+    try:
+        if "-" in raw:
+            return date.fromisoformat(raw)
+        separator = "." if "." in raw else "/"
+        day, month, year = (int(part) for part in raw.split(separator))
+        return date(year, month, day)
+    except (TypeError, ValueError):
+        pass
     return None
+
+
+def parse_order_day(value: Any) -> date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return parse_sheet_date(raw[:10])
 
 
 def month_period_label(day: date) -> str:
@@ -109,7 +121,8 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
 def clean_customer_display(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw.startswith("{"):
-        return raw
+        city, separator, name = raw.partition(",")
+        return customer_display(city, name) if separator else short_person_name(raw)
     city_blob, separator, customer = raw.partition("},")
     city_blob = city_blob + ("}" if separator else "")
     city = ""
@@ -121,4 +134,4 @@ def clean_customer_display(value: Any) -> str:
         match = re.search(r"['\"](?:name_ua|name|title)['\"]\s*:\s*['\"]([^'\"]+)", city_blob)
         city = match.group(1).strip() if match else ""
     customer = customer.strip(" ,")
-    return ", ".join(part for part in (city, customer) if part) or raw
+    return customer_display(city, customer) or raw
