@@ -96,6 +96,16 @@ class PromClient:
             without_tracking,
             without_items,
         )
+        normalized_items = [item for order in normalized for item in order.items]
+        LOGGER.info(
+            "Prom normalized commercial data: %s/%s items with price, %s/%s with SKU, %s/%s orders with ProSale cost",
+            sum(item.unit_price > 0 for item in normalized_items),
+            len(normalized_items),
+            sum(bool(item.product_code.strip()) for item in normalized_items),
+            len(normalized_items),
+            sum(order.advertising_cost > 0 for order in normalized),
+            len(normalized),
+        )
         return normalized
 
     def _normalize(self, raw: dict[str, Any]) -> Order:
