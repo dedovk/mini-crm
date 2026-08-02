@@ -44,7 +44,6 @@ class SyncService:
         if not self.dry_run:
             self.sheets.prepare_daily_layout(now.date())
         existing_keys = self.sheets.read_existing_sync_keys()
-        pending_ttns = self.sheets.pending_tracking_numbers()
         since = now - timedelta(days=self.lookback_days)
 
         fetched: list[Order] = []
@@ -56,6 +55,11 @@ class SyncService:
                 continue
             LOGGER.info("%s returned %s eligible order(s)", source.source, len(source_orders))
             fetched.extend(source_orders)
+
+        refreshed = 0
+        if not self.dry_run:
+            refreshed = self.sheets.refresh_order_details(fetched)
+        pending_ttns = self.sheets.pending_tracking_numbers()
 
         unique_orders: list[Order] = []
         run_keys: set[str] = set()
@@ -85,4 +89,9 @@ class SyncService:
             sender_default=self.sender_default,
             operational_day=now.date(),
         )
-        LOGGER.info("Sync completed: %s status cell(s) updated, %s item row(s) appended", updated, appended_rows)
+        LOGGER.info(
+            "Sync completed: %s detail/formula cell(s) refreshed, %s status cell(s) updated, %s item row(s) appended",
+            refreshed,
+            updated,
+            appended_rows,
+        )

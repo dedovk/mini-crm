@@ -51,6 +51,7 @@ NOVA_POSHTA_STATUS_OPTIONS = (
     "Повертається відправнику",
     "Повернуто відправнику",
     "Невідомо",
+    "Інший перевізник",
 )
 
 
@@ -64,7 +65,7 @@ class SheetColumns:
     customer: int = 6
     phone: int = 7
     product: int = 8
-    sku: int = 9
+    product_code: int = 9
     sender: int = 10
     quantity: int = 11
     unit_price: int = 12
@@ -524,7 +525,7 @@ class GoogleSheetsGateway:
             COLUMNS.order_date: ("DATE_TIME", "dd.mm.yyyy hh:mm"),
             COLUMNS.order_number: ("TEXT", "@"),
             COLUMNS.phone: ("TEXT", "@"),
-            COLUMNS.sku: ("TEXT", "@"),
+            COLUMNS.product_code: ("TEXT", "@"),
             COLUMNS.quantity: ("NUMBER", "0"),
             COLUMNS.unit_price: ("NUMBER", "#,##0.00"),
             COLUMNS.line_total: ("NUMBER", "#,##0.00"),
@@ -690,6 +691,49 @@ class GoogleSheetsGateway:
             self.worksheet.batch_update(updates, raw=True)
         return len(updates)
 
+    def refresh_order_details(self, orders: list[Order]) -> int:
+        order_by_key = {order.sync_key.casefold(): order for order in orders}
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        rows_by_key: dict[str, list[tuple[int, list[str]]]] = {}
+        for row_number, row in enumerate(values[self.header_row :], start=self.header_row + 1):
+            row_type = row[COLUMNS.row_type - 1].strip() if len(row) >= COLUMNS.row_type else ""
+            if row_type != ROW_ORDER:
+                continue
+            key = row[COLUMNS.sync_key - 1].strip().casefold() if len(row) >= COLUMNS.sync_key else ""
+            if key:
+                rows_by_key.setdefault(key, []).append((row_number, row))
+
+        updates: list[dict[str, Any]] = []
+        for key, sheet_rows in rows_by_key.items():
+            order = order_by_key.get(key)
+            customer = ""
+            if order:
+                customer = ", ".join(
+                    dict.fromkeys(part.strip() for part in (order.city, order.customer_name) if part.strip())
+                )
+            for item_index, (row_number, row) in enumerate(sheet_rows):
+                if order and order.tracking_number:
+                    current = row[COLUMNS.tracking_number - 1].strip() if len(row) >= COLUMNS.tracking_number else ""
+                    if current != order.tracking_number:
+                        updates.append({"range": f"B{row_number}", "values": [[order.tracking_number]]})
+                if customer:
+                    current = row[COLUMNS.customer - 1].strip() if len(row) >= COLUMNS.customer else ""
+                    if current != customer:
+                        updates.append({"range": f"F{row_number}", "values": [[customer]]})
+                if order and item_index < len(order.items) and order.items[item_index].product_code:
+                    product_code = order.items[item_index].product_code
+                    current = row[COLUMNS.product_code - 1].strip() if len(row) >= COLUMNS.product_code else ""
+                    if current != product_code:
+                        updates.append({"range": f"I{row_number}", "values": [[product_code]]})
+                formula = f"=(L{row_number}-Q{row_number})*K{row_number}"
+                current_formula = row[COLUMNS.markup - 1].strip() if len(row) >= COLUMNS.markup else ""
+                if current_formula != formula:
+                    updates.append({"range": f"R{row_number}", "values": [[formula]]})
+
+        if updates:
+            self.worksheet.batch_update(updates, raw=False)
+        return len(updates)
+
     def append_orders(
         self,
         orders: list[Order],
@@ -716,13 +760,17 @@ class GoogleSheetsGateway:
                 row: list[Any] = [""] * COLUMNS.operational_date
                 row[COLUMNS.source - 1] = order.source
                 row[COLUMNS.tracking_number - 1] = order.tracking_number
-                row[COLUMNS.shipment_status - 1] = shipment_status.status if shipment_status else "Невідомо"
+                row[COLUMNS.shipment_status - 1] = (
+                    shipment_status.status
+                    if shipment_status
+                    else ("Невідомо" if extract_ttn(order.tracking_number) else "Інший перевізник")
+                )
                 row[COLUMNS.order_date - 1] = order.created_at.strftime("%d.%m.%Y %H:%M")
                 row[COLUMNS.order_number - 1] = order.external_id
                 row[COLUMNS.customer - 1] = ", ".join(part for part in (order.city, order.customer_name) if part)
                 row[COLUMNS.phone - 1] = order.phone
                 row[COLUMNS.product - 1] = item.name
-                row[COLUMNS.sku - 1] = item.sku
+                row[COLUMNS.product_code - 1] = item.product_code
                 row[COLUMNS.sender - 1] = sender
                 row[COLUMNS.quantity - 1] = decimal_for_sheet(item.quantity)
                 row[COLUMNS.unit_price - 1] = decimal_for_sheet(item.unit_price)
