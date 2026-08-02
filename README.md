@@ -11,6 +11,10 @@ through GitHub Actions.
   the product rows of one order.
 - Dates are converted to `Europe/Kyiv` and written as `DD.MM.YYYY HH:MM`.
 - Phones are written as text in `+380...` format.
+- Tracking numbers preserve the marketplace value and support Nova Poshta numbers with
+  spaces, Rozetka Delivery `RMP-...`, Ukrposhta and hyphenated Meest identifiers. Only
+  14-digit Nova Poshta numbers are sent to the Nova Poshta tracking API.
+- Column I contains the platform product code/ID rather than the seller SKU or price-list ID.
 - Monetary fields are numeric and do not contain `грн`.
 - Duplicate key is `source:order_id`; it is stored in hidden column U (`Sync Key`).
 - Nova Poshta statuses are refreshed for every non-final TTN already present in the sheet.
@@ -18,6 +22,8 @@ through GitHub Actions.
 - A note such as `перед - 500` is parsed into numeric prepayment `500`.
 - Existing manual cost, advertising and manager-note cells are never overwritten.
 - Markup in column R is created as `(unit price - cost) * quantity`.
+- Existing order rows are refreshed from their source for tracking number, combined
+  `city, recipient`, product code and the markup formula without overwriting manual costs.
 - Dropdown validation is configured for Nova Poshta status, sender and payment method.
 - Individual source failures are logged and do not stop the other marketplaces.
 - Orders are grouped into operational-day sections. At local midnight the previous day
