@@ -69,6 +69,34 @@ def test_rozetka_normalizer_extracts_city_name_from_delivery_object() -> None:
     assert order.tracking_number == "RMP-483122083"
 
 
+def test_rozetka_normalizer_formats_nested_user_name_object() -> None:
+    client = RozetkaClient(
+        HttpClient(max_retries=0),
+        token="token",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+    order = client._normalize(
+        {
+            "id": 42,
+            "created": "2026-08-01T12:00:00+03:00",
+            "user": {
+                "name": {
+                    "first_name": "Олександр",
+                    "last_name": "Зенькович",
+                    "second_name": "Михайлович",
+                }
+            },
+            "delivery": {"city": {"name": "Самар"}, "ttn": "20451500957753"},
+            "purchases": [{"item_id": 608037110, "item_name": "Товар", "price": 999, "quantity": 1}],
+        }
+    )
+
+    assert order.customer_name == "Зенькович Олександр Михайлович"
+
+
 def test_prom_normalizer_uses_product_id_as_product_code() -> None:
     client = PromClient(
         HttpClient(max_retries=0),

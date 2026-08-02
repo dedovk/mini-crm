@@ -16,6 +16,7 @@ from crm_sync.utils import (
     nested_value,
     normalize_phone,
     parse_datetime,
+    person_name,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -165,42 +166,28 @@ class RozetkaClient:
         delivery = raw.get("delivery") if isinstance(raw.get("delivery"), dict) else {}
         locality = delivery.get("locality") if isinstance(delivery.get("locality"), dict) else {}
         recipient = delivery.get("recipient") if isinstance(delivery.get("recipient"), dict) else {}
-        recipient_name = first_value(
-            raw,
-            "user_title",
-            "recipient_title",
-            "recipient_name",
-            default=first_value(
-                delivery,
+        recipient_name = person_name(
+            first_value(
+                raw,
+                "user_title",
                 "recipient_title",
                 "recipient_name",
-                "contact_person",
-                default=first_value(recipient, "name", "full_name", "title"),
-            ),
+                default=first_value(
+                    delivery,
+                    "recipient_title",
+                    "recipient_name",
+                    "contact_person",
+                    default=first_value(recipient, "name", "full_name", "title"),
+                ),
+            )
         )
+        user_name = person_name(first_value(user, "name", "full_name", "title")) or person_name(user)
         payment_text = str(first_value(raw, "payment_type_name", "payment_type", "payment_status"))
         return Order(
             source=self.source,
             external_id=str(first_value(raw, "id", "order_id")),
             created_at=parse_datetime(first_value(raw, "created", "created_at"), self.timezone),
-            customer_name=str(
-                first_value(
-                    user,
-                    "name",
-                    "full_name",
-                    "title",
-                    default=recipient_name
-                    or " ".join(
-                        part
-                        for part in (
-                            str(user.get("surname", "")),
-                            str(user.get("first_name", "")),
-                            str(user.get("patronymic", "")),
-                        )
-                        if part
-                    ),
-                )
-            ),
+            customer_name=recipient_name or user_name,
             city=display_text(first_value(locality, "title", "name_ua", "name", default=first_value(delivery, "city"))),
             phone=normalize_phone(first_value(raw, "user_phone", default=first_value(user, "phone"))),
             tracking_number=find_tracking_number(

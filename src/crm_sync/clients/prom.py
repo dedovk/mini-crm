@@ -9,9 +9,9 @@ from typing import Any
 from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.models import Order, OrderItem
 from crm_sync.utils import (
+    city_from_address,
     classify_payment,
     decimal_value,
-    city_from_address,
     display_text,
     find_tracking_number,
     first_value,

@@ -55,6 +55,21 @@ def display_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def person_name(value: Any) -> str:
+    """Return a readable person name without leaking serialized API objects."""
+    if not isinstance(value, dict):
+        return str(value or "").strip()
+    for key in ("full_name", "title"):
+        candidate = value.get(key)
+        if candidate and not isinstance(candidate, (dict, list, tuple, set)):
+            return str(candidate).strip()
+    return " ".join(
+        str(value.get(key)).strip()
+        for key in ("last_name", "surname", "first_name", "second_name", "patronymic")
+        if value.get(key) and not isinstance(value.get(key), (dict, list, tuple, set))
+    )
+
+
 def city_from_address(value: Any) -> str:
     raw = display_text(value)
     if not raw:
