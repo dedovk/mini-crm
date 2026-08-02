@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -95,6 +96,39 @@ class PromClient:
             len(raw_orders),
             without_tracking,
             without_items,
+        )
+        diagnostic_order = next(
+            (
+                order
+                for order in raw_orders
+                if any(
+                    token in key.casefold() and value
+                    for key, value in order.items()
+                    for token in ("ttn", "declar", "track", "waybill", "consignment")
+                )
+            ),
+            raw_orders[0] if raw_orders else {},
+        )
+        diagnostic_delivery = (
+            diagnostic_order.get("delivery_data")
+            if isinstance(diagnostic_order.get("delivery_data"), dict)
+            else {}
+        )
+
+        def masked_fields(mapping: dict[str, Any]) -> dict[str, str]:
+            return {
+                key: re.sub(r"[A-Za-zА-Яа-яІіЇїЄє]", "A", re.sub(r"\d", "#", str(value)))[:80]
+                for key, value in mapping.items()
+                if value
+                and any(token in key.casefold() for token in ("ttn", "declar", "track", "waybill", "consignment"))
+            }
+
+        LOGGER.info(
+            "Prom tracking field diagnostics (masked): order=%s delivery=%s; schema order=%s delivery=%s",
+            masked_fields(diagnostic_order),
+            masked_fields(diagnostic_delivery),
+            sorted(diagnostic_order.keys()),
+            sorted(diagnostic_delivery.keys()),
         )
         return normalized
 
