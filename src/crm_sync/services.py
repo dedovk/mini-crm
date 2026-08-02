@@ -39,10 +39,13 @@ class SyncService:
         self.dry_run = dry_run
 
     def run(self) -> None:
+        now = datetime.now(ZoneInfo(self.timezone))
         self.sheets.ensure_schema(apply_changes=not self.dry_run)
+        if not self.dry_run:
+            self.sheets.prepare_daily_layout(now.date())
         existing_keys = self.sheets.read_existing_sync_keys()
         pending_ttns = self.sheets.pending_tracking_numbers()
-        since = datetime.now(ZoneInfo(self.timezone)) - timedelta(days=self.lookback_days)
+        since = now - timedelta(days=self.lookback_days)
 
         fetched: list[Order] = []
         for source in self.sources:
@@ -80,5 +83,6 @@ class SyncService:
             unique_orders,
             statuses,
             sender_default=self.sender_default,
+            operational_day=now.date(),
         )
         LOGGER.info("Sync completed: %s status cell(s) updated, %s item row(s) appended", updated, appended_rows)
