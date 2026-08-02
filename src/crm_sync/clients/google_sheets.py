@@ -446,7 +446,7 @@ class GoogleSheetsGateway:
             )
 
         style_by_type = {
-            ROW_MONTH: ("#17365D", "#FFFFFF", 15, 34),
+            ROW_MONTH: ("#17365D", "#FFFFFF", 15, 52),
             ROW_DAY: ("#D9EAF7", "#17365D", 12, 32),
             ROW_HEADER: ("#2F75B5", "#FFFFFF", 10, 58),
             ROW_REPORT_DAY: ("#E2F0D9", "#375623", 10, 32),
@@ -496,6 +496,26 @@ class GoogleSheetsGateway:
                         },
                     ]
                 )
+                if row_type == ROW_DAY:
+                    requests.append(
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": row_number - 1,
+                                    "endRowIndex": row_number,
+                                    "startColumnIndex": 1,
+                                    "endColumnIndex": 2,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "numberFormat": {"type": "DATE", "pattern": "dd.mm.yyyy"}
+                                    }
+                                },
+                                "fields": "userEnteredFormat.numberFormat",
+                            }
+                        }
+                    )
 
         for row_number in typed_rows.get(ROW_ORDER, []):
             if row_number % 2:
