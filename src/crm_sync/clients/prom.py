@@ -97,61 +97,6 @@ class PromClient:
             without_tracking,
             without_items,
         )
-        diagnostic_order = next(
-            (
-                order
-                for order in raw_orders
-                if any(token in key.casefold() and value for key, value in order.items() for token in ("ttn", "declar", "track", "waybill", "consignment"))
-                or any(
-                    token in key.casefold() and value
-                    for field in (order.get("delivery_provider_data"), order.get("delivery_data"))
-                    if isinstance(field, dict)
-                    for key, value in field.items()
-                    for token in ("ttn", "declar", "track", "waybill", "consignment")
-                )
-            ),
-            raw_orders[0] if raw_orders else {},
-        )
-        diagnostic_delivery = next(
-            (
-                diagnostic_order.get(key)
-                for key in ("delivery_provider_data", "delivery_data")
-                if isinstance(diagnostic_order.get(key), dict)
-            ),
-            {},
-        )
-        diagnostic_recipient = (
-            diagnostic_order.get("delivery_recipient")
-            if isinstance(diagnostic_order.get("delivery_recipient"), dict)
-            else {}
-        )
-        diagnostic_product = next(
-            (product for product in diagnostic_order.get("products", []) if isinstance(product, dict)),
-            {},
-        )
-
-        def masked_fields(mapping: dict[str, Any]) -> dict[str, str]:
-            return {
-                key: re.sub(r"[A-Za-zА-Яа-яІіЇїЄє]", "A", re.sub(r"\d", "#", str(value)))[:80]
-                for key, value in mapping.items()
-                if value
-                and any(token in key.casefold() for token in ("ttn", "declar", "track", "waybill", "consignment"))
-            }
-
-        LOGGER.info(
-            "Prom field diagnostics (masked): order=%s delivery=%s product_ids=%s; schema order=%s delivery=%s recipient=%s product=%s",
-            masked_fields(diagnostic_order),
-            masked_fields(diagnostic_delivery),
-            {
-                key: re.sub(r"\d", "#", str(diagnostic_product.get(key)))[:60]
-                for key in ("product_id", "id", "sku", "external_id")
-                if diagnostic_product.get(key) not in (None, "")
-            },
-            sorted(diagnostic_order.keys()),
-            sorted(diagnostic_delivery.keys()),
-            sorted(diagnostic_recipient.keys()),
-            sorted(diagnostic_product.keys()),
-        )
         return normalized
 
     def _normalize(self, raw: dict[str, Any]) -> Order:
@@ -163,10 +108,16 @@ class PromClient:
             quantity = decimal_value(first_value(product, "quantity", "count", default=1), Decimal(1))
             unit_price = decimal_value(first_value(product, "price", "unit_price"))
             line_total = decimal_value(first_value(product, "total_price", "total", "sum"), quantity * unit_price)
+            product_url = str(first_value(product, "url"))
+            url_code = re.search(r"/p(\d+)(?:-|\.html|$)", product_url)
             items.append(
                 OrderItem(
                     name=str(first_value(product, "name", "title", "product_name")),
-                    product_code=str(first_value(product, "product_id", "id", "sku", "external_id", "article")),
+                    product_code=(
+                        url_code.group(1)
+                        if url_code
+                        else str(first_value(product, "product_id", "id", "external_id", "sku", "article"))
+                    ),
                     quantity=quantity,
                     unit_price=unit_price,
                     line_total=line_total,

@@ -92,8 +92,10 @@ def test_prom_normalizer_uses_product_id_as_product_code() -> None:
             "full_price": 100,
             "products": [
                 {
-                    "id": "608037110",
-                    "sku": "5110513990",
+                    "id": "5110513990",
+                    "external_id": "5110513990",
+                    "sku": "JX27",
+                    "url": "https://example.com/p608037110-tovar.html",
                     "name": "Товар",
                     "quantity": 1,
                     "price": 100,
