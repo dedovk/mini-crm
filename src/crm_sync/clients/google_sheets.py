@@ -706,16 +706,16 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values()
         keys: set[str] = set()
         for row in values[self.header_row :]:
-            row_type = row[COLUMNS.row_type - 1].strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
             if row_type and row_type != ROW_ORDER:
                 continue
-            if len(row) >= COLUMNS.sync_key and row[COLUMNS.sync_key - 1].strip():
-                key = row[COLUMNS.sync_key - 1].strip().casefold()
+            if len(row) >= COLUMNS.sync_key and str(row[COLUMNS.sync_key - 1]).strip():
+                key = str(row[COLUMNS.sync_key - 1]).strip().casefold()
                 if key != "sync key":
                     keys.add(key)
                 continue
-            source = row[COLUMNS.source - 1].strip() if len(row) >= COLUMNS.source else ""
-            order_id = row[COLUMNS.order_number - 1].strip() if len(row) >= COLUMNS.order_number else ""
+            source = str(row[COLUMNS.source - 1]).strip() if len(row) >= COLUMNS.source else ""
+            order_id = str(row[COLUMNS.order_number - 1]).strip() if len(row) >= COLUMNS.order_number else ""
             if source and order_id:
                 keys.add(f"{source.casefold()}:{order_id}")
         return keys
@@ -724,9 +724,17 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values()
         numbers: list[str] = []
         for row in values[self.header_row :]:
-            raw_tracking = row[COLUMNS.tracking_number - 1].strip() if len(row) >= COLUMNS.tracking_number else ""
+            raw_tracking = (
+                str(row[COLUMNS.tracking_number - 1]).strip()
+                if len(row) >= COLUMNS.tracking_number
+                else ""
+            )
             tracking = extract_ttn(raw_tracking)
-            status = row[COLUMNS.shipment_status - 1].strip().casefold() if len(row) >= COLUMNS.shipment_status else ""
+            status = (
+                str(row[COLUMNS.shipment_status - 1]).strip().casefold()
+                if len(row) >= COLUMNS.shipment_status
+                else ""
+            )
             if tracking and not self._is_final_status(status):
                 numbers.append(tracking)
         return list(dict.fromkeys(numbers))
@@ -741,12 +749,20 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values()
         updates: list[dict[str, Any]] = []
         for row_number, row in enumerate(values[self.header_row :], start=self.header_row + 1):
-            raw_tracking = row[COLUMNS.tracking_number - 1].strip() if len(row) >= COLUMNS.tracking_number else ""
+            raw_tracking = (
+                str(row[COLUMNS.tracking_number - 1]).strip()
+                if len(row) >= COLUMNS.tracking_number
+                else ""
+            )
             tracking = extract_ttn(raw_tracking)
             status = statuses.get(tracking)
             if not status:
                 continue
-            current = row[COLUMNS.shipment_status - 1].strip() if len(row) >= COLUMNS.shipment_status else ""
+            current = (
+                str(row[COLUMNS.shipment_status - 1]).strip()
+                if len(row) >= COLUMNS.shipment_status
+                else ""
+            )
             if current != status.status:
                 updates.append(
                     {
@@ -763,10 +779,14 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values(value_render_option="FORMULA")
         rows_by_key: dict[str, list[tuple[int, list[str]]]] = {}
         for row_number, row in enumerate(values[self.header_row :], start=self.header_row + 1):
-            row_type = row[COLUMNS.row_type - 1].strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
             if row_type != ROW_ORDER:
                 continue
-            key = row[COLUMNS.sync_key - 1].strip().casefold() if len(row) >= COLUMNS.sync_key else ""
+            key = (
+                str(row[COLUMNS.sync_key - 1]).strip().casefold()
+                if len(row) >= COLUMNS.sync_key
+                else ""
+            )
             if key:
                 rows_by_key.setdefault(key, []).append((row_number, row))
 
@@ -778,17 +798,25 @@ class GoogleSheetsGateway:
                 customer = customer_display(order.city, order.customer_name)
             for item_index, (row_number, row) in enumerate(sheet_rows):
                 if order and order.tracking_number:
-                    current = row[COLUMNS.tracking_number - 1].strip() if len(row) >= COLUMNS.tracking_number else ""
+                    current = (
+                        str(row[COLUMNS.tracking_number - 1]).strip()
+                        if len(row) >= COLUMNS.tracking_number
+                        else ""
+                    )
                     if current != order.tracking_number:
                         updates.append({"range": f"B{row_number}", "values": [[order.tracking_number]]})
                 if customer:
-                    current = row[COLUMNS.customer - 1].strip() if len(row) >= COLUMNS.customer else ""
+                    current = str(row[COLUMNS.customer - 1]).strip() if len(row) >= COLUMNS.customer else ""
                     if current != customer:
                         updates.append({"range": f"F{row_number}", "values": [[customer]]})
                 if order and item_index < len(order.items) and order.items[item_index].product_code:
                     item = order.items[item_index]
                     product_code = item.product_code
-                    current = row[COLUMNS.product_code - 1].strip() if len(row) >= COLUMNS.product_code else ""
+                    current = (
+                        str(row[COLUMNS.product_code - 1]).strip()
+                        if len(row) >= COLUMNS.product_code
+                        else ""
+                    )
                     if current != product_code:
                         updates.append({"range": f"I{row_number}", "values": [[product_code]]})
                     numeric_updates = {
@@ -818,11 +846,17 @@ class GoogleSheetsGateway:
                             }
                         )
                 if order and order.payment_method:
-                    current = row[COLUMNS.payment_method - 1].strip() if len(row) >= COLUMNS.payment_method else ""
+                    current = (
+                        str(row[COLUMNS.payment_method - 1]).strip()
+                        if len(row) >= COLUMNS.payment_method
+                        else ""
+                    )
                     if current != order.payment_method:
                         updates.append({"range": f"O{row_number}", "values": [[order.payment_method]]})
                 formula = f"=(L{row_number}-Q{row_number})*K{row_number}"
-                current_formula = row[COLUMNS.markup - 1].strip() if len(row) >= COLUMNS.markup else ""
+                current_formula = (
+                    str(row[COLUMNS.markup - 1]).strip() if len(row) >= COLUMNS.markup else ""
+                )
                 if current_formula != formula:
                     updates.append({"range": f"R{row_number}", "values": [[formula]]})
 

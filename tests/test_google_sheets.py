@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 
 from crm_sync.clients.google_sheets import COLUMNS, GoogleSheetsGateway
 from crm_sync.models import Order, OrderItem
@@ -7,7 +8,7 @@ from crm_sync.sheet_layout import ROW_ORDER
 
 
 class StubWorksheet:
-    def __init__(self, values: list[list[str]]) -> None:
+    def __init__(self, values: list[list[Any]]) -> None:
         self.values = values
         self.updates: list[dict] = []
 
@@ -46,6 +47,7 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     rows = [[""] * COLUMNS.operational_date for _ in range(5)]
     rows[4][COLUMNS.row_type - 1] = ROW_ORDER
     rows[4][COLUMNS.sync_key - 1] = "prom:1"
+    rows[4][COLUMNS.tracking_number - 1] = 20451501572223
     worksheet = StubWorksheet(rows)
     gateway = object.__new__(GoogleSheetsGateway)
     gateway.worksheet = worksheet
