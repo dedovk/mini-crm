@@ -69,8 +69,8 @@ OPENCART_API_KEY
 Optional sender dropdown configuration:
 
 ```text
-SENDER_DEFAULT=-
-SENDER_OPTIONS=-,imaxi-com,another-sender
+SENDER_DEFAULT=наш
+SENDER_OPTIONS=imaxi-com,Melad,Melad дроп,наш
 ```
 
 Strongly recommended for Rozetka JWT renewal:

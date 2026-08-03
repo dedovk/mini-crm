@@ -75,15 +75,15 @@ class Settings:
         if not spreadsheet_id or not worksheet_name:
             raise ConfigurationError("GOOGLE_SPREADSHEET_ID and GOOGLE_WORKSHEET_NAME are required")
 
-        sender_default = _env("SENDER_DEFAULT", "-")
+        sender_default = _env("SENDER_DEFAULT", "наш")
         sender_options = tuple(
             dict.fromkeys(
                 value.strip()
-                for value in _env("SENDER_OPTIONS", "-,imaxi-com").split(",")
+                for value in _env("SENDER_OPTIONS", "imaxi-com,Melad,Melad дроп,наш").split(",")
                 if value.strip()
             )
         )
-        sender_options = tuple(dict.fromkeys(("-", *sender_options, sender_default)))
+        sender_options = tuple(dict.fromkeys((*sender_options, sender_default)))
 
         return cls(
             google_service_account_info=credentials,
