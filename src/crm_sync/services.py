@@ -12,6 +12,10 @@ from crm_sync.models import Order
 LOGGER = logging.getLogger(__name__)
 
 
+class SourceSyncError(RuntimeError):
+    """One or more order sources failed after the remaining work was completed."""
+
+
 class OrderSource(Protocol):
     source: str
 
@@ -45,11 +49,13 @@ class SyncService:
         since = now - timedelta(days=self.lookback_days)
 
         fetched: list[Order] = []
+        failed_sources: list[str] = []
         for source in self.sources:
             try:
                 source_orders = source.fetch_orders(since)
             except Exception:
                 LOGGER.exception("%s source failed; other sources will continue", source.source)
+                failed_sources.append(source.source)
                 continue
             LOGGER.info("%s returned %s eligible order(s)", source.source, len(source_orders))
             fetched.extend(source_orders)
@@ -78,6 +84,7 @@ class SyncService:
                 len(unique_orders),
                 len(pending_ttns),
             )
+            self._raise_for_source_failures(failed_sources)
             return
 
         updated = self.sheets.update_shipment_statuses(statuses)
@@ -93,3 +100,10 @@ class SyncService:
             updated,
             appended_rows,
         )
+        self._raise_for_source_failures(failed_sources)
+
+    @staticmethod
+    def _raise_for_source_failures(failed_sources: list[str]) -> None:
+        if failed_sources:
+            names = ", ".join(dict.fromkeys(failed_sources))
+            raise SourceSyncError(f"Order source synchronization failed: {names}")
