@@ -1,6 +1,6 @@
 # Marketplace CRM Sync MVP
 
-Python 3 service that synchronizes orders with created Nova Poshta TTNs from Prom.ua,
+Python 3 service that synchronizes completed orders with created TTNs from Prom.ua,
 Rozetka Seller and ocStore 2.1 into an existing Google Sheet. It runs every 15 minutes
 through GitHub Actions.
 
@@ -9,7 +9,9 @@ through GitHub Actions.
 - One product is written per row. A multi-product order occupies consecutive rows.
 - The marketplace order number (column E) and order total (column N) are merged across
   the product rows of one order.
-- Dates are converted to `Europe/Kyiv` and written as `DD.MM.YYYY HH:MM`.
+- Only marketplace orders in the completed/successful status are imported.
+- Column D contains only the `HH:MM` time when the order became completed; the section
+  date is stored separately and all timestamps are converted to `Europe/Kyiv`.
 - Phones are written as text in `+380...` format.
 - Tracking numbers preserve the marketplace value and support Nova Poshta numbers with
   spaces, Rozetka Delivery `RMP-...`, Ukrposhta and hyphenated Meest identifiers. Only
@@ -30,12 +32,14 @@ through GitHub Actions.
   overwriting manual costs.
 - Dropdown validation is configured for Nova Poshta status, sender and payment method.
 - Individual source failures are logged and do not stop the other marketplaces.
-- Orders are grouped by their actual marketplace order date. At local midnight the previous
+- Orders are grouped by the date when they became completed. At local midnight the previous
   day receives formula-driven daily, month-to-date and month forecast rows. Summary rows
-  have one blank row between them, and day sections have four blank rows between them.
+  are consecutive and place all five KPI labels and values together in columns A:L.
 - Multi-item orders receive a black outer border across the complete order block.
-- The sheet uses concise Ukrainian headers, centered wrapped content, fixed readable
-  column widths, status colors and hidden technical columns U:W.
+- Month and day title rows contain styled `Виділити місяць` / `Виділити день` links that
+  select the corresponding A:T range.
+- The sheet uses compact Ukrainian headers, 8-point body text, fixed narrow widths,
+  status colors and hidden technical columns U:W so all business columns fit horizontally.
 
 ## Google Sheet contract
 
@@ -115,18 +119,22 @@ including TTNs added to older orders. The workflow also supports manual dispatch
 
 ## Prom.ua
 
-The client uses `GET /orders/list` with `Authorization: Bearer ...`, handles pagination,
-normalizes product rows and retains only orders containing a supported TTN. Prom prices
+The client uses `GET /orders/list?status=delivered` with `Authorization: Bearer ...`, handles
+pagination, normalizes product rows and retains only completed orders containing a supported TTN. Prom prices
 such as `1 149 грн` are converted to numeric values, the product code comes from `sku`,
 and the ProSale commission is recorded as advertising expense. Frequent automation scans
 seven days to stay within API limits, while the daily deep reconciliation scans 30 days.
 The HTTP client honors Prom's `Retry-After` response and uses a longer fallback pause for
-rate limits. Duplicate filtering makes both overlaps safe.
+rate limits. Duplicate filtering makes both overlaps safe. Prom's public Order model does
+not expose order-status history, so a newly completed Prom order uses the first polling time
+at which the script sees `delivered`; later runs keep that recorded time stable.
 
 ## Rozetka
 
-The client uses `GET /orders/search` with `expand=user,delivery,purchases,status_data`,
-handles pagination and retains only orders with a TTN. It accepts an existing token and
+The client uses `GET /orders/search` with `types=3` and
+`expand=user,delivery,purchases,status_data`, handles pagination and retains only successfully
+completed orders with a TTN. The API `changed` value supplies the completion time, while an
+available `order_status_history` timestamp takes precedence. It accepts an existing token and
 supports `/site/login` fallback when login/password secrets are configured.
 The current official base URL is `https://api-seller.rozetka.com.ua`; the former
 `api.seller.rozetka.com.ua` hostname serves an expired certificate and is not used.
@@ -138,9 +146,9 @@ controller from [opencart_extension](opencart_extension/README.md) on
 `https://ibox-shop.co.ua/`. The endpoint validates the active ocStore API key from the
 `api` table and only reads orders/products/comments.
 
-The installed Nova Poshta module stores TTNs in the `novaposhta_cn_number` order field.
-The OpenCart normalizer reads this field directly and retains comment/history extraction
-as a fallback.
+The read-only endpoint returns only completed orders and derives `completed_at` from the
+latest history entry for the current completed status. The installed Nova Poshta module
+stores TTNs in the `novaposhta_cn_number` order field; the normalizer reads this field directly.
 
 ## Production rollout
 

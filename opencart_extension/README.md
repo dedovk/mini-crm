@@ -16,6 +16,7 @@ curl -H "X-CRM-API-Key: YOUR_OPENCART_API_KEY" \
   "https://ibox-shop.co.ua/index.php?route=api/crm_orders&changed_from=2026-08-01%2000:00:00"
 ```
 
-The endpoint returns orders, products, order comments and history comments. On the current
-store, the Nova Poshta module stores the TTN in the `novaposhta_cn_number` order field;
-the Python client reads it directly and retains comment/history extraction as a fallback.
+The endpoint returns only completed orders together with products and comments. It exposes
+the latest history timestamp for the current completed status as `completed_at` and never
+writes to the store database. On the current store, the Nova Poshta module stores the TTN in
+the `novaposhta_cn_number` order field; the Python client reads it directly.
