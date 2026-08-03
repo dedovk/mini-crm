@@ -16,6 +16,7 @@ from crm_sync.utils import (
     nested_value,
     normalize_phone,
     parse_datetime,
+    parse_optional_datetime,
     person_name,
 )
 
@@ -79,7 +80,7 @@ class RozetkaClient:
                 params={
                     "page": page_number,
                     "changed_from": since.strftime("%Y-%m-%d"),
-                    "types": 1,
+                    "types": 3,
                     "sort": "-changed",
                     "expand": "user,delivery,purchases,status_data",
                 },
@@ -100,7 +101,7 @@ class RozetkaClient:
                     params={
                         "page": page_number,
                         "changed_from": since.strftime("%Y-%m-%d"),
-                        "types": 1,
+                        "types": 3,
                         "sort": "-changed",
                         "expand": "user,delivery,purchases,status_data",
                     },
@@ -111,6 +112,14 @@ class RozetkaClient:
             raw_orders = content.get("orders") or [] if isinstance(content, dict) else []
             for raw in raw_orders:
                 if not isinstance(raw, dict):
+                    continue
+                status_data = raw.get("status_data") if isinstance(raw.get("status_data"), dict) else {}
+                status_group = first_value(raw, "status_group", default=status_data.get("status_group"))
+                try:
+                    is_completed = int(status_group) == 2
+                except (TypeError, ValueError):
+                    is_completed = False
+                if not is_completed:
                     continue
                 try:
                     order = self._normalize(raw)
@@ -183,10 +192,27 @@ class RozetkaClient:
         )
         user_name = person_name(first_value(user, "name", "full_name", "title")) or person_name(user)
         payment_text = str(first_value(raw, "payment_type_name", "payment_type", "payment_status"))
+        created_at = parse_datetime(first_value(raw, "created", "created_at"), self.timezone)
+        current_status = first_value(raw, "status", default=nested_value(raw, (("status_data", "id"),)))
+        history = raw.get("order_status_history") or []
+        history_timestamp: Any = ""
+        if isinstance(history, list):
+            for entry in reversed(history):
+                if not isinstance(entry, dict):
+                    continue
+                status_id = first_value(entry, "status_id", default=nested_value(entry, (("status", "id"),)))
+                if str(status_id) == str(current_status):
+                    history_timestamp = first_value(entry, "created", "created_at")
+                    break
+        completed_at = parse_optional_datetime(
+            history_timestamp or first_value(raw, "changed", "status_updated_at", "updated_at"),
+            self.timezone,
+        ) or created_at
         return Order(
             source=self.source,
             external_id=str(first_value(raw, "id", "order_id")),
-            created_at=parse_datetime(first_value(raw, "created", "created_at"), self.timezone),
+            created_at=created_at,
+            completed_at=completed_at,
             customer_name=recipient_name or user_name,
             city=display_text(first_value(locality, "title", "name_ua", "name", default=first_value(delivery, "city"))),
             phone=normalize_phone(first_value(raw, "user_phone", default=first_value(user, "phone"))),
@@ -201,5 +227,6 @@ class RozetkaClient:
             payment_method=classify_payment(payment_text, note) or "наложка",
             note=note,
             sender=str(nested_value(raw, (("delivery", "sender", "name"),), default="")),
+            completion_is_exact=bool(history_timestamp),
             items=items,
         )

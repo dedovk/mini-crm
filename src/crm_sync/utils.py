@@ -200,6 +200,15 @@ def parse_datetime(value: Any, timezone: str) -> datetime:
     return parsed.astimezone(zone)
 
 
+def parse_optional_datetime(value: Any, timezone: str) -> datetime | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return parse_datetime(value, timezone)
+    except (TypeError, ValueError):
+        return None
+
+
 def decimal_for_sheet(value: Decimal) -> int | float:
     integral = value.to_integral_value()
     return int(integral) if value == integral else float(value)

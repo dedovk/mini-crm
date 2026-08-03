@@ -16,6 +16,7 @@ from crm_sync.utils import (
     first_value,
     normalize_phone,
     parse_datetime,
+    parse_optional_datetime,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -39,13 +40,15 @@ class PromClient:
         last_id: int | None = None
         seen_cursors: set[int] = set()
         headers = {"Authorization": f"Bearer {self.token}"}
+        observed_at = datetime.now(since.tzinfo)
         date_from = (since - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
-        date_to = datetime.now(since.tzinfo).strftime("%Y-%m-%dT%H:%M:%S")
+        date_to = observed_at.strftime("%Y-%m-%dT%H:%M:%S")
         while True:
             params: dict[str, Any] = {
                 "limit": limit,
                 "date_from": date_from,
                 "date_to": date_to,
+                "status": "delivered",
             }
             if last_id is not None:
                 params["last_id"] = last_id
@@ -73,11 +76,15 @@ class PromClient:
             last_id = next_last_id
 
         normalized: list[Order] = []
+        not_completed = 0
         without_tracking = 0
         without_items = 0
         for raw in raw_orders:
+            if str(raw.get("status", "")).strip().casefold() != "delivered":
+                not_completed += 1
+                continue
             try:
-                order = self._normalize(raw)
+                order = self._normalize(raw, observed_at=observed_at)
             except (ValueError, TypeError) as exc:
                 LOGGER.warning("Prom order skipped because normalization failed: %s", exc)
                 continue
@@ -91,8 +98,9 @@ class PromClient:
                 continue
             normalized.append(order)
         LOGGER.info(
-            "Prom fetched %s raw order(s): %s without tracking number, %s without products",
+            "Prom fetched %s raw order(s): %s not completed, %s without tracking number, %s without products",
             len(raw_orders),
+            not_completed,
             without_tracking,
             without_items,
         )
@@ -108,7 +116,7 @@ class PromClient:
         )
         return normalized
 
-    def _normalize(self, raw: dict[str, Any]) -> Order:
+    def _normalize(self, raw: dict[str, Any], *, observed_at: datetime | None = None) -> Order:
         products = raw.get("products") or raw.get("items") or []
         items: list[OrderItem] = []
         for product in products:
@@ -173,10 +181,17 @@ class PromClient:
             first_value(raw, "ttn", "declaration_number", "tracking_number", "document_number"),
             note,
         )
+        created_at = parse_datetime(first_value(raw, "date_created", "created_at", "created"), self.timezone)
+        exact_completed_at = parse_optional_datetime(
+            first_value(raw, "completed_at", "status_changed_at", "order_status_modified"),
+            self.timezone,
+        )
+        completed_at = exact_completed_at or observed_at or created_at
         return Order(
             source=self.source,
             external_id=str(first_value(raw, "id", "order_id")),
-            created_at=parse_datetime(first_value(raw, "date_created", "created_at", "created"), self.timezone),
+            created_at=created_at,
+            completed_at=completed_at,
             customer_name=recipient_name or client_name or str(first_value(raw, "client_name", "customer_name")),
             city=display_text(first_value(recipient, "city_name", "city", "locality"))
             or city_from_address(first_value(delivery, "recipient_address"))
@@ -187,6 +202,7 @@ class PromClient:
             payment_method=classify_payment(payment_text, note),
             note=note,
             sender=str(first_value(delivery, "sender", "sender_name")),
+            completion_is_exact=exact_completed_at is not None,
             items=items,
             advertising_cost=advertising_cost,
         )

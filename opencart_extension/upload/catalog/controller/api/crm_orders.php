@@ -45,6 +45,8 @@ class ControllerApiCrmOrders extends Controller {
             "LEFT JOIN `" . DB_PREFIX . "order_status` os " .
             "ON (o.order_status_id = os.order_status_id AND os.language_id = '" . (int)$this->config->get('config_language_id') . "') " .
             "WHERE o.order_status_id > 0 " .
+            "AND (os.name LIKE '%Викон%' OR os.name LIKE '%Выполн%' " .
+            "OR os.name LIKE '%Заверш%' OR os.name LIKE '%Complete%') " .
             "AND o.date_modified >= '" . $this->db->escape($changed_from) . "' " .
             "ORDER BY o.date_modified ASC LIMIT " . $offset . "," . $limit
         );
@@ -55,15 +57,23 @@ class ControllerApiCrmOrders extends Controller {
                 "FROM `" . DB_PREFIX . "order_product` WHERE order_id = '" . (int)$order['order_id'] . "'"
             );
             $history_query = $this->db->query(
-                "SELECT comment FROM `" . DB_PREFIX . "order_history` " .
-                "WHERE order_id = '" . (int)$order['order_id'] . "' AND comment <> '' ORDER BY date_added ASC"
+                "SELECT order_status_id, comment, date_added FROM `" . DB_PREFIX . "order_history` " .
+                "WHERE order_id = '" . (int)$order['order_id'] . "' ORDER BY date_added ASC"
             );
             $history_comments = array();
+            $completed_at = $order['date_modified'];
             foreach ($history_query->rows as $history) {
-                $history_comments[] = $history['comment'];
+                if ($history['comment'] !== '') {
+                    $history_comments[] = $history['comment'];
+                }
+                if ((int)$history['order_status_id'] === (int)$order['order_status_id']) {
+                    $completed_at = $history['date_added'];
+                }
             }
             $order['products'] = $products_query->rows;
             $order['history_comments'] = $history_comments;
+            $order['is_completed'] = true;
+            $order['completed_at'] = $completed_at;
             $json['orders'][] = $order;
         }
 

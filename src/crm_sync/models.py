@@ -19,6 +19,7 @@ class Order:
     source: str
     external_id: str
     created_at: datetime
+    completed_at: datetime
     customer_name: str
     city: str
     phone: str
@@ -27,6 +28,7 @@ class Order:
     payment_method: str
     note: str
     sender: str
+    completion_is_exact: bool = True
     items: list[OrderItem] = field(default_factory=list)
     advertising_cost: Decimal = Decimal(0)
 

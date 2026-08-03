@@ -18,6 +18,7 @@ class StubHttpClient:
 def prom_order(order_id: int) -> dict:
     return {
         "id": order_id,
+        "status": "delivered",
         "date_created": "2026-08-01T12:00:00",
         "client_first_name": "Клієнт",
         "phone": "0501234567",
@@ -49,5 +50,6 @@ def test_prom_uses_last_id_cursor_instead_of_offset() -> None:
     assert len(orders) == 101
     assert len(http.calls) == 2
     assert "offset" not in http.calls[0]
+    assert http.calls[0]["status"] == "delivered"
     assert http.calls[1]["last_id"] == 100
     assert http.calls[0]["date_from"].startswith("2026-06-30")

@@ -15,6 +15,7 @@ from crm_sync.utils import (
     first_value,
     normalize_phone,
     parse_datetime,
+    parse_optional_datetime,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class OpenCartClient:
         raw_count = 0
         without_tracking = 0
         without_items = 0
+        not_completed = 0
         offset = 0
         limit = 500
         while True:
@@ -66,6 +68,9 @@ class OpenCartClient:
             for raw in raw_orders:
                 if not isinstance(raw, dict):
                     continue
+                if not self._is_completed(raw):
+                    not_completed += 1
+                    continue
                 try:
                     order = self._normalize(raw)
                 except (ValueError, TypeError) as exc:
@@ -82,12 +87,20 @@ class OpenCartClient:
                 break
             offset += limit
         LOGGER.info(
-            "OpenCart fetched %s raw order(s): %s without tracking number, %s without products",
+            "OpenCart fetched %s raw order(s): %s not completed, %s without tracking number, %s without products",
             raw_count,
+            not_completed,
             without_tracking,
             without_items,
         )
         return orders
+
+    @staticmethod
+    def _is_completed(raw: dict[str, Any]) -> bool:
+        if raw.get("is_completed") is True or str(raw.get("is_completed", "")).strip() == "1":
+            return True
+        status = str(first_value(raw, "order_status", "status_name", "status")).strip().casefold()
+        return any(marker in status for marker in ("виконан", "выполн", "заверш", "complete"))
 
     def _normalize(self, raw: dict[str, Any]) -> Order:
         products = raw.get("products") or []
@@ -119,10 +132,16 @@ class OpenCartClient:
         full_name = " ".join(
             part for part in (str(raw.get("lastname", "")), str(raw.get("firstname", ""))) if part
         )
+        created_at = parse_datetime(first_value(raw, "date_added", "created_at"), self.timezone)
+        exact_completed_at = parse_optional_datetime(first_value(raw, "completed_at"), self.timezone)
+        completed_at = exact_completed_at or parse_optional_datetime(
+            first_value(raw, "date_modified", "changed", "updated_at"), self.timezone
+        ) or created_at
         return Order(
             source=self.source,
             external_id=str(first_value(raw, "order_id", "id")),
-            created_at=parse_datetime(first_value(raw, "date_added", "created_at"), self.timezone),
+            created_at=created_at,
+            completed_at=completed_at,
             customer_name=full_name,
             city=str(first_value(raw, "shipping_city", "payment_city")),
             phone=normalize_phone(first_value(raw, "telephone", "phone")),
@@ -140,5 +159,6 @@ class OpenCartClient:
             payment_method=classify_payment(payment_text, note),
             note=note,
             sender=str(first_value(raw, "sender", "store_name")),
+            completion_is_exact=exact_completed_at is not None,
             items=items,
         )
