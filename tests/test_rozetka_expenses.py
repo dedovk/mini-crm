@@ -2,6 +2,9 @@ from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import pytest
+
+from crm_sync.clients.http import ApiError
 from crm_sync.clients.rozetka import RozetkaClient
 
 
@@ -97,6 +100,17 @@ class RozetkaDedicatedLogisticsDeniedStub(RozetkaExpenseMetadataDeniedStub):
         return super().request_json(method, url, **kwargs)
 
 
+class RozetkaLogisticsHiddenStub(RozetkaDedicatedLogisticsDeniedStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        params = kwargs.get("params", {})
+        if url.endswith("/balances/search") and str(params.get("operationType")) != "2":
+            return {
+                "success": True,
+                "content": {"billingLogUserBalances": [], "_meta": {"pageCount": 1}},
+            }
+        return super().request_json(method, url, **kwargs)
+
+
 def test_rozetka_expenses_sum_commission_and_net_logistics_by_order_id() -> None:
     client = RozetkaClient(
         RozetkaExpenseStub(),  # type: ignore[arg-type]
@@ -143,3 +157,17 @@ def test_rozetka_expenses_fall_back_to_general_balance_history_for_logistics() -
     expenses = client.fetch_expenses(datetime(2026, 7, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
 
     assert expenses == {"901": Decimal("183.42"), "902": Decimal("683.16")}
+
+
+def test_rozetka_expenses_reject_incomplete_royalty_only_result() -> None:
+    client = RozetkaClient(
+        RozetkaLogisticsHiddenStub(),  # type: ignore[arg-type]
+        token="restricted-token",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    with pytest.raises(ApiError, match="ROZETKA_USERNAME"):
+        client.fetch_expenses(datetime(2026, 7, 1, tzinfo=ZoneInfo("Europe/Kyiv")))

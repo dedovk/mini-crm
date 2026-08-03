@@ -251,6 +251,7 @@ class RozetkaClient:
             },
             collection_key="billingLogUserBalances",
         )
+        using_logistics_fallback = False
         try:
             logistics_raw = self._fetch_pages(
                 "/balance-logistic/search",
@@ -261,6 +262,7 @@ class RozetkaClient:
             # Older/static seller tokens may expose logistics through the legacy
             # balance endpoint while denying the dedicated logistics module.
             LOGGER.warning("Rozetka dedicated logistics history is unavailable; using balance history: %s", exc)
+            using_logistics_fallback = True
             logistics_raw = []
             for operation_type in sorted({delivery_type, *refund_type_ids}):
                 logistics_raw.extend(
@@ -333,6 +335,15 @@ class RozetkaClient:
             category_counts["logistics_charge"],
             category_counts["logistics_refund"],
         )
+        if (
+            using_logistics_fallback
+            and category_counts["royalty"] > 0
+            and category_counts["logistics_charge"] == 0
+        ):
+            raise ApiError(
+                "Rozetka token does not expose logistics transactions; configure "
+                "ROZETKA_USERNAME and ROZETKA_PASSWORD for a full JWT session"
+            )
 
         royalty_totals: dict[str, Decimal] = {}
         logistics_totals: dict[str, Decimal] = {}
