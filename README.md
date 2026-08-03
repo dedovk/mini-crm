@@ -107,9 +107,11 @@ Dry-run does not add the technical column, validations, rows or status updates.
 
 ## GitHub Actions
 
-The workflow is in `.github/workflows/cron.yml` and runs at minutes 7, 22, 37 and 52.
-This is every 15 minutes while avoiding the start of the hour. Additional UTC schedules
-cover 00:00 in `Europe/Kyiv` in both summer and winter time; date rollover is idempotent.
+The workflow is in `.github/workflows/cron.yml` and requests runs at minutes 11, 26, 41
+and 56. The offset avoids GitHub's busiest start-of-hour window. Frequent runs read the
+latest seven days; a timezone-aware daily run at 02:13 `Europe/Kyiv` reconciles the full
+30-day history, including TTNs added to older orders. GitHub may still delay scheduled
+events, so the synchronization itself is idempotent and safe after a delayed run.
 The workflow also supports manual `workflow_dispatch` with a `dry_run` checkbox. A
 concurrency group prevents overlapping writes.
 
@@ -118,8 +120,10 @@ concurrency group prevents overlapping writes.
 The client uses `GET /orders/list` with `Authorization: Bearer ...`, handles pagination,
 normalizes product rows and retains only orders containing a supported TTN. Prom prices
 such as `1 149 грн` are converted to numeric values, the product code comes from `sku`,
-and the ProSale commission is recorded as advertising expense. It scans a 30-day
-lookback window by default; duplicate filtering makes the overlap safe.
+and the ProSale commission is recorded as advertising expense. Frequent automation scans
+seven days to stay within API limits, while the daily deep reconciliation scans 30 days.
+The HTTP client honors Prom's `Retry-After` response and uses a longer fallback pause for
+rate limits. Duplicate filtering makes both overlaps safe.
 
 ## Rozetka
 

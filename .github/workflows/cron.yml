@@ -2,10 +2,11 @@ name: Marketplace CRM sync
 
 on:
   schedule:
-    - cron: "7,22,37,52 * * * *"
-    # 00:00 Europe/Kyiv: 21:00 UTC in summer, 22:00 UTC in winter.
-    # The application checks the local date, so the extra DST run is idempotent.
-    - cron: "0 21,22 * * *"
+    # Offset from the busiest start-of-hour window, where GitHub may drop cron events.
+    - cron: "11,26,41,56 * * * *"
+    # One daily deep reconciliation catches TTNs added to older orders.
+    - cron: "13 2 * * *"
+      timezone: "Europe/Kyiv"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -24,7 +25,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     env:
       PYTHONUNBUFFERED: "1"
       GOOGLE_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}
@@ -43,7 +44,9 @@ jobs:
       NP_API_TOKEN: ${{ secrets.NP_API_TOKEN }}
       NOVA_POSHTA_API_URL: "https://api.novaposhta.ua/v2.0/json/"
       APP_TIMEZONE: ${{ secrets.APP_TIMEZONE }}
-      SYNC_LOOKBACK_DAYS: "30"
+      # Frequent runs fetch seven days to reduce Prom API usage. The daily run
+      # reconciles the full 30-day history.
+      SYNC_LOOKBACK_DAYS: ${{ github.event.schedule == '13 2 * * *' && '30' || '7' }}
       HTTP_TIMEOUT_SECONDS: "30"
       HTTP_MAX_RETRIES: "4"
       LOG_LEVEL: "INFO"
@@ -53,10 +56,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
