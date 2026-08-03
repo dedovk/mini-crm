@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -26,6 +25,7 @@ from crm_sync.sheet_layout import (
     month_period_label,
     parse_order_day,
     parse_sheet_date,
+    parse_sheet_time,
     report_formulas,
     sheet_serial,
 )
@@ -1004,11 +1004,7 @@ class GoogleSheetsGateway:
                 continue
             padded[COLUMNS.tracking_number - 1] = tracking
             padded[COLUMNS.customer - 1] = clean_customer_display(padded[COLUMNS.customer - 1])
-            completion_match = re.search(
-                r"(?:^|\s)(\d{2}:\d{2})(?::\d{2})?$",
-                str(padded[COLUMNS.order_date - 1]).strip(),
-            )
-            padded[COLUMNS.order_date - 1] = completion_match.group(1) if completion_match else ""
+            padded[COLUMNS.order_date - 1] = parse_sheet_time(padded[COLUMNS.order_date - 1])
             if not str(padded[COLUMNS.payment_method - 1]).strip() and str(
                 padded[COLUMNS.source - 1]
             ).casefold() == "rozetka":
