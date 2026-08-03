@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
@@ -40,8 +42,37 @@ class HttpClient:
                 )
                 if not retryable or attempt >= self.max_retries:
                     break
-                delay = min(2**attempt, 16)
-                LOGGER.warning("API request failed; retrying in %s second(s): %s", delay, type(exc).__name__)
+                delay = self._retry_delay(exc, attempt)
+                status = exc.response.status_code if isinstance(exc, requests.HTTPError) and exc.response else None
+                LOGGER.warning(
+                    "API request failed%s; retrying in %s second(s): %s",
+                    f" with HTTP {status}" if status else "",
+                    delay,
+                    type(exc).__name__,
+                )
                 time.sleep(delay)
         raise ApiError(f"API request failed: {method} {url}: {last_error}") from last_error
 
+    @staticmethod
+    def _retry_delay(exc: Exception, attempt: int) -> int:
+        if not isinstance(exc, requests.HTTPError) or exc.response is None:
+            return min(2**attempt, 16)
+        if exc.response.status_code != 429:
+            return min(2**attempt, 16)
+
+        retry_after = exc.response.headers.get("Retry-After", "").strip()
+        if retry_after.isdigit():
+            return min(max(int(retry_after), 1), 120)
+        if retry_after:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=UTC)
+                seconds = int((retry_at - datetime.now(UTC)).total_seconds()) + 1
+                return min(max(seconds, 1), 120)
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+        # Prom does not always include Retry-After. Short exponential delays are
+        # insufficient for its rate-limit window, so start with a conservative pause.
+        return min(30 * (2**attempt), 120)
