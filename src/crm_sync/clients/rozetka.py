@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from crm_sync.clients.http import ApiError, HttpClient
-from crm_sync.models import Order, OrderItem
+from crm_sync.models import Order, OrderExpenseTransaction, OrderItem
 from crm_sync.utils import (
     classify_payment,
     decimal_value,
@@ -42,6 +42,7 @@ class RozetkaClient:
         self.password = password
         self.base_url = base_url.rstrip("/")
         self.timezone = timezone
+        self._active_token = token
 
     def _login_token(self) -> str:
         if not self.username or not self.password:
@@ -60,23 +61,46 @@ class RozetkaClient:
         return str(token)
 
     def _authorization_token(self) -> str:
-        if self.token:
-            return self.token
-        return self._login_token()
+        if self._active_token:
+            return self._active_token
+        self._active_token = self._login_token()
+        return self._active_token
+
+    def _request_authorized(self, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
+        token = self._authorization_token()
+        if not token:
+            raise ApiError("Rozetka authorization is not configured")
+        payload = self.http.request_json(
+            "GET",
+            f"{self.base_url}{path}",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+        )
+        if isinstance(payload, dict) and payload.get("success"):
+            return payload
+        if self.username and self.password:
+            self._active_token = self._login_token()
+            payload = self.http.request_json(
+                "GET",
+                f"{self.base_url}{path}",
+                headers={"Authorization": f"Bearer {self._active_token}"},
+                params=params,
+            )
+        if not isinstance(payload, dict) or not payload.get("success"):
+            errors = payload.get("errors") if isinstance(payload, dict) else payload
+            raise ApiError(f"Rozetka request failed for {path}: {errors}")
+        return payload
 
     def fetch_orders(self, since: datetime) -> list[Order]:
         token = self._authorization_token()
         if not token:
             LOGGER.info("Rozetka sync skipped: token or login credentials are not configured")
             return []
-        headers = {"Authorization": f"Bearer {token}"}
         page_number = 1
         orders: list[Order] = []
         while True:
-            payload = self.http.request_json(
-                "GET",
-                f"{self.base_url}/orders/search",
-                headers=headers,
+            payload = self._request_authorized(
+                "/orders/search",
                 params={
                     "page": page_number,
                     "changed_from": since.strftime("%Y-%m-%d"),
@@ -85,29 +109,6 @@ class RozetkaClient:
                     "expand": "user,delivery,purchases,status_data",
                 },
             )
-            if (
-                isinstance(payload, dict)
-                and not payload.get("success")
-                and token == self.token
-                and self.username
-                and self.password
-            ):
-                token = self._login_token()
-                headers = {"Authorization": f"Bearer {token}"}
-                payload = self.http.request_json(
-                    "GET",
-                    f"{self.base_url}/orders/search",
-                    headers=headers,
-                    params={
-                        "page": page_number,
-                        "changed_from": since.strftime("%Y-%m-%d"),
-                        "types": 3,
-                        "sort": "-changed",
-                        "expand": "user,delivery,purchases,status_data",
-                    },
-                )
-            if not isinstance(payload, dict) or not payload.get("success"):
-                raise ApiError(f"Rozetka orders search failed: {payload.get('errors') if isinstance(payload, dict) else payload}")
             content = payload.get("content") or {}
             raw_orders = content.get("orders") or [] if isinstance(content, dict) else []
             for raw in raw_orders:
@@ -134,6 +135,185 @@ class RozetkaClient:
                 break
             page_number += 1
         return orders
+
+    @staticmethod
+    def _operation_entries(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
+        content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+        raw = content.get(key) if isinstance(content, dict) else None
+        if isinstance(raw, dict):
+            return [entry for entry in raw.values() if isinstance(entry, dict)]
+        if isinstance(raw, list):
+            return [entry for entry in raw if isinstance(entry, dict)]
+        return []
+
+    @staticmethod
+    def _operation_id(
+        entries: list[dict[str, Any]],
+        *,
+        names: tuple[str, ...] = (),
+        title_terms: tuple[str, ...] = (),
+        default: int,
+    ) -> int:
+        wanted_names = {name.casefold() for name in names}
+        for entry in entries:
+            name = str(entry.get("name") or "").strip().casefold()
+            title = str(entry.get("title") or "").strip().casefold()
+            if name in wanted_names or (title_terms and all(term.casefold() in title for term in title_terms)):
+                try:
+                    return int(entry.get("id"))
+                except (TypeError, ValueError):
+                    continue
+        return default
+
+    def _fetch_pages(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any],
+        collection_key: str,
+    ) -> list[dict[str, Any]]:
+        page = 1
+        transactions: list[dict[str, Any]] = []
+        while True:
+            page_params = {**params, "page": page}
+            payload = self._request_authorized(path, params=page_params)
+            content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+            raw_transactions = content.get(collection_key) if isinstance(content, dict) else []
+            if isinstance(raw_transactions, list):
+                transactions.extend(entry for entry in raw_transactions if isinstance(entry, dict))
+            meta = content.get("_meta") if isinstance(content, dict) else {}
+            try:
+                page_count = int(meta.get("pageCount") or page) if isinstance(meta, dict) else page
+            except (TypeError, ValueError):
+                page_count = page
+            if page >= page_count:
+                break
+            page += 1
+        return transactions
+
+    def fetch_expenses(self, since: datetime) -> dict[str, Decimal]:
+        if not self._authorization_token():
+            LOGGER.info("Rozetka expense sync skipped: authorization is not configured")
+            return {}
+
+        search_data = self._request_authorized("/balances/search-data", params={})
+        royalty_types = self._operation_entries(search_data, "operationTypes")
+        logistic_types = self._operation_entries(search_data, "operationTypesLogistic")
+        logistic_search_data = self._request_authorized("/balance-logistic/search-data", params={})
+        logistic_types.extend(self._operation_entries(logistic_search_data, "operationTypes"))
+
+        royalty_type = self._operation_id(
+            royalty_types,
+            names=("sale_commiss",),
+            title_terms=("комісі", "продаж"),
+            default=2,
+        )
+        delivery_type = self._operation_id(
+            logistic_types,
+            names=("withdrawallogisticmp",),
+            title_terms=("достав", "відправ"),
+            default=34,
+        )
+        refund_type_ids = {
+            35,
+            *(
+                int(entry["id"])
+                for entry in logistic_types
+                if str(entry.get("id") or "").isdigit()
+                and (
+                    str(entry.get("name") or "").casefold() == "adjustmentlogisticmpup"
+                    or (
+                        "коригув" in str(entry.get("title") or "").casefold()
+                        and "+" in str(entry.get("title") or "")
+                    )
+                    or "повернення списання" in str(entry.get("title") or "").casefold()
+                    or "відшкодуван" in str(entry.get("title") or "").casefold()
+                )
+            ),
+        }
+
+        royalty_raw = self._fetch_pages(
+            "/balances/search",
+            params={
+                "operationType": royalty_type,
+                "dateFrom": since.strftime("%Y-%m-%d"),
+                "pageSize": 100,
+                "sort": "-logId",
+            },
+            collection_key="billingLogUserBalances",
+        )
+        logistics_raw = self._fetch_pages(
+            "/balance-logistic/search",
+            params={"created_from": since.strftime("%Y-%m-%d"), "sort": "-operation_id"},
+            collection_key="logisticBalances",
+        )
+
+        transactions: list[OrderExpenseTransaction] = []
+        for raw in royalty_raw:
+            if str(first_value(raw, "operationType", "operation_type")) != str(royalty_type):
+                continue
+            order_id = str(first_value(raw, "orderId", "order_id")).strip()
+            transaction_id = str(first_value(raw, "id", "logId", "operation_id")).strip()
+            if order_id and transaction_id:
+                transactions.append(
+                    OrderExpenseTransaction(
+                        transaction_id=transaction_id,
+                        order_id=order_id,
+                        category="royalty",
+                        debit=decimal_value(raw.get("debit")),
+                        credit=decimal_value(raw.get("credit")),
+                    )
+                )
+
+        for raw in logistics_raw:
+            order_id = str(first_value(raw, "order_id", "orderId")).strip()
+            transaction_id = str(first_value(raw, "operation_id", "id", "logId")).strip()
+            if not order_id or not transaction_id:
+                continue
+            try:
+                operation_type = int(first_value(raw, "operation_type", "operationType"))
+            except (TypeError, ValueError):
+                continue
+            debit = decimal_value(raw.get("debit"))
+            credit = decimal_value(raw.get("credit"))
+            title = str(first_value(raw, "operation_type_title", "operationTypeTitle")).casefold()
+            if operation_type == delivery_type:
+                category = "logistics_charge"
+            elif operation_type in refund_type_ids and (credit != 0 or debit != 0):
+                category = "logistics_refund"
+            elif credit != 0 and ("повернен" in title or "відшкодуван" in title):
+                category = "logistics_refund"
+            else:
+                continue
+            transactions.append(
+                OrderExpenseTransaction(
+                    transaction_id=transaction_id,
+                    order_id=order_id,
+                    category=category,
+                    debit=debit,
+                    credit=credit,
+                )
+            )
+
+        royalty_totals: dict[str, Decimal] = {}
+        logistics_totals: dict[str, Decimal] = {}
+        seen: set[tuple[str, str]] = set()
+        for transaction in transactions:
+            stream = "royalty" if transaction.category == "royalty" else "logistics"
+            key = (stream, transaction.transaction_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            target = royalty_totals if stream == "royalty" else logistics_totals
+            target[transaction.order_id] = (
+                target.get(transaction.order_id, Decimal(0)) + transaction.expense_effect
+            )
+        order_ids = royalty_totals.keys() | logistics_totals.keys()
+        return {
+            order_id: max(Decimal(0), royalty_totals.get(order_id, Decimal(0)))
+            + max(Decimal(0), logistics_totals.get(order_id, Decimal(0)))
+            for order_id in order_ids
+        }
 
     def _normalize(self, raw: dict[str, Any]) -> Order:
         purchases = raw.get("purchases") or []

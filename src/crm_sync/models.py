@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 
 @dataclass(slots=True)
@@ -42,3 +43,18 @@ class ShipmentStatus:
     tracking_number: str
     status: str
     status_code: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class OrderExpenseTransaction:
+    transaction_id: str
+    order_id: str
+    category: Literal["royalty", "logistics_charge", "logistics_refund"]
+    debit: Decimal = Decimal(0)
+    credit: Decimal = Decimal(0)
+
+    @property
+    def expense_effect(self) -> Decimal:
+        if self.category == "logistics_refund":
+            return -abs(self.credit or self.debit)
+        return abs(self.debit) - abs(self.credit)
