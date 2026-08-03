@@ -120,6 +120,7 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     written = worksheet.written_values
     order_row = next(row for row in written if row[COLUMNS.row_type - 1] == ROW_ORDER)
     assert order_row[COLUMNS.operational_date - 1] != date(2026, 8, 3)
+    assert order_row[COLUMNS.source - 1] == "🟣 Prom"
     assert order_row[COLUMNS.customer - 1] == "Київ, Прізвище Ім'я"
     assert order_row[COLUMNS.order_date - 1] == sheet_serial(date(2026, 7, 1))
     assert order_row[COLUMNS.sender - 1] == "наш"

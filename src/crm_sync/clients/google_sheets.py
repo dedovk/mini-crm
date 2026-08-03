@@ -28,6 +28,8 @@ from crm_sync.sheet_layout import (
     parse_sheet_time,
     report_formulas,
     sheet_serial,
+    source_display,
+    source_key,
 )
 from crm_sync.utils import (
     customer_display,
@@ -261,7 +263,7 @@ class GoogleSheetsGateway:
                 continue
 
             sync_key = str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
-            source = str(row[COLUMNS.source - 1]).strip() if len(row) >= COLUMNS.source else ""
+            source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
             order_id = str(row[COLUMNS.order_number - 1]).strip() if len(row) >= COLUMNS.order_number else ""
             if active_day and ((sync_key and sync_key.casefold() != "sync key") or (source and order_id)):
                 row_types[row_number] = ROW_ORDER
@@ -580,7 +582,7 @@ class GoogleSheetsGateway:
                             "startIndex": row_number - 1,
                             "endIndex": row_number,
                         },
-                        "properties": {"pixelSize": 38},
+                        "properties": {"pixelSize": 44},
                         "fields": "pixelSize",
                     }
                 },
@@ -798,7 +800,7 @@ class GoogleSheetsGateway:
                 if key != "sync key":
                     keys.add(key)
                 continue
-            source = str(row[COLUMNS.source - 1]).strip() if len(row) >= COLUMNS.source else ""
+            source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
             order_id = str(row[COLUMNS.order_number - 1]).strip() if len(row) >= COLUMNS.order_number else ""
             if source and order_id:
                 keys.add(f"{source.casefold()}:{order_id}")
@@ -1002,19 +1004,20 @@ class GoogleSheetsGateway:
             tracking = normalize_tracking_number(padded[COLUMNS.tracking_number - 1])
             if not key or not order_day or not tracking:
                 continue
+            padded[COLUMNS.source - 1] = source_display(padded[COLUMNS.source - 1])
             padded[COLUMNS.tracking_number - 1] = tracking
             padded[COLUMNS.customer - 1] = clean_customer_display(padded[COLUMNS.customer - 1])
             raw_completion = padded[COLUMNS.order_date - 1]
             completion_day = parse_sheet_date(raw_completion)
-            if completion_day is None and parse_sheet_time(raw_completion):
+            if completion_day is None:
                 completion_day = order_day
             padded[COLUMNS.order_date - 1] = sheet_serial(completion_day) if completion_day else ""
             current_sender = str(padded[COLUMNS.sender - 1]).strip()
             if not current_sender or current_sender == "-":
                 padded[COLUMNS.sender - 1] = sender_default
             if not str(padded[COLUMNS.payment_method - 1]).strip() and str(
-                padded[COLUMNS.source - 1]
-            ).casefold() == "rozetka":
+                source_key(padded[COLUMNS.source - 1])
+            ) == "rozetka":
                 padded[COLUMNS.payment_method - 1] = "наложка"
             padded[COLUMNS.row_type - 1] = ROW_ORDER
             padded[COLUMNS.operational_date - 1] = sheet_serial(order_day)
@@ -1036,7 +1039,7 @@ class GoogleSheetsGateway:
             order_rows: list[list[Any]] = []
             for item in order.items:
                 row: list[Any] = [""] * COLUMNS.operational_date
-                row[COLUMNS.source - 1] = order.source
+                row[COLUMNS.source - 1] = source_display(order.source)
                 row[COLUMNS.tracking_number - 1] = order.tracking_number
                 row[COLUMNS.shipment_status - 1] = (
                     shipment_status.status

@@ -10,6 +10,8 @@ from crm_sync.sheet_layout import (
     parse_sheet_time,
     report_formulas,
     sheet_serial,
+    source_display,
+    source_key,
 )
 
 
@@ -43,3 +45,11 @@ def test_clean_customer_display_removes_serialized_rozetka_city() -> None:
     value = "{'id': 330, 'name': 'Київ', 'name_ua': 'Київ'}, Тестовий Клієнт По-батькові"
 
     assert clean_customer_display(value) == "Київ, Тестовий Клієнт"
+
+
+def test_source_icons_are_stable_and_reversible() -> None:
+    assert source_display("prom") == "🟣 Prom"
+    assert source_display("Rozetka") == "🟢 Rozetka"
+    assert source_display("opencart") == "🔵 Сайт"
+    assert source_key("🟢 Rozetka") == "rozetka"
+    assert source_key("🔵 Сайт") == "opencart"

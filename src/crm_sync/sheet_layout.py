@@ -44,6 +44,34 @@ ROW_REPORT_FORECAST = "REPORT_FORECAST"
 
 EXCEL_EPOCH = date(1899, 12, 30)
 
+SOURCE_LABELS = {
+    "prom": "🟣 Prom",
+    "rozetka": "🟢 Rozetka",
+    "opencart": "🔵 Сайт",
+    "site": "🔵 Сайт",
+    "сайт": "🔵 Сайт",
+}
+
+
+def source_key(value: Any) -> str:
+    raw = str(value or "").strip()
+    normalized = re.sub(r"^[^\wА-Яа-яІіЇїЄєҐґ]+", "", raw).strip().casefold()
+    aliases = {
+        "prom": "prom",
+        "rozetka": "rozetka",
+        "сайт": "opencart",
+        "site": "opencart",
+        "opencart": "opencart",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def source_display(value: Any) -> str:
+    key = source_key(value)
+    if not key:
+        return ""
+    return SOURCE_LABELS.get(key, f"⚪ {str(value).strip()}")
+
 
 def sheet_serial(value: date) -> int:
     return (value - EXCEL_EPOCH).days
