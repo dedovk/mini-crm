@@ -71,6 +71,13 @@ class RozetkaExpenseStub:
         raise AssertionError(f"Unexpected request: {url}")
 
 
+class RozetkaExpenseMetadataDeniedStub(RozetkaExpenseStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        if url.endswith("/balance-logistic/search-data"):
+            return {"success": False, "errors": {"code": 1010, "message": "access_denied"}}
+        return super().request_json(method, url, **kwargs)
+
+
 def test_rozetka_expenses_sum_commission_and_net_logistics_by_order_id() -> None:
     client = RozetkaClient(
         RozetkaExpenseStub(),  # type: ignore[arg-type]
@@ -88,3 +95,17 @@ def test_rozetka_expenses_sum_commission_and_net_logistics_by_order_id() -> None
         "902": Decimal("683.16"),
     }
 
+
+def test_rozetka_expenses_use_stable_type_ids_when_filter_metadata_is_denied() -> None:
+    client = RozetkaClient(
+        RozetkaExpenseMetadataDeniedStub(),  # type: ignore[arg-type]
+        token="test-token",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    expenses = client.fetch_expenses(datetime(2026, 7, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert expenses["901"] == Decimal("183.42")

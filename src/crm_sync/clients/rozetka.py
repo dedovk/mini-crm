@@ -199,8 +199,17 @@ class RozetkaClient:
         search_data = self._request_authorized("/balances/search-data", params={})
         royalty_types = self._operation_entries(search_data, "operationTypes")
         logistic_types = self._operation_entries(search_data, "operationTypesLogistic")
-        logistic_search_data = self._request_authorized("/balance-logistic/search-data", params={})
-        logistic_types.extend(self._operation_entries(logistic_search_data, "operationTypes"))
+        try:
+            logistic_search_data = self._request_authorized(
+                "/balance-logistic/search-data", params={}
+            )
+        except ApiError as exc:
+            # Some seller roles can read logistics transactions but cannot read this
+            # optional filter dictionary. The stable operation IDs from the general
+            # balance search metadata remain available as a fallback.
+            LOGGER.warning("Rozetka logistics filter metadata is unavailable: %s", exc)
+        else:
+            logistic_types.extend(self._operation_entries(logistic_search_data, "operationTypes"))
 
         royalty_type = self._operation_id(
             royalty_types,
