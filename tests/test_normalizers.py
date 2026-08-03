@@ -46,6 +46,7 @@ def test_rozetka_normalizer_creates_item_rows() -> None:
     assert order.payment_method == "смешанная"
     assert order.items[0].product_code == "10"
     assert order.completed_at.strftime("%d.%m.%Y %H:%M") == "02.08.2026 11:22"
+    assert order.completion_is_exact is True
 
 
 def test_rozetka_normalizer_extracts_city_name_from_delivery_object() -> None:

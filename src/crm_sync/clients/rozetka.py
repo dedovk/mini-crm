@@ -204,8 +204,11 @@ class RozetkaClient:
                 if str(status_id) == str(current_status):
                     history_timestamp = first_value(entry, "created", "created_at")
                     break
+        completion_value = history_timestamp or first_value(
+            raw, "changed", "status_updated_at", "updated_at"
+        )
         completed_at = parse_optional_datetime(
-            history_timestamp or first_value(raw, "changed", "status_updated_at", "updated_at"),
+            completion_value,
             self.timezone,
         ) or created_at
         return Order(
@@ -227,6 +230,6 @@ class RozetkaClient:
             payment_method=classify_payment(payment_text, note) or "наложка",
             note=note,
             sender=str(nested_value(raw, (("delivery", "sender", "name"),), default="")),
-            completion_is_exact=bool(history_timestamp),
+            completion_is_exact=bool(completion_value),
             items=items,
         )
