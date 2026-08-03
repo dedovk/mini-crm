@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -117,6 +118,21 @@ class GoogleSheetsGateway:
         self.sender_options = sender_options
 
     def ensure_schema(self, *, apply_changes: bool = True) -> None:
+        preview = self.worksheet.get(
+            f"A1:W{min(self.worksheet.row_count, 100)}",
+            value_render_option="UNFORMATTED_VALUE",
+        )
+        located_header = next(
+            (
+                row_number
+                for row_number, row in enumerate(preview, start=1)
+                if len(row) >= 2
+                and str(row[0]).strip().casefold() == BUSINESS_HEADERS[0].casefold()
+                and str(row[1]).strip().casefold() == BUSINESS_HEADERS[1].casefold()
+            ),
+            self.header_row,
+        )
+        self.header_row = located_header
         headers = self.worksheet.row_values(self.header_row)
         required_signals = {
             COLUMNS.source: ("джерело",),
@@ -406,7 +422,7 @@ class GoogleSheetsGateway:
                     },
                     "cell": {
                         "userEnteredFormat": {
-                            "textFormat": {"fontFamily": "Arial", "fontSize": 10},
+                            "textFormat": {"fontFamily": "Arial", "fontSize": 8},
                             "backgroundColorStyle": {"rgbColor": self._hex_color("#FFFFFF")},
                             "horizontalAlignment": "CENTER",
                             "verticalAlignment": "MIDDLE",
@@ -446,18 +462,20 @@ class GoogleSheetsGateway:
                 }
             },
             {
-                "autoResizeDimensions": {
-                    "dimensions": {
+                "updateDimensionProperties": {
+                    "range": {
                         "sheetId": sheet_id,
                         "dimension": "ROWS",
                         "startIndex": 0,
                         "endIndex": last_used_row,
-                    }
+                    },
+                    "properties": {"pixelSize": 28},
+                    "fields": "pixelSize",
                 }
             },
         ]
 
-        widths = (105, 140, 210, 145, 125, 210, 145, 250, 125, 125, 90, 135, 155, 145, 190, 125, 155, 130, 145, 240)
+        widths = (55, 105, 100, 58, 80, 130, 95, 180, 70, 70, 45, 65, 70, 75, 90, 60, 70, 65, 65, 110)
         for index, width in enumerate(widths):
             requests.append(
                 {
@@ -475,12 +493,12 @@ class GoogleSheetsGateway:
             )
 
         style_by_type = {
-            ROW_MONTH: ("#17365D", "#FFFFFF", 15, 52),
-            ROW_DAY: ("#D9EAF7", "#17365D", 12, 32),
-            ROW_HEADER: ("#2F75B5", "#FFFFFF", 10, 58),
-            ROW_REPORT_DAY: ("#E2F0D9", "#375623", 10, 42),
-            ROW_REPORT_MTD: ("#DDEBF7", "#1F4E78", 10, 42),
-            ROW_REPORT_FORECAST: ("#FCE4D6", "#9C5700", 10, 42),
+            ROW_MONTH: ("#17365D", "#FFFFFF", 11, 30),
+            ROW_DAY: ("#D9EAF7", "#17365D", 9, 24),
+            ROW_HEADER: ("#2F75B5", "#FFFFFF", 8, 44),
+            ROW_REPORT_DAY: ("#E2F0D9", "#375623", 8, 24),
+            ROW_REPORT_MTD: ("#DDEBF7", "#1F4E78", 8, 24),
+            ROW_REPORT_FORECAST: ("#FCE4D6", "#9C5700", 8, 24),
         }
         for row_type, (fill_hex, font_hex, font_size, height) in style_by_type.items():
             for row_number in typed_rows.get(row_type, []):
@@ -526,7 +544,8 @@ class GoogleSheetsGateway:
                     ]
                 )
         for order_index, row_number in enumerate(typed_rows.get(ROW_ORDER, [])):
-            requests.append(
+            requests.extend(
+                [
                 {
                     "repeatCell": {
                         "range": {
@@ -541,6 +560,7 @@ class GoogleSheetsGateway:
                                 "backgroundColorStyle": {
                                     "rgbColor": self._hex_color("#F3F8FC" if order_index % 2 else "#FFFFFF")
                                 },
+                                "textFormat": {"fontFamily": "Arial", "fontSize": 8},
                                 "borders": {
                                     "bottom": {
                                         "style": "SOLID",
@@ -549,9 +569,22 @@ class GoogleSheetsGateway:
                                 },
                             }
                         },
-                        "fields": "userEnteredFormat(backgroundColorStyle,borders.bottom)",
+                        "fields": "userEnteredFormat(backgroundColorStyle,textFormat,borders.bottom)",
                     }
-                }
+                },
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": row_number - 1,
+                            "endIndex": row_number,
+                        },
+                        "properties": {"pixelSize": 32},
+                        "fields": "pixelSize",
+                    }
+                },
+                ]
             )
 
         for group_rows in order_groups.values():
@@ -589,7 +622,7 @@ class GoogleSheetsGateway:
 
         number_formats = {
             COLUMNS.tracking_number: ("TEXT", "@"),
-            COLUMNS.order_date: ("DATE_TIME", "dd.mm.yyyy hh:mm"),
+            COLUMNS.order_date: ("TIME", "hh:mm"),
             COLUMNS.order_number: ("TEXT", "@"),
             COLUMNS.phone: ("TEXT", "@"),
             COLUMNS.product_code: ("TEXT", "@"),
@@ -640,6 +673,57 @@ class GoogleSheetsGateway:
                     }
                 }
             )
+
+        for row_type in (ROW_MONTH, ROW_DAY):
+            for row_number in typed_rows.get(row_type, []):
+                requests.append(
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": row_number - 1,
+                                "endRowIndex": row_number,
+                                "startColumnIndex": 2,
+                                "endColumnIndex": 3,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "backgroundColorStyle": {"rgbColor": self._hex_color("#2F75B5")},
+                                    "textFormat": {
+                                        "bold": True,
+                                        "fontSize": 8,
+                                        "foregroundColorStyle": {"rgbColor": self._hex_color("#FFFFFF")},
+                                    },
+                                }
+                            },
+                            "fields": "userEnteredFormat(backgroundColorStyle,textFormat)",
+                        }
+                    }
+                )
+
+        for row_type in (ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST):
+            for row_number in typed_rows.get(row_type, []):
+                for column in (4, 6, 8, 10, 12):
+                    pattern = "0" if column == 4 else "#,##0.00"
+                    requests.append(
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": row_number - 1,
+                                    "endRowIndex": row_number,
+                                    "startColumnIndex": column - 1,
+                                    "endColumnIndex": column,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "numberFormat": {"type": "NUMBER", "pattern": pattern}
+                                    }
+                                },
+                                "fields": "userEnteredFormat.numberFormat",
+                            }
+                        }
+                    )
 
         metadata = self.spreadsheet.fetch_sheet_metadata(
             {"fields": "sheets(properties(sheetId),conditionalFormats)"}
@@ -705,7 +789,7 @@ class GoogleSheetsGateway:
     def read_existing_sync_keys(self) -> set[str]:
         values = self.worksheet.get_all_values()
         keys: set[str] = set()
-        for row in values[self.header_row :]:
+        for row in values:
             row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
             if row_type and row_type != ROW_ORDER:
                 continue
@@ -723,7 +807,10 @@ class GoogleSheetsGateway:
     def pending_tracking_numbers(self) -> list[str]:
         values = self.worksheet.get_all_values()
         numbers: list[str] = []
-        for row in values[self.header_row :]:
+        for row in values:
+            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            if row_type and row_type != ROW_ORDER:
+                continue
             raw_tracking = (
                 str(row[COLUMNS.tracking_number - 1]).strip()
                 if len(row) >= COLUMNS.tracking_number
@@ -748,7 +835,10 @@ class GoogleSheetsGateway:
             return 0
         values = self.worksheet.get_all_values()
         updates: list[dict[str, Any]] = []
-        for row_number, row in enumerate(values[self.header_row :], start=self.header_row + 1):
+        for row_number, row in enumerate(values, start=1):
+            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            if row_type and row_type != ROW_ORDER:
+                continue
             raw_tracking = (
                 str(row[COLUMNS.tracking_number - 1]).strip()
                 if len(row) >= COLUMNS.tracking_number
@@ -778,7 +868,7 @@ class GoogleSheetsGateway:
         order_by_key = {order.sync_key.casefold(): order for order in orders}
         values = self.worksheet.get_all_values(value_render_option="FORMULA")
         rows_by_key: dict[str, list[tuple[int, list[str]]]] = {}
-        for row_number, row in enumerate(values[self.header_row :], start=self.header_row + 1):
+        for row_number, row in enumerate(values, start=1):
             row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
             if row_type != ROW_ORDER:
                 continue
@@ -805,6 +895,27 @@ class GoogleSheetsGateway:
                     )
                     if current != order.tracking_number:
                         updates.append({"range": f"B{row_number}", "values": [[order.tracking_number]]})
+                if order and order.completion_is_exact:
+                    completion_time = order.completed_at.strftime("%H:%M")
+                    current_time = (
+                        str(row[COLUMNS.order_date - 1]).strip()
+                        if len(row) >= COLUMNS.order_date
+                        else ""
+                    )
+                    if current_time != completion_time:
+                        updates.append({"range": f"D{row_number}", "values": [[completion_time]]})
+                    current_day = parse_sheet_date(
+                        row[COLUMNS.operational_date - 1]
+                        if len(row) >= COLUMNS.operational_date
+                        else ""
+                    )
+                    if current_day != order.completed_at.date():
+                        updates.append(
+                            {
+                                "range": f"W{row_number}",
+                                "values": [[sheet_serial(order.completed_at.date())]],
+                            }
+                        )
                 if customer:
                     current = str(row[COLUMNS.customer - 1]).strip() if len(row) >= COLUMNS.customer else ""
                     if current != customer:
@@ -877,7 +988,7 @@ class GoogleSheetsGateway:
         group_days: dict[str, date] = {}
         group_sort_values: dict[str, str] = {}
 
-        for row in existing_values[self.header_row :]:
+        for row in existing_values:
             padded: list[Any] = list(row[: COLUMNS.operational_date]) + [""] * max(
                 0, COLUMNS.operational_date - len(row)
             )
@@ -885,12 +996,19 @@ class GoogleSheetsGateway:
             if row_type != ROW_ORDER:
                 continue
             key = str(padded[COLUMNS.sync_key - 1]).strip().casefold()
-            order_day = parse_order_day(padded[COLUMNS.order_date - 1])
+            order_day = parse_sheet_date(padded[COLUMNS.operational_date - 1]) or parse_order_day(
+                padded[COLUMNS.order_date - 1]
+            )
             tracking = normalize_tracking_number(padded[COLUMNS.tracking_number - 1])
             if not key or not order_day or not tracking:
                 continue
             padded[COLUMNS.tracking_number - 1] = tracking
             padded[COLUMNS.customer - 1] = clean_customer_display(padded[COLUMNS.customer - 1])
+            completion_match = re.search(
+                r"(?:^|\s)(\d{2}:\d{2})(?::\d{2})?$",
+                str(padded[COLUMNS.order_date - 1]).strip(),
+            )
+            padded[COLUMNS.order_date - 1] = completion_match.group(1) if completion_match else ""
             if not str(padded[COLUMNS.payment_method - 1]).strip() and str(
                 padded[COLUMNS.source - 1]
             ).casefold() == "rozetka":
@@ -922,7 +1040,7 @@ class GoogleSheetsGateway:
                     if shipment_status
                     else ("Невідомо" if extract_ttn(order.tracking_number) else "Інший перевізник")
                 )
-                row[COLUMNS.order_date - 1] = order.created_at.strftime("%d.%m.%Y %H:%M")
+                row[COLUMNS.order_date - 1] = order.completed_at.strftime("%H:%M")
                 row[COLUMNS.order_number - 1] = order.external_id
                 row[COLUMNS.customer - 1] = customer_display(order.city, order.customer_name)
                 row[COLUMNS.phone - 1] = order.phone
@@ -941,12 +1059,12 @@ class GoogleSheetsGateway:
                     row[COLUMNS.advertising - 1] = decimal_for_sheet(order.advertising_cost)
                 row[COLUMNS.sync_key - 1] = order.sync_key
                 row[COLUMNS.row_type - 1] = ROW_ORDER
-                row[COLUMNS.operational_date - 1] = sheet_serial(order.created_at.date())
+                row[COLUMNS.operational_date - 1] = sheet_serial(order.completed_at.date())
                 order_rows.append(row)
             if order_rows:
                 groups[key] = order_rows
-                group_days[key] = order.created_at.date()
-                group_sort_values[key] = order.created_at.strftime("%d.%m.%Y %H:%M")
+                group_days[key] = order.completed_at.date()
+                group_sort_values[key] = order.completed_at.strftime("%Y-%m-%d %H:%M")
                 existing_keys.add(key)
                 added_rows += len(order_rows)
 
@@ -960,6 +1078,8 @@ class GoogleSheetsGateway:
         rows: list[list[Any]] = []
         merge_requests: list[dict[str, Any]] = []
         report_rows: list[tuple[int, str, date]] = []
+        month_rows: list[int] = []
+        day_rows: list[int] = []
         current_day = earliest_day
         current_month: tuple[int, int] | None = None
         while current_day <= operational_day:
@@ -970,7 +1090,8 @@ class GoogleSheetsGateway:
                 month_row[1] = month_period_label(current_day)
                 month_row[COLUMNS.row_type - 1] = ROW_MONTH
                 month_row[COLUMNS.operational_date - 1] = sheet_serial(current_day.replace(day=1))
-                rows.extend([month_row, [""] * COLUMNS.operational_date])
+                rows.append(month_row)
+                month_rows.append(len(rows))
                 current_month = month
 
             day_row = [""] * COLUMNS.operational_date
@@ -979,6 +1100,7 @@ class GoogleSheetsGateway:
             day_row[COLUMNS.row_type - 1] = ROW_DAY
             day_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)
             rows.extend([day_row, list(ALL_HEADERS)])
+            day_rows.append(len(rows) - 1)
 
             for _, group in groups_by_day.get(current_day, []):
                 order_start = len(rows) + 1
@@ -1018,11 +1140,18 @@ class GoogleSheetsGateway:
                     ROW_REPORT_MTD: f"Разом за {current_day.day} дн. місяця",
                     ROW_REPORT_FORECAST: "Прогноз на місяць",
                 }
-                for index, row_type in enumerate((ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST)):
-                    if index:
-                        rows.append([""] * COLUMNS.operational_date)
+                metric_labels = {
+                    3: "Замовлень",
+                    5: "Сума, грн",
+                    7: "Собівартість, грн",
+                    9: "Націнка, грн",
+                    11: "Реклама, грн",
+                }
+                for row_type in (ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST):
                     report_row = [""] * COLUMNS.operational_date
                     report_row[0] = labels[row_type]
+                    for column, label in metric_labels.items():
+                        report_row[column - 1] = label
                     report_row[COLUMNS.row_type - 1] = row_type
                     report_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)
                     rows.append(report_row)
@@ -1043,8 +1172,6 @@ class GoogleSheetsGateway:
                         }
                     )
 
-            if current_day < operational_day:
-                rows.extend([[""] * COLUMNS.operational_date for _ in range(4)])
             current_day += timedelta(days=1)
 
         last_used_row = len(rows)
@@ -1052,6 +1179,31 @@ class GoogleSheetsGateway:
             formulas = report_formulas(report_day, first_data_row=1, last_data_row=last_used_row)
             for column, formula in formulas[row_type].items():
                 rows[row_number - 1][column - 1] = formula
+
+        spreadsheet_id = getattr(self.spreadsheet, "id", "")
+
+        def selection_formula(start_row: int, end_row: int, label: str) -> str:
+            url = (
+                f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+                f"#gid={self.worksheet.id}&range=A{start_row}:T{end_row}"
+            )
+            return f'=HYPERLINK("{url}";"{label}")'
+
+        for index, month_row_number in enumerate(month_rows):
+            month_end = month_rows[index + 1] - 1 if index + 1 < len(month_rows) else last_used_row
+            rows[month_row_number - 1][2] = selection_formula(
+                month_row_number,
+                month_end,
+                "Виділити місяць",
+            )
+        section_starts = sorted([*month_rows, *day_rows])
+        for day_row_number in day_rows:
+            next_start = next((start for start in section_starts if start > day_row_number), last_used_row + 1)
+            rows[day_row_number - 1][2] = selection_formula(
+                day_row_number,
+                next_start - 1,
+                "Виділити день",
+            )
 
         if last_used_row > self.worksheet.row_count:
             self.worksheet.add_rows(last_used_row - self.worksheet.row_count)

@@ -12,7 +12,7 @@ BUSINESS_HEADERS = (
     "Джерело",
     "ТТН",
     "Статус доставки (Нова пошта)",
-    "Дата замовлення",
+    "Час виконання",
     "№ замовлення",
     "Місто / отримувач",
     "Телефон",
@@ -97,29 +97,29 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
     days_in_month = calendar.monthrange(day.year, day.month)[1]
 
     daily = {
-        11: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{day_filter})",
-        14: f"=SUMIFS({range_for('N')};{order_filter};{day_filter})",
-        17: (
+        4: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{day_filter})",
+        6: f"=SUMIFS({range_for('N')};{order_filter};{day_filter})",
+        8: (
             f"=SUMIFS({range_for('M')};{order_filter};{day_filter})-"
             f"SUMIFS({range_for('R')};{order_filter};{day_filter})"
         ),
-        18: f"=SUMIFS({range_for('R')};{order_filter};{day_filter})",
-        19: f"=SUMIFS({range_for('S')};{order_filter};{day_filter})",
+        10: f"=SUMIFS({range_for('R')};{order_filter};{day_filter})",
+        12: f"=SUMIFS({range_for('S')};{order_filter};{day_filter})",
     }
     mtd = {
-        11: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{mtd_filter})",
-        14: f"=SUMIFS({range_for('N')};{order_filter};{mtd_filter})",
-        17: (
+        4: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{mtd_filter})",
+        6: f"=SUMIFS({range_for('N')};{order_filter};{mtd_filter})",
+        8: (
             f"=SUMIFS({range_for('M')};{order_filter};{mtd_filter})-"
             f"SUMIFS({range_for('R')};{order_filter};{mtd_filter})"
         ),
-        18: f"=SUMIFS({range_for('R')};{order_filter};{mtd_filter})",
-        19: f"=SUMIFS({range_for('S')};{order_filter};{mtd_filter})",
+        10: f"=SUMIFS({range_for('R')};{order_filter};{mtd_filter})",
+        12: f"=SUMIFS({range_for('S')};{order_filter};{mtd_filter})",
     }
     forecast = {}
     for column, formula in mtd.items():
         projected = f"{formula[1:]}*{days_in_month}/{elapsed}"
-        forecast[column] = f"=ROUNDUP({projected};0)" if column == 11 else f"={projected}"
+        forecast[column] = f"=ROUNDUP({projected};0)" if column == 4 else f"={projected}"
     return {ROW_REPORT_DAY: daily, ROW_REPORT_MTD: mtd, ROW_REPORT_FORECAST: forecast}
 
 

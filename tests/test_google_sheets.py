@@ -56,6 +56,7 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
         source="prom",
         external_id="1",
         created_at=datetime(2026, 8, 3, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 3, 12, 34, tzinfo=UTC),
         customer_name="Тестовий Отримувач",
         city="Київ",
         phone="+380501234567",
@@ -79,8 +80,9 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     changed = gateway.refresh_order_details([order])
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
-    assert changed == 9
+    assert changed == 11
     assert updates["B5"] == "RMP-483122083"
+    assert updates["D5"] == "12:34"
     assert updates["F5"] == "Київ, Тестовий Отримувач"
     assert updates["I5"] == "608037110"
     assert updates["K5"] == 1
@@ -89,9 +91,10 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     assert updates["N5"] == 100
     assert updates["R5"] == "=(L5-Q5)*K5"
     assert updates["S5"] == 10
+    assert updates["W5"] > 0
 
 
-def test_append_orders_rebuilds_sections_by_actual_order_date_with_requested_gaps() -> None:
+def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> None:
     rows = [[""] * COLUMNS.operational_date for _ in range(5)]
     old = rows[4]
     old[COLUMNS.source - 1] = "prom"
@@ -116,13 +119,17 @@ def test_append_orders_rebuilds_sections_by_actual_order_date_with_requested_gap
     order_row = next(row for row in written if row[COLUMNS.row_type - 1] == ROW_ORDER)
     assert order_row[COLUMNS.operational_date - 1] != date(2026, 8, 3)
     assert order_row[COLUMNS.customer - 1] == "Київ, Прізвище Ім'я"
-    day_indexes = [index for index, row in enumerate(written) if row[COLUMNS.row_type - 1] == "DAY"]
-    assert all(row[COLUMNS.row_type - 1] == "" for row in written[day_indexes[1] - 4 : day_indexes[1]])
+    assert order_row[COLUMNS.order_date - 1] == "10:00"
+    assert not any(not any(str(value).strip() for value in row) for row in written)
+    month_rows = [row for row in written if row[COLUMNS.row_type - 1] == "MONTH"]
+    day_rows = [row for row in written if row[COLUMNS.row_type - 1] == "DAY"]
+    assert all("Виділити місяць" in row[2] for row in month_rows)
+    assert all("Виділити день" in row[2] for row in day_rows)
     report_indexes = [
         index
         for index, row in enumerate(written)
         if row[COLUMNS.row_type - 1] in {"REPORT_DAY", "REPORT_MTD", "REPORT_FORECAST"}
     ]
-    assert written[report_indexes[0] + 1][COLUMNS.row_type - 1] == ""
-    assert written[report_indexes[1] + 1][COLUMNS.row_type - 1] == ""
+    assert written[report_indexes[0] + 1][COLUMNS.row_type - 1] == "REPORT_MTD"
+    assert written[report_indexes[1] + 1][COLUMNS.row_type - 1] == "REPORT_FORECAST"
     assert added == 0
