@@ -251,11 +251,29 @@ class RozetkaClient:
             },
             collection_key="billingLogUserBalances",
         )
-        logistics_raw = self._fetch_pages(
-            "/balance-logistic/search",
-            params={"created_from": since.strftime("%Y-%m-%d"), "sort": "-operation_id"},
-            collection_key="logisticBalances",
-        )
+        try:
+            logistics_raw = self._fetch_pages(
+                "/balance-logistic/search",
+                params={"created_from": since.strftime("%Y-%m-%d"), "sort": "-operation_id"},
+                collection_key="logisticBalances",
+            )
+        except ApiError as exc:
+            # Older/static seller tokens may expose logistics through the legacy
+            # balance endpoint while denying the dedicated logistics module.
+            LOGGER.warning("Rozetka dedicated logistics history is unavailable; using balance history: %s", exc)
+            logistic_operation_types = ",".join(
+                str(value) for value in sorted({delivery_type, *refund_type_ids})
+            )
+            logistics_raw = self._fetch_pages(
+                "/balances/search",
+                params={
+                    "operationType": logistic_operation_types,
+                    "dateFrom": since.strftime("%Y-%m-%d"),
+                    "pageSize": 100,
+                    "sort": "-logId",
+                },
+                collection_key="billingLogUserBalances",
+            )
 
         transactions: list[OrderExpenseTransaction] = []
         for raw in royalty_raw:

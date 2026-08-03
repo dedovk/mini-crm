@@ -34,6 +34,18 @@ class RozetkaExpenseStub:
             }
         if url.endswith("/balances/search"):
             page = int(params["page"])
+            if str(params.get("operationType")) != "2":
+                return {
+                    "success": True,
+                    "content": {
+                        "billingLogUserBalances": [
+                            {"id": 3001, "operationType": 34, "orderId": 901, "debit": -30, "credit": 0},
+                            {"id": 3002, "operationType": 35, "orderId": 901, "debit": 0, "credit": 30},
+                            {"id": 3003, "operationType": 34, "orderId": 902, "debit": -30, "credit": 0},
+                        ],
+                        "_meta": {"pageCount": 1, "currentPage": 1},
+                    },
+                }
             transaction = {
                 "id": 1001,
                 "logId": 2001,
@@ -78,6 +90,13 @@ class RozetkaExpenseMetadataDeniedStub(RozetkaExpenseStub):
         return super().request_json(method, url, **kwargs)
 
 
+class RozetkaDedicatedLogisticsDeniedStub(RozetkaExpenseMetadataDeniedStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        if url.endswith("/balance-logistic/search"):
+            return {"success": False, "errors": {"code": 1010, "message": "access_denied"}}
+        return super().request_json(method, url, **kwargs)
+
+
 def test_rozetka_expenses_sum_commission_and_net_logistics_by_order_id() -> None:
     client = RozetkaClient(
         RozetkaExpenseStub(),  # type: ignore[arg-type]
@@ -109,3 +128,18 @@ def test_rozetka_expenses_use_stable_type_ids_when_filter_metadata_is_denied() -
     expenses = client.fetch_expenses(datetime(2026, 7, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
 
     assert expenses["901"] == Decimal("183.42")
+
+
+def test_rozetka_expenses_fall_back_to_general_balance_history_for_logistics() -> None:
+    client = RozetkaClient(
+        RozetkaDedicatedLogisticsDeniedStub(),  # type: ignore[arg-type]
+        token="test-token",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    expenses = client.fetch_expenses(datetime(2026, 7, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert expenses == {"901": Decimal("183.42"), "902": Decimal("683.16")}
