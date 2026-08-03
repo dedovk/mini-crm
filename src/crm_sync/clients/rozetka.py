@@ -323,6 +323,17 @@ class RozetkaClient:
                 )
             )
 
+        category_counts = {
+            category: sum(transaction.category == category for transaction in transactions)
+            for category in ("royalty", "logistics_charge", "logistics_refund")
+        }
+        LOGGER.info(
+            "Rozetka finance normalized %s royalty, %s logistics charge and %s logistics refund transaction(s)",
+            category_counts["royalty"],
+            category_counts["logistics_charge"],
+            category_counts["logistics_refund"],
+        )
+
         royalty_totals: dict[str, Decimal] = {}
         logistics_totals: dict[str, Decimal] = {}
         seen: set[tuple[str, str]] = set()
