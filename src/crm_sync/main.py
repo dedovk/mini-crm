@@ -31,6 +31,14 @@ def build_service(settings: Settings) -> SyncService:
         header_row=settings.google_header_row,
         sender_options=settings.sender_options,
     )
+    rozetka = RozetkaClient(
+        http,
+        token=settings.rozetka_token,
+        username=settings.rozetka_username,
+        password=settings.rozetka_password,
+        base_url=settings.rozetka_base_url,
+        timezone=settings.timezone,
+    )
     sources = [
         PromClient(
             http,
@@ -38,14 +46,7 @@ def build_service(settings: Settings) -> SyncService:
             base_url=settings.prom_base_url,
             timezone=settings.timezone,
         ),
-        RozetkaClient(
-            http,
-            token=settings.rozetka_token,
-            username=settings.rozetka_username,
-            password=settings.rozetka_password,
-            base_url=settings.rozetka_base_url,
-            timezone=settings.timezone,
-        ),
+        rozetka,
         OpenCartClient(
             http,
             base_url=settings.opencart_base_url,
@@ -62,8 +63,10 @@ def build_service(settings: Settings) -> SyncService:
             url=settings.nova_poshta_url,
         ),
         sources=sources,
+        expense_source=rozetka,
         timezone=settings.timezone,
         lookback_days=settings.sync_lookback_days,
+        expense_lookback_days=settings.rozetka_finance_lookback_days,
         sender_default=settings.sender_default,
         dry_run=settings.dry_run,
     )

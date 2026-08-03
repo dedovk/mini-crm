@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,12 @@ class OrderSource(Protocol):
     def fetch_orders(self, since: datetime) -> list[Order]: ...
 
 
+class OrderExpenseSource(Protocol):
+    source: str
+
+    def fetch_expenses(self, since: datetime) -> dict[str, Decimal]: ...
+
+
 class SyncService:
     def __init__(
         self,
@@ -29,16 +36,20 @@ class SyncService:
         sheets: GoogleSheetsGateway,
         nova_poshta: NovaPoshtaClient,
         sources: list[OrderSource],
+        expense_source: OrderExpenseSource | None = None,
         timezone: str,
         lookback_days: int,
+        expense_lookback_days: int = 45,
         sender_default: str,
         dry_run: bool,
     ) -> None:
         self.sheets = sheets
         self.nova_poshta = nova_poshta
         self.sources = sources
+        self.expense_source = expense_source
         self.timezone = timezone
         self.lookback_days = lookback_days
+        self.expense_lookback_days = expense_lookback_days
         self.sender_default = sender_default
         self.dry_run = dry_run
 
@@ -59,6 +70,20 @@ class SyncService:
                 continue
             LOGGER.info("%s returned %s eligible order(s)", source.source, len(source_orders))
             fetched.extend(source_orders)
+
+        expenses: dict[str, Decimal] | None = None
+        if self.expense_source:
+            try:
+                expense_since = now - timedelta(days=self.expense_lookback_days)
+                expenses = self.expense_source.fetch_expenses(expense_since)
+                LOGGER.info(
+                    "%s finance returned expenses for %s order(s)",
+                    self.expense_source.source,
+                    len(expenses),
+                )
+            except Exception:
+                LOGGER.exception("%s finance sync failed; existing sheet values are preserved", self.expense_source.source)
+                failed_sources.append(f"{self.expense_source.source}-finance")
 
         refreshed = 0
         if not self.dry_run:
@@ -94,9 +119,16 @@ class SyncService:
             sender_default=self.sender_default,
             operational_day=now.date(),
         )
+        expense_updates = 0
+        if expenses is not None:
+            expense_updates = self.sheets.update_order_expenses(
+                expenses,
+                source=self.expense_source.source if self.expense_source else "rozetka",
+            )
         LOGGER.info(
-            "Sync completed: %s detail/formula cell(s) refreshed, %s status cell(s) updated, %s item row(s) appended",
+            "Sync completed: %s detail/formula cell(s) refreshed, %s expense cell(s) updated, %s status cell(s) updated, %s item row(s) appended",
             refreshed,
+            expense_updates,
             updated,
             appended_rows,
         )

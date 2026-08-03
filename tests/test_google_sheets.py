@@ -137,3 +137,21 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     assert written[report_indexes[0] + 1][COLUMNS.row_type - 1] == "REPORT_MTD"
     assert written[report_indexes[1] + 1][COLUMNS.row_type - 1] == "REPORT_FORECAST"
     assert added == 0
+
+
+def test_update_order_expenses_writes_net_total_only_to_first_item_row() -> None:
+    rows = [[""] * COLUMNS.operational_date for _ in range(6)]
+    for index in (4, 5):
+        rows[index][COLUMNS.row_type - 1] = ROW_ORDER
+        rows[index][COLUMNS.sync_key - 1] = "rozetka:901"
+        rows[index][COLUMNS.source - 1] = "🟢 Rozetka"
+        rows[index][COLUMNS.advertising - 1] = "99" if index == 4 else "15"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    changed = gateway.update_order_expenses({"901": Decimal("183.42")}, source="rozetka")
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert changed == 2
+    assert updates == {"S5": 183.42, "S6": ""}

@@ -139,6 +139,14 @@ supports `/site/login` fallback when login/password secrets are configured.
 The current official base URL is `https://api-seller.rozetka.com.ua`; the former
 `api.seller.rozetka.com.ua` hostname serves an expired certificate and is not used.
 
+Rozetka finance synchronization reads sale commissions from `/balances/search` and
+shipment delivery charges from `/balance-logistic/search`. Transactions are deduplicated
+by their API identifiers and grouped by Rozetka order ID. A credited logistics adjustment
+reduces the original delivery expense without removing the order from the worksheet. The
+resulting non-negative total is written once, on the first item row, in the advertising
+expense column. Frequent runs reconcile 45 days and the daily run reconciles 90 days;
+configure this with `ROZETKA_FINANCE_LOOKBACK_DAYS` when a longer backfill is required.
+
 ## ocStore 2.1.0.2.1
 
 The stock API token does not expose historical order listing. Install the read-only

@@ -51,6 +51,7 @@ class Settings:
     nova_poshta_url: str
     timezone: str
     sync_lookback_days: int
+    rozetka_finance_lookback_days: int
     http_timeout: int
     http_max_retries: int
     log_level: str
@@ -103,6 +104,7 @@ class Settings:
             nova_poshta_url=_env("NOVA_POSHTA_API_URL", "https://api.novaposhta.ua/v2.0/json/"),
             timezone=_env("APP_TIMEZONE", "Europe/Kyiv"),
             sync_lookback_days=_env_int("SYNC_LOOKBACK_DAYS", 30),
+            rozetka_finance_lookback_days=_env_int("ROZETKA_FINANCE_LOOKBACK_DAYS", 45),
             http_timeout=_env_int("HTTP_TIMEOUT_SECONDS", 30),
             http_max_retries=_env_int("HTTP_MAX_RETRIES", 4),
             log_level=_env("LOG_LEVEL", "INFO").upper(),

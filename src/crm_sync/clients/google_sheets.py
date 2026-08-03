@@ -977,6 +977,45 @@ class GoogleSheetsGateway:
             self.worksheet.batch_update(updates, raw=False)
         return len(updates)
 
+    def update_order_expenses(self, expenses: dict[str, Decimal], *, source: str) -> int:
+        if not expenses:
+            return 0
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        rows_by_order: dict[str, list[tuple[int, list[Any]]]] = {}
+        wanted_source = source_key(source)
+        for row_number, row in enumerate(values, start=1):
+            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            if row_type != ROW_ORDER:
+                continue
+            row_source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
+            if row_source != wanted_source:
+                continue
+            sync_key = str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
+            order_id = sync_key.split(":", 1)[1].strip() if ":" in sync_key else ""
+            if not order_id and len(row) >= COLUMNS.order_number:
+                order_id = str(row[COLUMNS.order_number - 1]).strip()
+            if order_id in expenses:
+                rows_by_order.setdefault(order_id, []).append((row_number, row))
+
+        updates: list[dict[str, Any]] = []
+        for order_id, order_rows in rows_by_order.items():
+            expected = max(Decimal(0), expenses[order_id])
+            for index, (row_number, row) in enumerate(order_rows):
+                current = row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
+                if index == 0:
+                    if decimal_value(current) != expected:
+                        updates.append(
+                            {
+                                "range": f"S{row_number}",
+                                "values": [[decimal_for_sheet(expected)]],
+                            }
+                        )
+                elif str(current).strip():
+                    updates.append({"range": f"S{row_number}", "values": [[""]]})
+        if updates:
+            self.worksheet.batch_update(updates, raw=False)
+        return len(updates)
+
     def append_orders(
         self,
         orders: list[Order],
