@@ -4,7 +4,7 @@ from typing import Any
 
 from crm_sync.clients.google_sheets import COLUMNS, GoogleSheetsGateway
 from crm_sync.models import Order, OrderItem
-from crm_sync.sheet_layout import ROW_ORDER
+from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
 
 
 class StubWorksheet:
@@ -82,7 +82,7 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
     assert changed == 11
     assert updates["B5"] == "RMP-483122083"
-    assert updates["D5"] == "12:34"
+    assert updates["D5"] == sheet_serial(date(2026, 8, 3))
     assert updates["F5"] == "Київ, Тестовий Отримувач"
     assert updates["I5"] == "608037110"
     assert updates["K5"] == 1
@@ -104,6 +104,8 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     old[COLUMNS.customer - 1] = "Київ, Прізвище Ім'я По-батькові"
     old[COLUMNS.sync_key - 1] = "prom:1"
     old[COLUMNS.row_type - 1] = ROW_ORDER
+    old[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 7, 1))
+    old[COLUMNS.sender - 1] = "-"
 
     worksheet = LayoutWorksheet(rows)
     spreadsheet = StubSpreadsheet()
@@ -113,13 +115,14 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     gateway.header_row = 4
     gateway._apply_professional_formatting = lambda last_used_row: None
 
-    added = gateway.append_orders([], {}, sender_default="-", operational_day=date(2026, 8, 3))
+    added = gateway.append_orders([], {}, sender_default="наш", operational_day=date(2026, 8, 3))
 
     written = worksheet.written_values
     order_row = next(row for row in written if row[COLUMNS.row_type - 1] == ROW_ORDER)
     assert order_row[COLUMNS.operational_date - 1] != date(2026, 8, 3)
     assert order_row[COLUMNS.customer - 1] == "Київ, Прізвище Ім'я"
-    assert order_row[COLUMNS.order_date - 1] == "10:00"
+    assert order_row[COLUMNS.order_date - 1] == sheet_serial(date(2026, 7, 1))
+    assert order_row[COLUMNS.sender - 1] == "наш"
     assert not any(not any(str(value).strip() for value in row) for row in written)
     month_rows = [row for row in written if row[COLUMNS.row_type - 1] == "MONTH"]
     day_rows = [row for row in written if row[COLUMNS.row_type - 1] == "DAY"]

@@ -17,6 +17,7 @@ def test_sheet_dates_and_month_label() -> None:
     day = date(2026, 8, 3)
 
     assert parse_sheet_date(sheet_serial(day)) == day
+    assert parse_sheet_date(0.5) is None
     assert parse_sheet_date("03.08.2026") == day
     assert month_period_label(day) == "01.08.2026 — 31.08.2026"
     assert parse_order_day(sheet_serial(day) + 0.5) == day
@@ -31,7 +32,9 @@ def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
     assert '$V$5:$V$30;"ORDER"' in formulas[ROW_REPORT_DAY][4]
     assert "DATE(2026;8;2)" in formulas[ROW_REPORT_DAY][6]
     assert formulas[ROW_REPORT_FORECAST][4].startswith("=ROUNDUP(")
-    assert formulas[ROW_REPORT_FORECAST][6].endswith("*31/2")
+    assert formulas[ROW_REPORT_FORECAST][6].endswith(")*31/2")
+    assert formulas[ROW_REPORT_FORECAST][8].startswith("=(SUMIFS(")
+    assert ")*31/2" in formulas[ROW_REPORT_FORECAST][8]
     assert formulas[ROW_REPORT_DAY][8].startswith("=SUMIFS($M$5:$M$30;")
     assert "-SUMIFS($R$5:$R$30;" in formulas[ROW_REPORT_DAY][8]
 

@@ -475,7 +475,7 @@ class GoogleSheetsGateway:
             },
         ]
 
-        widths = (55, 105, 100, 58, 80, 130, 95, 180, 70, 70, 45, 65, 70, 75, 90, 60, 70, 65, 65, 110)
+        widths = (55, 105, 100, 78, 80, 135, 95, 180, 70, 85, 60, 80, 85, 90, 90, 75, 85, 75, 80, 110)
         for index, width in enumerate(widths):
             requests.append(
                 {
@@ -493,12 +493,12 @@ class GoogleSheetsGateway:
             )
 
         style_by_type = {
-            ROW_MONTH: ("#17365D", "#FFFFFF", 11, 30),
-            ROW_DAY: ("#D9EAF7", "#17365D", 9, 24),
-            ROW_HEADER: ("#2F75B5", "#FFFFFF", 8, 44),
-            ROW_REPORT_DAY: ("#E2F0D9", "#375623", 8, 24),
-            ROW_REPORT_MTD: ("#DDEBF7", "#1F4E78", 8, 24),
-            ROW_REPORT_FORECAST: ("#FCE4D6", "#9C5700", 8, 24),
+            ROW_MONTH: ("#17365D", "#FFFFFF", 11, 32),
+            ROW_DAY: ("#D9EAF7", "#17365D", 9, 30),
+            ROW_HEADER: ("#2F75B5", "#FFFFFF", 8, 64),
+            ROW_REPORT_DAY: ("#E2F0D9", "#375623", 8, 34),
+            ROW_REPORT_MTD: ("#DDEBF7", "#1F4E78", 8, 34),
+            ROW_REPORT_FORECAST: ("#FCE4D6", "#9C5700", 8, 34),
         }
         for row_type, (fill_hex, font_hex, font_size, height) in style_by_type.items():
             for row_number in typed_rows.get(row_type, []):
@@ -580,7 +580,7 @@ class GoogleSheetsGateway:
                             "startIndex": row_number - 1,
                             "endIndex": row_number,
                         },
-                        "properties": {"pixelSize": 32},
+                        "properties": {"pixelSize": 38},
                         "fields": "pixelSize",
                     }
                 },
@@ -622,7 +622,7 @@ class GoogleSheetsGateway:
 
         number_formats = {
             COLUMNS.tracking_number: ("TEXT", "@"),
-            COLUMNS.order_date: ("TIME", "hh:mm"),
+            COLUMNS.order_date: ("DATE", "dd.mm.yyyy"),
             COLUMNS.order_number: ("TEXT", "@"),
             COLUMNS.phone: ("TEXT", "@"),
             COLUMNS.product_code: ("TEXT", "@"),
@@ -896,14 +896,14 @@ class GoogleSheetsGateway:
                     if current != order.tracking_number:
                         updates.append({"range": f"B{row_number}", "values": [[order.tracking_number]]})
                 if order and order.completion_is_exact:
-                    completion_time = order.completed_at.strftime("%H:%M")
-                    current_time = (
-                        str(row[COLUMNS.order_date - 1]).strip()
-                        if len(row) >= COLUMNS.order_date
-                        else ""
+                    completion_date = order.completed_at.date()
+                    current_completion_date = parse_sheet_date(
+                        row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else ""
                     )
-                    if current_time != completion_time:
-                        updates.append({"range": f"D{row_number}", "values": [[completion_time]]})
+                    if current_completion_date != completion_date:
+                        updates.append(
+                            {"range": f"D{row_number}", "values": [[sheet_serial(completion_date)]]}
+                        )
                     current_day = parse_sheet_date(
                         row[COLUMNS.operational_date - 1]
                         if len(row) >= COLUMNS.operational_date
@@ -1004,7 +1004,14 @@ class GoogleSheetsGateway:
                 continue
             padded[COLUMNS.tracking_number - 1] = tracking
             padded[COLUMNS.customer - 1] = clean_customer_display(padded[COLUMNS.customer - 1])
-            padded[COLUMNS.order_date - 1] = parse_sheet_time(padded[COLUMNS.order_date - 1])
+            raw_completion = padded[COLUMNS.order_date - 1]
+            completion_day = parse_sheet_date(raw_completion)
+            if completion_day is None and parse_sheet_time(raw_completion):
+                completion_day = order_day
+            padded[COLUMNS.order_date - 1] = sheet_serial(completion_day) if completion_day else ""
+            current_sender = str(padded[COLUMNS.sender - 1]).strip()
+            if not current_sender or current_sender == "-":
+                padded[COLUMNS.sender - 1] = sender_default
             if not str(padded[COLUMNS.payment_method - 1]).strip() and str(
                 padded[COLUMNS.source - 1]
             ).casefold() == "rozetka":
@@ -1036,7 +1043,7 @@ class GoogleSheetsGateway:
                     if shipment_status
                     else ("Невідомо" if extract_ttn(order.tracking_number) else "Інший перевізник")
                 )
-                row[COLUMNS.order_date - 1] = order.completed_at.strftime("%H:%M")
+                row[COLUMNS.order_date - 1] = sheet_serial(order.completed_at.date())
                 row[COLUMNS.order_number - 1] = order.external_id
                 row[COLUMNS.customer - 1] = customer_display(order.city, order.customer_name)
                 row[COLUMNS.phone - 1] = order.phone

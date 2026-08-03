@@ -12,7 +12,7 @@ BUSINESS_HEADERS = (
     "Джерело",
     "ТТН",
     "Статус доставки (Нова пошта)",
-    "Час виконання",
+    "Дата виконання",
     "№ замовлення",
     "Місто / отримувач",
     "Телефон",
@@ -51,6 +51,8 @@ def sheet_serial(value: date) -> int:
 
 def parse_sheet_date(value: Any) -> date | None:
     if isinstance(value, (int, float)):
+        if float(value) < 1:
+            return None
         return EXCEL_EPOCH + timedelta(days=int(value))
     raw = str(value or "").strip()
     if not raw:
@@ -128,7 +130,7 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
     }
     forecast = {}
     for column, formula in mtd.items():
-        projected = f"{formula[1:]}*{days_in_month}/{elapsed}"
+        projected = f"({formula[1:]})*{days_in_month}/{elapsed}"
         forecast[column] = f"=ROUNDUP({projected};0)" if column == 4 else f"={projected}"
     return {ROW_REPORT_DAY: daily, ROW_REPORT_MTD: mtd, ROW_REPORT_FORECAST: forecast}
 
