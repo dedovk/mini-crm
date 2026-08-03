@@ -107,13 +107,11 @@ Dry-run does not add the technical column, validations, rows or status updates.
 
 ## GitHub Actions
 
-The workflow is in `.github/workflows/cron.yml` and requests runs at minutes 11, 26, 41
-and 56. The offset avoids GitHub's busiest start-of-hour window. Frequent runs read the
-latest seven days; a timezone-aware daily run at 02:13 `Europe/Kyiv` reconciles the full
-30-day history, including TTNs added to older orders. GitHub may still delay scheduled
-events, so the synchronization itself is idempotent and safe after a delayed run.
-The workflow also supports manual `workflow_dispatch` with a `dry_run` checkbox. A
-concurrency group prevents overlapping writes.
+DirectAdmin is the primary scheduler and dispatches the GitHub workflow every 15 minutes
+through `workflow_dispatch`. Frequent runs read the latest seven days. GitHub keeps only
+one timezone-aware daily run at 02:13 `Europe/Kyiv` to reconcile the full 30-day history,
+including TTNs added to older orders. The workflow also supports manual dispatch with a
+`dry_run` checkbox. A concurrency group prevents overlapping writes.
 
 ## Prom.ua
 

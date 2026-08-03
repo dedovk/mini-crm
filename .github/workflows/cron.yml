@@ -2,9 +2,8 @@ name: Marketplace CRM sync
 
 on:
   schedule:
-    # Offset from the busiest start-of-hour window, where GitHub may drop cron events.
-    - cron: "11,26,41,56 * * * *"
-    # One daily deep reconciliation catches TTNs added to older orders.
+    # DirectAdmin dispatches the frequent 15-minute runs. Keep one GitHub-hosted
+    # daily deep reconciliation to catch TTNs added to older orders.
     - cron: "13 2 * * *"
       timezone: "Europe/Kyiv"
   workflow_dispatch:
