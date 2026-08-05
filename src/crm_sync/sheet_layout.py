@@ -178,6 +178,8 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
     }
     forecast = {}
     for column, formula in mtd.items():
+        if column in {12, 14, 16}:
+            continue
         projected = f"({formula[1:]})*{days_in_month}/{elapsed}"
         forecast[column] = f"=ROUNDUP({projected};0)" if column == 4 else f"={projected}"
     return {ROW_REPORT_DAY: daily, ROW_REPORT_MTD: mtd, ROW_REPORT_FORECAST: forecast}

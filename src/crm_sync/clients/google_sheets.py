@@ -104,6 +104,7 @@ REPORT_METRIC_LABELS = {
     13: "Rozetka, грн",
     15: "Prom 10 грн",
 }
+ADVERTISING_REPORT_LABEL_COLUMNS = {11, 13, 15}
 
 
 class GoogleSheetsGateway:
@@ -336,6 +337,8 @@ class GoogleSheetsGateway:
                     report_row: list[Any] = [""] * COLUMNS.operational_date
                     report_row[0] = labels[row_type]
                     for column, label in REPORT_METRIC_LABELS.items():
+                        if row_type == ROW_REPORT_FORECAST and column in ADVERTISING_REPORT_LABEL_COLUMNS:
+                            continue
                         report_row[column - 1] = label
                     for column, formula in formulas[row_type].items():
                         report_row[column - 1] = formula
@@ -1203,6 +1206,8 @@ class GoogleSheetsGateway:
                     report_row = [""] * COLUMNS.operational_date
                     report_row[0] = labels[row_type]
                     for column, label in REPORT_METRIC_LABELS.items():
+                        if row_type == ROW_REPORT_FORECAST and column in ADVERTISING_REPORT_LABEL_COLUMNS:
+                            continue
                         report_row[column - 1] = label
                     report_row[COLUMNS.row_type - 1] = row_type
                     report_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)

@@ -144,6 +144,8 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     assert "*Rozetka*" in report_row[13]
     assert "*Prom*" in report_row[15]
     assert report_row[15].endswith(";10)")
+    forecast_row = written[report_indexes[2]]
+    assert forecast_row[10:16] == ["", "", "", "", "", ""]
     assert added == 0
 
 

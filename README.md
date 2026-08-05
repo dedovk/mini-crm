@@ -28,6 +28,7 @@ through GitHub Actions.
 - Prom.ua advertising expense is written to column S from `prosale_commission.value`
   (with `cpa_commission.amount` as a compatibility fallback). Report rows split it into
   ProSale and exact fixed `10.00` Prom charges; Rozetka expenses are reported separately.
+  Advertising values are shown in daily and month-to-date rows without a monthly forecast.
 - Existing order rows are refreshed from their source for tracking number, combined
   `city, surname first name`, product code, payment method and the markup formula without
   overwriting manual costs.

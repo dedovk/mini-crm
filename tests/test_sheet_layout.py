@@ -42,7 +42,9 @@ def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
     assert '$A$5:$A$30;"*Prom*";$S$5:$S$30;"<>10"' in formulas[ROW_REPORT_DAY][12]
     assert '$A$5:$A$30;"*Rozetka*"' in formulas[ROW_REPORT_DAY][14]
     assert '$A$5:$A$30;"*Prom*";$S$5:$S$30;10' in formulas[ROW_REPORT_DAY][16]
-    assert formulas[ROW_REPORT_FORECAST][16].endswith(")*31/2")
+    assert 12 not in formulas[ROW_REPORT_FORECAST]
+    assert 14 not in formulas[ROW_REPORT_FORECAST]
+    assert 16 not in formulas[ROW_REPORT_FORECAST]
 
 
 def test_clean_customer_display_removes_serialized_rozetka_city() -> None:
