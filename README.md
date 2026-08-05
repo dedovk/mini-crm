@@ -49,13 +49,24 @@ through GitHub Actions.
 - A separate `Журнал змін` worksheet records newly appended orders and Nova Poshta status
   transitions with timestamps, sync keys, TTNs and old/new values. Audit failures are
   non-fatal and are surfaced in the GitHub Actions summary.
+- Every run performs a read-only integrity preflight before any mutation and a second
+  validation after production writes. Formula errors, negative unit costs, split duplicate
+  order blocks and conflicting totals stop the sync before more data is written.
+- Hidden columns X:Y persist the first observed completion date and the last marketplace
+  order status. For sources without status history, the first real observation of `Виконано`
+  is used instead of inventing a date from order creation.
+- No structural worksheet rebuild is performed when there are no new orders. A hidden
+  timestamped backup is created before an actual rebuild, and the three newest copies are kept.
+- Production integration failures are aggregated. One GitHub Issue is opened on the third
+  consecutive degraded run and automatically closed after recovery, avoiding an email for
+  every 15-minute attempt.
 
 ## Google Sheet contract
 
 The current template is spreadsheet `<GOOGLE_SPREADSHEET_ID_REMOVED>`,
 worksheet `БСК`, with the first headers on row 4. Columns A:T are business fields.
-Columns U:W are hidden technical fields for duplicate protection, row type and the
-operational date used by daily reports.
+Columns U:Y are hidden technical fields for duplicate protection, row type, the
+operational date used by daily reports, first completion observation and source status.
 
 The service account email must have **Editor** access to the spreadsheet.
 
@@ -90,7 +101,8 @@ ROZETKA_PASSWORD
 ```
 
 `ROZETKA_API_TOKEN` can be used directly, but a JWT can expire. When username/password
-are configured, the client can obtain a new token through `/site/login`.
+are configured, the client obtains a new token through `POST /sites`; Rozetka requires
+the password field to be Base64-encoded in this request.
 
 Non-secret defaults are documented in [.env.example](.env.example).
 
@@ -144,7 +156,7 @@ The client uses `GET /orders/search` with `types=3` and
 `expand=user,delivery,purchases,status_data`, handles pagination and retains only successfully
 completed orders with a TTN. The API `changed` value supplies the completion time, while an
 available `order_status_history` timestamp takes precedence. It accepts an existing token and
-supports `/site/login` fallback when login/password secrets are configured.
+supports the current `POST /sites` login flow when login/password secrets are configured.
 The current official base URL is `https://api-seller.rozetka.com.ua`; the former
 `api.seller.rozetka.com.ua` hostname serves an expired certificate and is not used.
 

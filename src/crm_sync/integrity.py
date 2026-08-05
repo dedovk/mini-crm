@@ -29,7 +29,7 @@ def validate_incoming_orders(orders: list[Order]) -> IntegrityReport:
     for order in orders:
         key = order.sync_key.casefold()
         if key in seen:
-            errors.append(f"API returned duplicate order {order.sync_key}")
+            warnings.append(f"API returned duplicate order {order.sync_key}; duplicate will be ignored")
             continue
         seen.add(key)
         if not order.items:

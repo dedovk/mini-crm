@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from crm_sync.models import Order, OrderItem
+from crm_sync.models import Order, OrderItem, ShipmentUpdateResult, SyncHealthState
 from crm_sync.services import SourceSyncError, SyncService
 
 
@@ -21,6 +21,38 @@ class SheetsStub:
 
     def pending_tracking_numbers(self) -> list[str]:
         return []
+
+
+class ProductionSheetsStub(SheetsStub):
+    def __init__(self) -> None:
+        self.schema_modes: list[bool] = []
+        self.health_calls: list[list[str]] = []
+
+    def ensure_schema(self, *, apply_changes: bool) -> None:
+        self.schema_modes.append(apply_changes)
+
+    def record_completion_observations(self, orders, *, observed_at):
+        return ()
+
+    def refresh_order_details(self, orders) -> int:
+        return 0
+
+    def update_shipment_statuses(self, statuses):
+        return ShipmentUpdateResult()
+
+    def append_orders(self, orders, statuses, **kwargs) -> int:
+        assert orders == []
+        return 0
+
+    def update_order_expenses(self, expenses, *, source: str) -> int:
+        return 0
+
+    def append_audit_events(self, events) -> int:
+        return 0
+
+    def record_sync_health(self, failed_components, *, occurred_at):
+        self.health_calls.append(failed_components)
+        return SyncHealthState()
 
 
 class NovaPoshtaStub:
@@ -145,3 +177,22 @@ def test_deep_run_does_not_backfill_previously_unseen_stale_order() -> None:
 
     assert result.stale_orders == 1
     assert result.new_orders == 0
+
+
+def test_production_run_performs_preflight_postflight_and_health_update() -> None:
+    sheets = ProductionSheetsStub()
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[SuccessfulSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    result = service.run()
+
+    assert sheets.schema_modes == [False, True]
+    assert sheets.health_calls == [[]]
+    assert result.health.consecutive_failures == 0

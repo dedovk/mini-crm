@@ -31,12 +31,12 @@ def make_order(*, quantity: Decimal = Decimal(1), line_total: Decimal = Decimal(
     )
 
 
-def test_incoming_integrity_rejects_duplicate_orders_and_invalid_quantity() -> None:
+def test_incoming_integrity_warns_about_duplicates_and_rejects_invalid_quantity() -> None:
     first = make_order(quantity=Decimal(0))
     report = validate_incoming_orders([first, make_order()])
 
     assert not report.ok
-    assert any("duplicate order" in error for error in report.errors)
+    assert any("duplicate order" in warning for warning in report.warnings)
     assert any("quantity must be positive" in error for error in report.errors)
 
 
