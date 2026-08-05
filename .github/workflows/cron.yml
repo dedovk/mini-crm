@@ -13,6 +13,11 @@ on:
         required: false
         default: false
         type: boolean
+      lookback_days:
+        description: "Order history window for a manual diagnostic run"
+        required: false
+        default: "7"
+        type: string
 
 concurrency:
   group: marketplace-crm-sync
@@ -45,7 +50,7 @@ jobs:
       APP_TIMEZONE: ${{ secrets.APP_TIMEZONE }}
       # Frequent runs fetch seven days to reduce Prom API usage. The daily run
       # reconciles the full 30-day history.
-      SYNC_LOOKBACK_DAYS: ${{ github.event.schedule == '13 2 * * *' && '30' || '7' }}
+      SYNC_LOOKBACK_DAYS: ${{ github.event.schedule == '13 2 * * *' && '30' || inputs.lookback_days || '7' }}
       # Deep runs may inspect older orders, but they must not backfill stale
       # missing orders into the current reporting day.
       NEW_ORDER_MAX_AGE_DAYS: "7"

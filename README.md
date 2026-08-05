@@ -180,5 +180,7 @@ which makes a zero-result OpenCart run diagnosable from GitHub Actions.
 1. Add `ROZETKA_USERNAME` and `ROZETKA_PASSWORD` if the current token is a JWT.
 2. Install and test the ocStore endpoint.
 3. Run GitHub Actions manually with `dry_run=true` and inspect logs.
+   Set `lookback_days=30` when diagnosing older OpenCart or marketplace orders; the
+   independent seven-day new-order cutoff prevents accidental stale backfill.
 4. Run once with `dry_run=false` on a small known set of orders.
 5. Leave the scheduled workflow enabled after confirming row formatting and merging.
