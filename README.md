@@ -63,8 +63,8 @@ through GitHub Actions.
 
 ## Google Sheet contract
 
-The current template is spreadsheet `<GOOGLE_SPREADSHEET_ID_REMOVED>`,
-worksheet `БСК`, with the first headers on row 4. Columns A:T are business fields.
+The target spreadsheet is selected only through the `GOOGLE_SPREADSHEET_ID` GitHub Secret.
+Worksheet `БСК` contains the CRM data, with the first headers near the top. Columns A:T are business fields.
 Columns U:Y are hidden technical fields for duplicate protection, row type, the
 operational date used by daily reports, first completion observation and source status.
 
@@ -104,7 +104,7 @@ ROZETKA_PASSWORD
 are configured, the client obtains a new token through `POST /sites`; Rozetka requires
 the password field to be Base64-encoded in this request.
 
-Non-secret defaults are documented in [.env.example](.env.example).
+Non-secret runtime defaults are documented in the workflow and in `Settings.from_env()`.
 
 ## Local setup
 
