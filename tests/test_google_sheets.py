@@ -206,6 +206,31 @@ def test_completion_observation_audits_previous_known_status() -> None:
     assert events[0].new_value == "Виконано"
 
 
+def test_completion_backfill_migrates_historical_rows_and_repeated_headers() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    rows[3][0:2] = ["Джерело", "ТТН"]
+    row = rows[5]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:old"
+    row[COLUMNS.order_date - 1] = "01.07.2026"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    changed = gateway.backfill_completion_state(
+        observed_at=datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+    )
+
+    updates = {update["range"]: update["values"][0] for update in worksheet.updates}
+    assert changed == 3
+    assert updates["U4:Y4"][-2:] == [
+        "Перше спостереження виконання",
+        "Статус замовлення джерела",
+    ]
+    assert updates["X6"] == [sheet_serial(date(2026, 7, 1))]
+    assert updates["Y6"] == ["Виконано"]
+
+
 def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> None:
     rows = [[""] * LAST_COLUMN for _ in range(5)]
     old = rows[4]

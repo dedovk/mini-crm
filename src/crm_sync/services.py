@@ -138,11 +138,12 @@ class SyncService:
         completion_events: tuple[OrderAuditEvent, ...] = ()
         if not self.dry_run:
             self.sheets.ensure_schema(apply_changes=True)
+            refreshed += self.sheets.backfill_completion_state(observed_at=now)
             completion_events = self.sheets.record_completion_observations(
                 fetched,
                 observed_at=now,
             )
-            refreshed = self.sheets.refresh_order_details(fetched)
+            refreshed += self.sheets.refresh_order_details(fetched)
         pending_ttns = self.sheets.pending_tracking_numbers()
 
         unique_orders: list[Order] = []

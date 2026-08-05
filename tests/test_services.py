@@ -34,6 +34,9 @@ class ProductionSheetsStub(SheetsStub):
     def record_completion_observations(self, orders, *, observed_at):
         return ()
 
+    def backfill_completion_state(self, *, observed_at) -> int:
+        return 0
+
     def refresh_order_details(self, orders) -> int:
         return 0
 

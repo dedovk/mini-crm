@@ -1370,6 +1370,76 @@ class GoogleSheetsGateway:
             self.worksheet.batch_update(updates, raw=False)
         return tuple(events)
 
+    def backfill_completion_state(self, *, observed_at: datetime) -> int:
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        updates: list[dict[str, Any]] = []
+        for row_number, row in enumerate(values, start=1):
+            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            marker_source = str(row[0]).strip().casefold() if row else ""
+            marker_ttn = str(row[1]).strip().casefold() if len(row) > 1 else ""
+            if row_type == ROW_HEADER or (
+                marker_source == BUSINESS_HEADERS[0].casefold()
+                and marker_ttn == BUSINESS_HEADERS[1].casefold()
+            ):
+                current_headers = list(row[COLUMNS.sync_key - 1 : LAST_COLUMN])
+                expected_headers = list(ALL_HEADERS[COLUMNS.sync_key - 1 :])
+                if current_headers != expected_headers:
+                    updates.append(
+                        {
+                            "range": (
+                                f"{rowcol_to_a1(row_number, COLUMNS.sync_key)}:"
+                                f"{rowcol_to_a1(row_number, LAST_COLUMN)}"
+                            ),
+                            "values": [expected_headers],
+                        }
+                    )
+                continue
+            if row_type != ROW_ORDER:
+                continue
+
+            first_seen = parse_sheet_date(
+                row[COLUMNS.first_seen_completed - 1]
+                if len(row) >= COLUMNS.first_seen_completed
+                else ""
+            )
+            completion_day = parse_sheet_date(
+                row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else ""
+            )
+            operational_day = parse_sheet_date(
+                row[COLUMNS.operational_date - 1] if len(row) >= COLUMNS.operational_date else ""
+            )
+            if first_seen is None:
+                first_seen = completion_day or operational_day or observed_at.date()
+                updates.append(
+                    {
+                        "range": rowcol_to_a1(row_number, COLUMNS.first_seen_completed),
+                        "values": [[sheet_serial(first_seen)]],
+                    }
+                )
+            if completion_day is None:
+                updates.append(
+                    {
+                        "range": rowcol_to_a1(row_number, COLUMNS.order_date),
+                        "values": [[sheet_serial(first_seen)]],
+                    }
+                )
+            current_status = (
+                str(row[COLUMNS.order_status - 1]).strip()
+                if len(row) >= COLUMNS.order_status
+                else ""
+            )
+            if not current_status:
+                updates.append(
+                    {
+                        "range": rowcol_to_a1(row_number, COLUMNS.order_status),
+                        "values": [["Виконано"]],
+                    }
+                )
+
+        if updates:
+            self.worksheet.batch_update(updates, raw=False)
+        return len(updates)
+
     def update_order_expenses(self, expenses: dict[str, Decimal], *, source: str) -> int:
         if not expenses:
             return 0
