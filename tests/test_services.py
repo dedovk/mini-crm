@@ -14,6 +14,11 @@ class SheetsStub:
     def read_existing_sync_keys(self) -> set[str]:
         return set()
 
+    def validate_integrity(self):
+        from crm_sync.integrity import IntegrityReport
+
+        return IntegrityReport()
+
     def pending_tracking_numbers(self) -> list[str]:
         return []
 

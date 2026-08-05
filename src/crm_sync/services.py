@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from crm_sync.clients.google_sheets import GoogleSheetsGateway
 from crm_sync.clients.nova_poshta import NovaPoshtaClient
 from crm_sync.models import Order, OrderAuditEvent
+from crm_sync.integrity import IntegrityError, validate_incoming_orders
 
 LOGGER = logging.getLogger(__name__)
 
@@ -81,7 +82,10 @@ class SyncService:
 
     def run(self) -> SyncResult:
         now = datetime.now(ZoneInfo(self.timezone))
-        self.sheets.ensure_schema(apply_changes=not self.dry_run)
+        self.sheets.ensure_schema(apply_changes=False)
+        sheet_integrity = self.sheets.validate_integrity()
+        if not sheet_integrity.ok:
+            raise IntegrityError(sheet_integrity)
         existing_keys = self.sheets.read_existing_sync_keys()
         since = now - timedelta(days=self.lookback_days)
 
@@ -99,6 +103,12 @@ class SyncService:
             source_counts[source.source] = len(source_orders)
             LOGGER.info("%s returned %s eligible order(s)", source.source, len(source_orders))
             fetched.extend(source_orders)
+
+        incoming_integrity = validate_incoming_orders(fetched)
+        if not incoming_integrity.ok:
+            raise IntegrityError(incoming_integrity)
+        warnings.extend(sheet_integrity.warnings)
+        warnings.extend(incoming_integrity.warnings)
 
         expenses: dict[str, Decimal] | None = None
         if self.expense_source:
@@ -124,6 +134,7 @@ class SyncService:
 
         refreshed = 0
         if not self.dry_run:
+            self.sheets.ensure_schema(apply_changes=True)
             refreshed = self.sheets.refresh_order_details(fetched)
         pending_ttns = self.sheets.pending_tracking_numbers()
 

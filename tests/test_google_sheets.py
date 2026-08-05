@@ -218,6 +218,26 @@ def test_update_order_expenses_writes_net_total_only_to_first_item_row() -> None
     assert updates == {"S5": 183.42, "S6": ""}
 
 
+def test_sheet_integrity_rejects_formula_errors_negative_cost_and_split_order() -> None:
+    rows = [[""] * COLUMNS.operational_date for _ in range(8)]
+    for index in (4, 6):
+        rows[index][COLUMNS.row_type - 1] = ROW_ORDER
+        rows[index][COLUMNS.sync_key - 1] = "prom:501"
+        rows[index][COLUMNS.order_date - 1] = "05.08.2026"
+    rows[4][COLUMNS.cost - 1] = "-10"
+    rows[6][COLUMNS.markup - 1] = "#REF!"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    report = gateway.validate_integrity()
+
+    assert not report.ok
+    assert any("negative unit cost" in error for error in report.errors)
+    assert any("formula error" in error for error in report.errors)
+    assert any("split across" in error for error in report.errors)
+
+
 def test_shipment_status_updates_create_one_audit_change_per_order() -> None:
     rows = [[""] * COLUMNS.operational_date for _ in range(6)]
     for index in (4, 5):

@@ -18,6 +18,7 @@ from crm_sync.models import (
     ShipmentStatusChange,
     ShipmentUpdateResult,
 )
+from crm_sync.integrity import IntegrityReport
 from crm_sync.sheet_layout import (
     ALL_HEADERS,
     BUSINESS_HEADERS,
@@ -247,6 +248,50 @@ class GoogleSheetsGateway:
             )
             self._configure_validations_and_hidden_key()
             self._ensure_audit_worksheet()
+
+    def validate_integrity(self) -> IntegrityReport:
+        values = self.worksheet.get_all_values(value_render_option="FORMATTED_VALUE")
+        errors: list[str] = []
+        warnings: list[str] = []
+        formula_errors = ("#REF!", "#VALUE!", "#DIV/0!", "#NAME?", "#N/A")
+        rows_by_key: dict[str, list[int]] = {}
+        totals_by_key: dict[str, set[Decimal]] = {}
+
+        for row_number, row in enumerate(values, start=1):
+            for column, value in enumerate(row, start=1):
+                rendered = str(value).strip()
+                if any(error in rendered for error in formula_errors):
+                    errors.append(f"formula error at {rowcol_to_a1(row_number, column)}: {rendered}")
+            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            if row_type != ROW_ORDER:
+                continue
+            sync_key = (
+                str(row[COLUMNS.sync_key - 1]).strip().casefold()
+                if len(row) >= COLUMNS.sync_key
+                else ""
+            )
+            if not sync_key:
+                errors.append(f"order row {row_number} has no Sync Key")
+                continue
+            rows_by_key.setdefault(sync_key, []).append(row_number)
+            cost = decimal_value(row[COLUMNS.cost - 1] if len(row) >= COLUMNS.cost else "")
+            if cost < 0:
+                errors.append(f"negative unit cost at Q{row_number}")
+            raw_total = row[COLUMNS.order_total - 1] if len(row) >= COLUMNS.order_total else ""
+            if str(raw_total).strip():
+                totals_by_key.setdefault(sync_key, set()).add(decimal_value(raw_total))
+            if not str(row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else "").strip():
+                warnings.append(f"{sync_key}: completion date is not recorded")
+
+        for sync_key, row_numbers in rows_by_key.items():
+            expected = list(range(min(row_numbers), max(row_numbers) + 1))
+            if row_numbers != expected:
+                errors.append(f"{sync_key}: product rows are split across the worksheet")
+            totals = totals_by_key.get(sync_key, set())
+            if len(totals) > 1:
+                errors.append(f"{sync_key}: conflicting order totals {sorted(totals)}")
+
+        return IntegrityReport(tuple(dict.fromkeys(errors)), tuple(dict.fromkeys(warnings)))
 
     def _configure_validations_and_hidden_key(self) -> None:
         row_count = self.worksheet.row_count
