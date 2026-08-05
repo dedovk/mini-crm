@@ -95,6 +95,16 @@ class SheetColumns:
 
 COLUMNS = SheetColumns()
 
+REPORT_METRIC_LABELS = {
+    3: "Замовлень",
+    5: "Сума, грн",
+    7: "Собівартість, грн",
+    9: "Націнка, грн",
+    11: "ProSale, грн",
+    13: "Rozetka, грн",
+    15: "Prom 10 грн",
+}
+
 
 class GoogleSheetsGateway:
     def __init__(
@@ -325,6 +335,8 @@ class GoogleSheetsGateway:
                     last_used_row += 1
                     report_row: list[Any] = [""] * COLUMNS.operational_date
                     report_row[0] = labels[row_type]
+                    for column, label in REPORT_METRIC_LABELS.items():
+                        report_row[column - 1] = label
                     for column, formula in formulas[row_type].items():
                         report_row[column - 1] = formula
                     report_row[COLUMNS.row_type - 1] = row_type
@@ -1187,17 +1199,10 @@ class GoogleSheetsGateway:
                     ROW_REPORT_MTD: f"Разом за {current_day.day} дн. місяця",
                     ROW_REPORT_FORECAST: "Прогноз на місяць",
                 }
-                metric_labels = {
-                    3: "Замовлень",
-                    5: "Сума, грн",
-                    7: "Собівартість, грн",
-                    9: "Націнка, грн",
-                    11: "Реклама, грн",
-                }
                 for row_type in (ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST):
                     report_row = [""] * COLUMNS.operational_date
                     report_row[0] = labels[row_type]
-                    for column, label in metric_labels.items():
+                    for column, label in REPORT_METRIC_LABELS.items():
                         report_row[column - 1] = label
                     report_row[COLUMNS.row_type - 1] = row_type
                     report_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)

@@ -25,8 +25,9 @@ through GitHub Actions.
 - A note such as `перед - 500` is parsed into numeric prepayment `500`.
 - Existing manual cost, advertising and manager-note cells are never overwritten.
 - Markup in column R is created as `(unit price - cost) * quantity`.
-- Prom.ua ProSale commission is written to advertising expenses in column S from
-  `prosale_commission.value` (with `cpa_commission.amount` as a compatibility fallback).
+- Prom.ua advertising expense is written to column S from `prosale_commission.value`
+  (with `cpa_commission.amount` as a compatibility fallback). Report rows split it into
+  ProSale and exact fixed `10.00` Prom charges; Rozetka expenses are reported separately.
 - Existing order rows are refreshed from their source for tracking number, combined
   `city, surname first name`, product code, payment method and the markup formula without
   overwriting manual costs.
@@ -34,7 +35,7 @@ through GitHub Actions.
 - Individual source failures are logged and do not stop the other marketplaces.
 - Orders are grouped by the date when they became completed. At local midnight the previous
   day receives formula-driven daily, month-to-date and month forecast rows. Summary rows
-  are consecutive and place all five KPI labels and values together in columns A:L.
+  are consecutive and place all KPI labels and values together in columns A:P.
 - Multi-item orders receive a black outer border across the complete order block.
 - Month and day title rows contain styled `Виділити місяць` / `Виділити день` links that
   select the corresponding A:T range.

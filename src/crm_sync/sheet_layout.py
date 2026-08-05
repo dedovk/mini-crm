@@ -133,8 +133,24 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
     order_filter = f'{range_for("V")};"{ROW_ORDER}"'
     day_filter = f"{range_for('W')};{day_expr}"
     mtd_filter = f'{range_for("W")};">="&{month_start};{range_for("W")};"<="&{day_expr}'
+    source_range = range_for("A")
+    advertising_range = range_for("S")
     elapsed = day.day
     days_in_month = calendar.monthrange(day.year, day.month)[1]
+
+    def advertising_formula(period_filter: str, category: str) -> str:
+        source_criterion = "*Rozetka*" if category == "rozetka" else "*Prom*"
+        amount_filter = (
+            f";{advertising_range};10"
+            if category == "prom_fixed"
+            else f';{advertising_range};"<>10"'
+            if category == "prosale"
+            else ""
+        )
+        return (
+            f"=SUMIFS({advertising_range};{order_filter};{period_filter};"
+            f'{source_range};"{source_criterion}"{amount_filter})'
+        )
 
     daily = {
         4: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{day_filter})",
@@ -144,7 +160,9 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
             f"SUMIFS({range_for('R')};{order_filter};{day_filter})"
         ),
         10: f"=SUMIFS({range_for('R')};{order_filter};{day_filter})",
-        12: f"=SUMIFS({range_for('S')};{order_filter};{day_filter})",
+        12: advertising_formula(day_filter, "prosale"),
+        14: advertising_formula(day_filter, "rozetka"),
+        16: advertising_formula(day_filter, "prom_fixed"),
     }
     mtd = {
         4: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{mtd_filter})",
@@ -154,7 +172,9 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
             f"SUMIFS({range_for('R')};{order_filter};{mtd_filter})"
         ),
         10: f"=SUMIFS({range_for('R')};{order_filter};{mtd_filter})",
-        12: f"=SUMIFS({range_for('S')};{order_filter};{mtd_filter})",
+        12: advertising_formula(mtd_filter, "prosale"),
+        14: advertising_formula(mtd_filter, "rozetka"),
+        16: advertising_formula(mtd_filter, "prom_fixed"),
     }
     forecast = {}
     for column, formula in mtd.items():

@@ -136,6 +136,14 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     ]
     assert written[report_indexes[0] + 1][COLUMNS.row_type - 1] == "REPORT_MTD"
     assert written[report_indexes[1] + 1][COLUMNS.row_type - 1] == "REPORT_FORECAST"
+    report_row = written[report_indexes[0]]
+    assert report_row[10] == "ProSale, грн"
+    assert report_row[12] == "Rozetka, грн"
+    assert report_row[14] == "Prom 10 грн"
+    assert "<>10" in report_row[11]
+    assert "*Rozetka*" in report_row[13]
+    assert "*Prom*" in report_row[15]
+    assert report_row[15].endswith(";10)")
     assert added == 0
 
 
