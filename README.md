@@ -46,6 +46,9 @@ through GitHub Actions.
   failed write cannot erase the existing worksheet contents.
 - Every GitHub Actions run publishes a structured step summary with source counts, skipped
   stale orders, shipment updates, appended rows and non-fatal integration warnings.
+- A separate `Журнал змін` worksheet records newly appended orders and Nova Poshta status
+  transitions with timestamps, sync keys, TTNs and old/new values. Audit failures are
+  non-fatal and are surfaced in the GitHub Actions summary.
 
 ## Google Sheet contract
 
@@ -169,6 +172,8 @@ controller from [opencart_extension](opencart_extension/README.md) on
 The read-only endpoint returns only completed orders and derives `completed_at` from the
 latest history entry for the current completed status. The installed Nova Poshta module
 stores TTNs in the `novaposhta_cn_number` order field; the normalizer reads this field directly.
+Rejected completion statuses are logged as aggregate status names without customer data,
+which makes a zero-result OpenCart run diagnosable from GitHub Actions.
 
 ## Production rollout
 

@@ -8,9 +8,16 @@ from typing import Any
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import WorksheetNotFound
 from gspread.utils import rowcol_to_a1
 
-from crm_sync.models import Order, ShipmentStatus
+from crm_sync.models import (
+    Order,
+    OrderAuditEvent,
+    ShipmentStatus,
+    ShipmentStatusChange,
+    ShipmentUpdateResult,
+)
 from crm_sync.sheet_layout import (
     ALL_HEADERS,
     BUSINESS_HEADERS,
@@ -105,6 +112,19 @@ REPORT_METRIC_LABELS = {
     15: "Prom 10 грн",
 }
 ADVERTISING_REPORT_LABEL_COLUMNS = {11, 13, 15}
+AUDIT_WORKSHEET_NAME = "Журнал змін"
+AUDIT_HEADERS = (
+    "Час",
+    "Подія",
+    "Джерело",
+    "№ замовлення",
+    "Sync Key",
+    "ТТН",
+    "Поле",
+    "Старе значення",
+    "Нове значення",
+    "Деталі",
+)
 
 
 class GoogleSheetsGateway:
@@ -129,6 +149,58 @@ class GoogleSheetsGateway:
         self.worksheet = self.spreadsheet.worksheet(worksheet_name)
         self.header_row = header_row
         self.sender_options = sender_options
+
+    def _ensure_audit_worksheet(self):
+        created = False
+        try:
+            audit = self.spreadsheet.worksheet(AUDIT_WORKSHEET_NAME)
+        except WorksheetNotFound:
+            created = True
+            audit = self.spreadsheet.add_worksheet(
+                title=AUDIT_WORKSHEET_NAME,
+                rows=1000,
+                cols=len(AUDIT_HEADERS),
+            )
+        header_changed = audit.row_values(1)[: len(AUDIT_HEADERS)] != list(AUDIT_HEADERS)
+        if header_changed:
+            audit.update(values=[list(AUDIT_HEADERS)], range_name="A1:J1", raw=True)
+        if created or header_changed:
+            audit.freeze(rows=1)
+            audit.format(
+                "A1:J1",
+                {
+                    "backgroundColor": {"red": 0.12, "green": 0.31, "blue": 0.47},
+                    "textFormat": {
+                        "bold": True,
+                        "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                    },
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                },
+            )
+        return audit
+
+    def append_audit_events(self, events: list[OrderAuditEvent]) -> int:
+        if not events:
+            return 0
+        audit = self._ensure_audit_worksheet()
+        rows = [
+            [
+                event.occurred_at.strftime("%d.%m.%Y %H:%M:%S"),
+                event.event_type,
+                source_display(event.source),
+                event.order_id,
+                event.sync_key,
+                event.tracking_number,
+                event.field,
+                event.old_value,
+                event.new_value,
+                event.details,
+            ]
+            for event in events
+        ]
+        audit.append_rows(rows, value_input_option="USER_ENTERED")
+        return len(rows)
 
     def ensure_schema(self, *, apply_changes: bool = True) -> None:
         preview = self.worksheet.get(
@@ -174,6 +246,7 @@ class GoogleSheetsGateway:
                 raw=True,
             )
             self._configure_validations_and_hidden_key()
+            self._ensure_audit_worksheet()
 
     def _configure_validations_and_hidden_key(self) -> None:
         row_count = self.worksheet.row_count
@@ -847,11 +920,12 @@ class GoogleSheetsGateway:
     def _is_final_status(status: str) -> bool:
         return "отриман" in status or "відмова від отримання" in status
 
-    def update_shipment_statuses(self, statuses: dict[str, ShipmentStatus]) -> int:
+    def update_shipment_statuses(self, statuses: dict[str, ShipmentStatus]) -> ShipmentUpdateResult:
         if not statuses:
-            return 0
+            return ShipmentUpdateResult()
         values = self.worksheet.get_all_values()
         updates: list[dict[str, Any]] = []
+        changes: dict[str, ShipmentStatusChange] = {}
         for row_number, row in enumerate(values, start=1):
             row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
             if row_type and row_type != ROW_ORDER:
@@ -877,9 +951,34 @@ class GoogleSheetsGateway:
                         "values": [[status.status]],
                     }
                 )
+                sync_key = (
+                    str(row[COLUMNS.sync_key - 1]).strip()
+                    if len(row) >= COLUMNS.sync_key
+                    else ""
+                )
+                source = source_key(row[COLUMNS.source - 1] if len(row) >= COLUMNS.source else "")
+                order_id = (
+                    str(row[COLUMNS.order_number - 1]).strip()
+                    if len(row) >= COLUMNS.order_number
+                    else ""
+                )
+                if not order_id and ":" in sync_key:
+                    order_id = sync_key.split(":", 1)[1]
+                change_key = sync_key.casefold() or f"{source}:{order_id}:{tracking}"
+                changes.setdefault(
+                    change_key,
+                    ShipmentStatusChange(
+                        source=source,
+                        order_id=order_id,
+                        sync_key=sync_key,
+                        tracking_number=raw_tracking,
+                        old_status=current,
+                        new_status=status.status,
+                    ),
+                )
         if updates:
             self.worksheet.batch_update(updates, raw=True)
-        return len(updates)
+        return ShipmentUpdateResult(cell_updates=len(updates), changes=tuple(changes.values()))
 
     def refresh_order_details(self, orders: list[Order]) -> int:
         order_by_key = {order.sync_key.casefold(): order for order in orders}

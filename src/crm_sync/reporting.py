@@ -42,6 +42,7 @@ def render_github_summary(result: SyncResult) -> str:
             f"| Expense cells updated | {result.expense_updates} |",
             f"| Shipment status cells updated | {result.status_updates} |",
             f"| Item rows appended | {result.appended_rows} |",
+            f"| Audit events written | {result.audit_events} |",
         ]
     )
     if result.warnings:

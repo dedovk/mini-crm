@@ -46,6 +46,36 @@ class ShipmentStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class ShipmentStatusChange:
+    source: str
+    order_id: str
+    sync_key: str
+    tracking_number: str
+    old_status: str
+    new_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ShipmentUpdateResult:
+    cell_updates: int = 0
+    changes: tuple[ShipmentStatusChange, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class OrderAuditEvent:
+    occurred_at: datetime
+    event_type: str
+    source: str
+    order_id: str
+    sync_key: str
+    tracking_number: str
+    field: str = ""
+    old_value: str = ""
+    new_value: str = ""
+    details: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class OrderExpenseTransaction:
     transaction_id: str
     order_id: str

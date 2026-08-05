@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from crm_sync.clients.google_sheets import GoogleSheetsGateway
 from crm_sync.clients.nova_poshta import NovaPoshtaClient
-from crm_sync.models import Order
+from crm_sync.models import Order, OrderAuditEvent
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ class SyncResult:
     expense_updates: int = 0
     status_updates: int = 0
     appended_rows: int = 0
+    audit_events: int = 0
 
 
 class SourceSyncError(RuntimeError):
@@ -175,7 +176,7 @@ class SyncService:
             self._raise_for_source_failures(result)
             return result
 
-        updated = self.sheets.update_shipment_statuses(statuses)
+        shipment_update = self.sheets.update_shipment_statuses(statuses)
         appended_rows = self.sheets.append_orders(
             unique_orders,
             statuses,
@@ -188,12 +189,47 @@ class SyncService:
                 expenses,
                 source=self.expense_source.source if self.expense_source else "rozetka",
             )
+        audit_events = [
+            OrderAuditEvent(
+                occurred_at=now,
+                event_type="Додано замовлення",
+                source=order.source,
+                order_id=order.external_id,
+                sync_key=order.sync_key,
+                tracking_number=order.tracking_number,
+                new_value="Додано до CRM",
+                details=f"Позицій: {len(order.items)}; сума: {order.total}",
+            )
+            for order in unique_orders
+        ]
+        audit_events.extend(
+            OrderAuditEvent(
+                occurred_at=now,
+                event_type="Змінено статус доставки",
+                source=change.source,
+                order_id=change.order_id,
+                sync_key=change.sync_key,
+                tracking_number=change.tracking_number,
+                field="Статус доставки",
+                old_value=change.old_status,
+                new_value=change.new_status,
+            )
+            for change in shipment_update.changes
+        )
+        audit_count = 0
+        try:
+            audit_count = self.sheets.append_audit_events(audit_events)
+        except Exception as exc:
+            warning = f"Google Sheets audit log is unavailable: {exc}"
+            warnings.append(warning)
+            LOGGER.warning(warning)
         LOGGER.info(
-            "Sync completed: %s detail/formula cell(s) refreshed, %s expense cell(s) updated, %s status cell(s) updated, %s item row(s) appended",
+            "Sync completed: %s detail/formula cell(s) refreshed, %s expense cell(s) updated, %s status cell(s) updated, %s item row(s) appended, %s audit event(s) written",
             refreshed,
             expense_updates,
-            updated,
+            shipment_update.cell_updates,
             appended_rows,
+            audit_count,
         )
         result = SyncResult(
             dry_run=False,
@@ -207,8 +243,9 @@ class SyncService:
             shipment_statuses=len(statuses),
             refreshed_cells=refreshed,
             expense_updates=expense_updates,
-            status_updates=updated,
+            status_updates=shipment_update.cell_updates,
             appended_rows=appended_rows,
+            audit_events=audit_count,
         )
         self._raise_for_source_failures(result)
         return result

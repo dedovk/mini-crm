@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Any
 
 from crm_sync.clients.google_sheets import COLUMNS, GoogleSheetsGateway
-from crm_sync.models import Order, OrderItem
+from crm_sync.models import Order, OrderAuditEvent, OrderItem, ShipmentStatus
 from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
 
 
@@ -216,3 +216,95 @@ def test_update_order_expenses_writes_net_total_only_to_first_item_row() -> None
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
     assert changed == 2
     assert updates == {"S5": 183.42, "S6": ""}
+
+
+def test_shipment_status_updates_create_one_audit_change_per_order() -> None:
+    rows = [[""] * COLUMNS.operational_date for _ in range(6)]
+    for index in (4, 5):
+        rows[index][COLUMNS.row_type - 1] = ROW_ORDER
+        rows[index][COLUMNS.source - 1] = "🟣 Prom"
+        rows[index][COLUMNS.sync_key - 1] = "prom:501"
+        rows[index][COLUMNS.tracking_number - 1] = "20451234567890"
+        rows[index][COLUMNS.shipment_status - 1] = "Відправлення у дорозі"
+    rows[4][COLUMNS.order_number - 1] = "501"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_shipment_statuses(
+        {
+            "20451234567890": ShipmentStatus(
+                tracking_number="20451234567890",
+                status="Отримано",
+            )
+        }
+    )
+
+    assert result.cell_updates == 2
+    assert len(result.changes) == 1
+    assert result.changes[0].order_id == "501"
+    assert result.changes[0].old_status == "Відправлення у дорозі"
+    assert result.changes[0].new_status == "Отримано"
+
+
+class AuditWorksheetStub:
+    def __init__(self) -> None:
+        self.header: list[Any] = []
+        self.appended: list[list[Any]] = []
+
+    def row_values(self, row: int):
+        return self.header
+
+    def update(self, *, values, range_name, raw) -> None:
+        self.header = values[0]
+
+    def freeze(self, *, rows: int) -> None:
+        self.frozen_rows = rows
+
+    def format(self, range_name, cell_format) -> None:
+        self.formatted_range = range_name
+
+    def append_rows(self, rows, *, value_input_option) -> None:
+        self.appended.extend(rows)
+
+
+class AuditSpreadsheetStub:
+    def __init__(self) -> None:
+        self.audit = AuditWorksheetStub()
+
+    def worksheet(self, title: str):
+        from gspread.exceptions import WorksheetNotFound
+
+        if not self.audit.header:
+            raise WorksheetNotFound(title)
+        return self.audit
+
+    def add_worksheet(self, *, title: str, rows: int, cols: int):
+        return self.audit
+
+
+def test_audit_log_creates_technical_sheet_and_appends_event() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.spreadsheet = AuditSpreadsheetStub()
+    event = OrderAuditEvent(
+        occurred_at=datetime(2026, 8, 5, 14, 30, tzinfo=UTC),
+        event_type="Додано замовлення",
+        source="prom",
+        order_id="501",
+        sync_key="prom:501",
+        tracking_number="20451234567890",
+        new_value="Додано до CRM",
+    )
+
+    written = gateway.append_audit_events([event])
+
+    audit = gateway.spreadsheet.audit
+    assert written == 1
+    assert audit.header[0:2] == ["Час", "Подія"]
+    assert audit.appended[0][1:6] == [
+        "Додано замовлення",
+        "🟣 Prom",
+        "501",
+        "prom:501",
+        "20451234567890",
+    ]
