@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -99,9 +99,13 @@ class SheetColumns:
     sync_key: int = 21
     row_type: int = 22
     operational_date: int = 23
+    first_seen_completed: int = 24
+    order_status: int = 25
 
 
 COLUMNS = SheetColumns()
+LAST_COLUMN = COLUMNS.order_status
+LAST_COLUMN_LETTER = "Y"
 
 REPORT_METRIC_LABELS = {
     3: "Замовлень",
@@ -205,7 +209,7 @@ class GoogleSheetsGateway:
 
     def ensure_schema(self, *, apply_changes: bool = True) -> None:
         preview = self.worksheet.get(
-            f"A1:W{min(self.worksheet.row_count, 100)}",
+            f"A1:{LAST_COLUMN_LETTER}{min(self.worksheet.row_count, 100)}",
             value_render_option="UNFORMATTED_VALUE",
         )
         located_header = next(
@@ -236,13 +240,13 @@ class GoogleSheetsGateway:
                 )
 
         if apply_changes:
-            if self.worksheet.col_count < COLUMNS.operational_date:
-                self.worksheet.add_cols(COLUMNS.operational_date - self.worksheet.col_count)
+            if self.worksheet.col_count < LAST_COLUMN:
+                self.worksheet.add_cols(LAST_COLUMN - self.worksheet.col_count)
             self.worksheet.update(
                 values=[list(ALL_HEADERS[COLUMNS.sync_key - 1 :])],
                 range_name=(
                     f"{rowcol_to_a1(self.header_row, COLUMNS.sync_key)}:"
-                    f"{rowcol_to_a1(self.header_row, COLUMNS.operational_date)}"
+                    f"{rowcol_to_a1(self.header_row, LAST_COLUMN)}"
                 ),
                 raw=True,
             )
@@ -327,7 +331,7 @@ class GoogleSheetsGateway:
                         "sheetId": self.worksheet.id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.sync_key - 1,
-                        "endIndex": COLUMNS.operational_date,
+                        "endIndex": LAST_COLUMN,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -338,7 +342,7 @@ class GoogleSheetsGateway:
 
     def prepare_daily_layout(self, current_day: date) -> None:
         values = self.worksheet.get(
-            f"A1:W{self.worksheet.row_count}",
+            f"A1:{LAST_COLUMN_LETTER}{self.worksheet.row_count}",
             value_render_option="UNFORMATTED_VALUE",
         )
         if not values:
@@ -369,9 +373,12 @@ class GoogleSheetsGateway:
                     header_rows.add(header_row)
                     row_types[header_row] = ROW_HEADER
                     existing_header = values[header_row - 1] if header_row <= len(values) else []
-                    if list(existing_header[: COLUMNS.operational_date]) != list(ALL_HEADERS):
+                    if list(existing_header[:LAST_COLUMN]) != list(ALL_HEADERS):
                         value_updates.append(
-                            {"range": f"A{header_row}:W{header_row}", "values": [list(ALL_HEADERS)]}
+                            {
+                                "range": f"A{header_row}:{LAST_COLUMN_LETTER}{header_row}",
+                                "values": [list(ALL_HEADERS)],
+                            }
                         )
                 continue
             if row_number in header_rows or (
@@ -452,7 +459,7 @@ class GoogleSheetsGateway:
                 }
                 for row_type in (ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST):
                     last_used_row += 1
-                    report_row: list[Any] = [""] * COLUMNS.operational_date
+                    report_row: list[Any] = [""] * LAST_COLUMN
                     report_row[0] = labels[row_type]
                     for column, label in REPORT_METRIC_LABELS.items():
                         if row_type == ROW_REPORT_FORECAST and column in ADVERTISING_REPORT_LABEL_COLUMNS:
@@ -463,7 +470,10 @@ class GoogleSheetsGateway:
                     report_row[COLUMNS.row_type - 1] = row_type
                     report_row[COLUMNS.operational_date - 1] = sheet_serial(latest_day)
                     value_updates.append(
-                        {"range": f"A{last_used_row}:W{last_used_row}", "values": [report_row]}
+                        {
+                            "range": f"A{last_used_row}:{LAST_COLUMN_LETTER}{last_used_row}",
+                            "values": [report_row],
+                        }
                     )
                     row_types[last_used_row] = row_type
                 closed_days.add(latest_day)
@@ -473,8 +483,8 @@ class GoogleSheetsGateway:
             if next_day.month != latest_day.month:
                 value_updates.append(
                     {
-                        "range": f"A{last_used_row}:W{last_used_row}",
-                        "values": [["Місяць", month_period_label(next_day)] + [""] * 19 + [ROW_MONTH, sheet_serial(next_day.replace(day=1))]],
+                        "range": f"A{last_used_row}:{LAST_COLUMN_LETTER}{last_used_row}",
+                        "values": [["Місяць", month_period_label(next_day)] + [""] * 19 + [ROW_MONTH, sheet_serial(next_day.replace(day=1)), "", ""]],
                     }
                 )
                 row_types[last_used_row] = ROW_MONTH
@@ -482,15 +492,21 @@ class GoogleSheetsGateway:
 
             day_row = last_used_row
             header_row = day_row + 1
-            day_values: list[Any] = [""] * COLUMNS.operational_date
+            day_values: list[Any] = [""] * LAST_COLUMN
             day_values[0] = "Дата дня"
             day_values[1] = sheet_serial(next_day)
             day_values[COLUMNS.row_type - 1] = ROW_DAY
             day_values[COLUMNS.operational_date - 1] = sheet_serial(next_day)
             value_updates.extend(
                 [
-                    {"range": f"A{day_row}:W{day_row}", "values": [day_values]},
-                    {"range": f"A{header_row}:W{header_row}", "values": [list(ALL_HEADERS)]},
+                    {
+                        "range": f"A{day_row}:{LAST_COLUMN_LETTER}{day_row}",
+                        "values": [day_values],
+                    },
+                    {
+                        "range": f"A{header_row}:{LAST_COLUMN_LETTER}{header_row}",
+                        "values": [list(ALL_HEADERS)],
+                    },
                 ]
             )
             row_types[day_row] = ROW_DAY
@@ -511,7 +527,10 @@ class GoogleSheetsGateway:
         ]
 
     def _apply_professional_formatting(self, last_used_row: int) -> None:
-        values = self.worksheet.get(f"A1:W{last_used_row}", value_render_option="UNFORMATTED_VALUE")
+        values = self.worksheet.get(
+            f"A1:{LAST_COLUMN_LETTER}{last_used_row}",
+            value_render_option="UNFORMATTED_VALUE",
+        )
         typed_rows: dict[str, list[int]] = {}
         order_groups: dict[str, list[int]] = {}
         for row_number, row in enumerate(values, start=1):
@@ -553,7 +572,7 @@ class GoogleSheetsGateway:
                         "startRowIndex": 0,
                         "endRowIndex": last_used_row,
                         "startColumnIndex": 0,
-                        "endColumnIndex": COLUMNS.operational_date,
+                        "endColumnIndex": LAST_COLUMN,
                     },
                     "cell": {
                         "userEnteredFormat": {
@@ -574,7 +593,7 @@ class GoogleSheetsGateway:
                         "startRowIndex": 0,
                         "endRowIndex": last_used_row,
                         "startColumnIndex": 0,
-                        "endColumnIndex": COLUMNS.operational_date,
+                        "endColumnIndex": LAST_COLUMN,
                     },
                     "top": {"style": "NONE"},
                     "bottom": {"style": "NONE"},
@@ -590,7 +609,7 @@ class GoogleSheetsGateway:
                         "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.sync_key - 1,
-                        "endIndex": COLUMNS.operational_date,
+                        "endIndex": LAST_COLUMN,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -646,7 +665,7 @@ class GoogleSheetsGateway:
                                     "startRowIndex": row_number - 1,
                                     "endRowIndex": row_number,
                                     "startColumnIndex": 0,
-                                    "endColumnIndex": COLUMNS.operational_date,
+                                    "endColumnIndex": LAST_COLUMN,
                                 },
                                 "cell": {
                                     "userEnteredFormat": {
@@ -770,6 +789,7 @@ class GoogleSheetsGateway:
             COLUMNS.markup: ("NUMBER", "#,##0.00"),
             COLUMNS.advertising: ("NUMBER", "#,##0.00"),
             COLUMNS.operational_date: ("DATE", "dd.mm.yyyy"),
+            COLUMNS.first_seen_completed: ("DATE", "dd.mm.yyyy"),
         }
         for column, (format_type, pattern) in number_formats.items():
             requests.append(
@@ -1136,6 +1156,96 @@ class GoogleSheetsGateway:
             self.worksheet.batch_update(updates, raw=False)
         return len(updates)
 
+    def record_completion_observations(
+        self,
+        orders: list[Order],
+        *,
+        observed_at: datetime,
+    ) -> tuple[OrderAuditEvent, ...]:
+        if not orders:
+            return ()
+        order_by_key = {order.sync_key.casefold(): order for order in orders}
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        updates: list[dict[str, Any]] = []
+        events: list[OrderAuditEvent] = []
+        event_keys: set[str] = set()
+
+        for row_number, row in enumerate(values, start=1):
+            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            if row_type != ROW_ORDER:
+                continue
+            key = (
+                str(row[COLUMNS.sync_key - 1]).strip().casefold()
+                if len(row) >= COLUMNS.sync_key
+                else ""
+            )
+            order = order_by_key.get(key)
+            if not order:
+                continue
+
+            stored_day = parse_sheet_date(
+                row[COLUMNS.operational_date - 1] if len(row) >= COLUMNS.operational_date else ""
+            )
+            completion_day = order.completed_at.date() if order.completion_is_exact else stored_day
+            first_seen = parse_sheet_date(
+                row[COLUMNS.first_seen_completed - 1]
+                if len(row) >= COLUMNS.first_seen_completed
+                else ""
+            )
+            if first_seen is None:
+                first_seen = completion_day or observed_at.date()
+                updates.append(
+                    {
+                        "range": rowcol_to_a1(row_number, COLUMNS.first_seen_completed),
+                        "values": [[sheet_serial(first_seen)]],
+                    }
+                )
+
+            current_completion = parse_sheet_date(
+                row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else ""
+            )
+            desired_completion = order.completed_at.date() if order.completion_is_exact else first_seen
+            if current_completion != desired_completion:
+                updates.append(
+                    {
+                        "range": rowcol_to_a1(row_number, COLUMNS.order_date),
+                        "values": [[sheet_serial(desired_completion)]],
+                    }
+                )
+
+            old_status = (
+                str(row[COLUMNS.order_status - 1]).strip()
+                if len(row) >= COLUMNS.order_status
+                else ""
+            )
+            if old_status != "Виконано":
+                updates.append(
+                    {
+                        "range": rowcol_to_a1(row_number, COLUMNS.order_status),
+                        "values": [["Виконано"]],
+                    }
+                )
+                if old_status and key not in event_keys:
+                    events.append(
+                        OrderAuditEvent(
+                            occurred_at=observed_at,
+                            event_type="Змінено статус замовлення",
+                            source=order.source,
+                            order_id=order.external_id,
+                            sync_key=order.sync_key,
+                            tracking_number=order.tracking_number,
+                            field="Статус замовлення",
+                            old_value=old_status,
+                            new_value="Виконано",
+                            details="Зафіксовано під час синхронізації джерела",
+                        )
+                    )
+                    event_keys.add(key)
+
+        if updates:
+            self.worksheet.batch_update(updates, raw=False)
+        return tuple(events)
+
     def update_order_expenses(self, expenses: dict[str, Decimal], *, source: str) -> int:
         if not expenses:
             return 0
@@ -1182,15 +1292,19 @@ class GoogleSheetsGateway:
         *,
         sender_default: str,
         operational_day: date,
+        observed_at: datetime | None = None,
     ) -> int:
+        if not orders:
+            return 0
+        observation_day = (observed_at.date() if observed_at else operational_day)
         existing_values = self.worksheet.get_all_values(value_render_option="FORMULA")
         groups: dict[str, list[list[Any]]] = {}
         group_days: dict[str, date] = {}
         group_sort_values: dict[str, str] = {}
 
         for row in existing_values:
-            padded: list[Any] = list(row[: COLUMNS.operational_date]) + [""] * max(
-                0, COLUMNS.operational_date - len(row)
+            padded: list[Any] = list(row[:LAST_COLUMN]) + [""] * max(
+                0, LAST_COLUMN - len(row)
             )
             row_type = str(padded[COLUMNS.row_type - 1]).strip()
             if row_type != ROW_ORDER:
@@ -1219,6 +1333,11 @@ class GoogleSheetsGateway:
                 padded[COLUMNS.payment_method - 1] = "наложка"
             padded[COLUMNS.row_type - 1] = ROW_ORDER
             padded[COLUMNS.operational_date - 1] = sheet_serial(order_day)
+            if not parse_sheet_date(padded[COLUMNS.first_seen_completed - 1]):
+                existing_completion = parse_sheet_date(padded[COLUMNS.order_date - 1]) or order_day
+                padded[COLUMNS.first_seen_completed - 1] = sheet_serial(existing_completion)
+            if not str(padded[COLUMNS.order_status - 1]).strip():
+                padded[COLUMNS.order_status - 1] = "Виконано"
             groups.setdefault(key, []).append(padded)
             group_days[key] = order_day
             group_sort_values[key] = str(padded[COLUMNS.order_date - 1])
@@ -1236,7 +1355,7 @@ class GoogleSheetsGateway:
             sender = order.sender.strip() or sender_default
             order_rows: list[list[Any]] = []
             for item in order.items:
-                row: list[Any] = [""] * COLUMNS.operational_date
+                row: list[Any] = [""] * LAST_COLUMN
                 row[COLUMNS.source - 1] = source_display(order.source)
                 row[COLUMNS.tracking_number - 1] = order.tracking_number
                 row[COLUMNS.shipment_status - 1] = (
@@ -1244,8 +1363,8 @@ class GoogleSheetsGateway:
                     if shipment_status
                     else ("Невідомо" if extract_ttn(order.tracking_number) else "Інший перевізник")
                 )
-                row[COLUMNS.order_date - 1] = (
-                    sheet_serial(order.completed_at.date()) if order.completion_is_exact else ""
+                row[COLUMNS.order_date - 1] = sheet_serial(
+                    order.completed_at.date() if order.completion_is_exact else observation_day
                 )
                 row[COLUMNS.order_number - 1] = order.external_id
                 row[COLUMNS.customer - 1] = customer_display(order.city, order.customer_name)
@@ -1265,11 +1384,16 @@ class GoogleSheetsGateway:
                     row[COLUMNS.advertising - 1] = decimal_for_sheet(order.advertising_cost)
                 row[COLUMNS.sync_key - 1] = order.sync_key
                 row[COLUMNS.row_type - 1] = ROW_ORDER
-                row[COLUMNS.operational_date - 1] = sheet_serial(order.completed_at.date())
+                effective_day = order.completed_at.date() if order.completion_is_exact else observation_day
+                row[COLUMNS.operational_date - 1] = sheet_serial(effective_day)
+                row[COLUMNS.first_seen_completed - 1] = sheet_serial(observation_day)
+                row[COLUMNS.order_status - 1] = "Виконано"
                 order_rows.append(row)
             if order_rows:
                 groups[key] = order_rows
-                group_days[key] = order.completed_at.date()
+                group_days[key] = (
+                    order.completed_at.date() if order.completion_is_exact else observation_day
+                )
                 group_sort_values[key] = order.completed_at.strftime("%Y-%m-%d %H:%M")
                 existing_keys.add(key)
                 added_rows += len(order_rows)
@@ -1291,7 +1415,7 @@ class GoogleSheetsGateway:
         while current_day <= operational_day:
             month = (current_day.year, current_day.month)
             if month != current_month:
-                month_row = [""] * COLUMNS.operational_date
+                month_row = [""] * LAST_COLUMN
                 month_row[0] = "Місяць"
                 month_row[1] = month_period_label(current_day)
                 month_row[COLUMNS.row_type - 1] = ROW_MONTH
@@ -1300,7 +1424,7 @@ class GoogleSheetsGateway:
                 month_rows.append(len(rows))
                 current_month = month
 
-            day_row = [""] * COLUMNS.operational_date
+            day_row = [""] * LAST_COLUMN
             day_row[0] = "Дата дня"
             day_row[1] = sheet_serial(current_day)
             day_row[COLUMNS.row_type - 1] = ROW_DAY
@@ -1347,7 +1471,7 @@ class GoogleSheetsGateway:
                     ROW_REPORT_FORECAST: "Прогноз на місяць",
                 }
                 for row_type in (ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST):
-                    report_row = [""] * COLUMNS.operational_date
+                    report_row = [""] * LAST_COLUMN
                     report_row[0] = labels[row_type]
                     for column, label in REPORT_METRIC_LABELS.items():
                         if row_type == ROW_REPORT_FORECAST and column in ADVERTISING_REPORT_LABEL_COLUMNS:
@@ -1418,7 +1542,7 @@ class GoogleSheetsGateway:
                                 "startRowIndex": 0,
                                 "endRowIndex": self.worksheet.row_count,
                                 "startColumnIndex": 0,
-                                "endColumnIndex": COLUMNS.operational_date,
+                                "endColumnIndex": LAST_COLUMN,
                             }
                         }
                     }
@@ -1427,11 +1551,13 @@ class GoogleSheetsGateway:
         )
         self.worksheet.update(
             values=rows,
-            range_name=f"A1:W{last_used_row}",
+            range_name=f"A1:{LAST_COLUMN_LETTER}{last_used_row}",
             raw=False,
         )
         if last_used_row < self.worksheet.row_count:
-            self.worksheet.batch_clear([f"A{last_used_row + 1}:W{self.worksheet.row_count}"])
+            self.worksheet.batch_clear(
+                [f"A{last_used_row + 1}:{LAST_COLUMN_LETTER}{self.worksheet.row_count}"]
+            )
         if merge_requests:
             self.spreadsheet.batch_update({"requests": merge_requests})
         self._apply_professional_formatting(last_used_row)

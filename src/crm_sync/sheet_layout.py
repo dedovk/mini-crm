@@ -31,7 +31,13 @@ BUSINESS_HEADERS = (
     "Примітка менеджера",
 )
 
-TECHNICAL_HEADERS = ("Sync Key", "Тип рядка", "Операційна дата")
+TECHNICAL_HEADERS = (
+    "Sync Key",
+    "Тип рядка",
+    "Операційна дата",
+    "Перше спостереження виконання",
+    "Статус замовлення джерела",
+)
 ALL_HEADERS = BUSINESS_HEADERS + TECHNICAL_HEADERS
 
 ROW_ORDER = "ORDER"

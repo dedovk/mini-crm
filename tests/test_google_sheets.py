@@ -2,7 +2,12 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from crm_sync.clients.google_sheets import COLUMNS, GoogleSheetsGateway
+from crm_sync.clients.google_sheets import (
+    COLUMNS,
+    LAST_COLUMN,
+    LAST_COLUMN_LETTER,
+    GoogleSheetsGateway,
+)
 from crm_sync.models import Order, OrderAuditEvent, OrderItem, ShipmentStatus
 from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
 
@@ -50,7 +55,7 @@ class StubSpreadsheet:
 
 
 def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_formula() -> None:
-    rows = [[""] * COLUMNS.operational_date for _ in range(5)]
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
     rows[4][COLUMNS.row_type - 1] = ROW_ORDER
     rows[4][COLUMNS.sync_key - 1] = "prom:1"
     rows[4][COLUMNS.tracking_number - 1] = 20451501572223
@@ -100,8 +105,81 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     assert updates["W5"] > 0
 
 
+def test_completion_observation_backfills_first_seen_date_and_status() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:1"
+    row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 2))
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    order = Order(
+        source="prom",
+        external_id="1",
+        created_at=datetime(2026, 8, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 5, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451234567890",
+        total=Decimal(100),
+        payment_method="наложка",
+        note="",
+        sender="наш",
+        completion_is_exact=False,
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    events = gateway.record_completion_observations(
+        [order],
+        observed_at=datetime(2026, 8, 5, 10, 0, tzinfo=UTC),
+    )
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert updates["D5"] == sheet_serial(date(2026, 8, 2))
+    assert updates["X5"] == sheet_serial(date(2026, 8, 2))
+    assert updates["Y5"] == "Виконано"
+    assert events == ()
+
+
+def test_completion_observation_audits_previous_known_status() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:1"
+    row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
+    row[COLUMNS.order_status - 1] = "Прийнято"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    order = Order(
+        source="prom",
+        external_id="1",
+        created_at=datetime(2026, 8, 5, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 5, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451234567890",
+        total=Decimal(100),
+        payment_method="наложка",
+        note="",
+        sender="наш",
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    events = gateway.record_completion_observations(
+        [order], observed_at=datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    )
+
+    assert len(events) == 1
+    assert events[0].old_value == "Прийнято"
+    assert events[0].new_value == "Виконано"
+
+
 def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> None:
-    rows = [[""] * COLUMNS.operational_date for _ in range(5)]
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
     old = rows[4]
     old[COLUMNS.source - 1] = "prom"
     old[COLUMNS.tracking_number - 1] = "20451234567890"
@@ -121,7 +199,29 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     gateway.header_row = 4
     gateway._apply_professional_formatting = lambda last_used_row: None
 
-    added = gateway.append_orders([], {}, sender_default="наш", operational_day=date(2026, 8, 3))
+    new_order = Order(
+        source="prom",
+        external_id="2",
+        created_at=datetime(2026, 8, 3, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
+        customer_name="Новий Отримувач",
+        city="Київ",
+        phone="+380501234567",
+        tracking_number="20450000000002",
+        total=Decimal(200),
+        payment_method="наложка",
+        note="",
+        sender="наш",
+        items=[OrderItem("Новий товар", "SKU-2", Decimal(1), Decimal(200), Decimal(200))],
+    )
+
+    added = gateway.append_orders(
+        [new_order],
+        {},
+        sender_default="наш",
+        operational_day=date(2026, 8, 3),
+        observed_at=datetime(2026, 8, 3, 12, 5, tzinfo=UTC),
+    )
 
     written = worksheet.written_values
     order_row = next(row for row in written if row[COLUMNS.row_type - 1] == ROW_ORDER)
@@ -153,12 +253,25 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     forecast_row = written[report_indexes[2]]
     assert forecast_row[10:16] == ["", "", "", "", "", ""]
     assert worksheet.operations == ["update", "clear"]
-    assert worksheet.cleared_ranges == [f"A{len(written) + 1}:W{worksheet.row_count}"]
+    assert worksheet.cleared_ranges == [
+        f"A{len(written) + 1}:{LAST_COLUMN_LETTER}{worksheet.row_count}"
+    ]
+    assert added == 1
+
+
+def test_append_orders_skips_sheet_rebuild_when_there_are_no_new_orders() -> None:
+    worksheet = LayoutWorksheet([[""] * LAST_COLUMN for _ in range(5)])
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    added = gateway.append_orders([], {}, sender_default="наш", operational_day=date(2026, 8, 3))
+
     assert added == 0
+    assert worksheet.operations == []
 
 
 def test_append_orders_does_not_invent_completion_date_for_inexact_source() -> None:
-    rows = [[""] * COLUMNS.operational_date for _ in range(4)]
+    rows = [[""] * LAST_COLUMN for _ in range(4)]
     worksheet = LayoutWorksheet(rows)
     spreadsheet = StubSpreadsheet()
     gateway = object.__new__(GoogleSheetsGateway)
@@ -196,12 +309,14 @@ def test_append_orders_does_not_invent_completion_date_for_inexact_source() -> N
     order_row = next(
         row for row in worksheet.written_values if row[COLUMNS.row_type - 1] == ROW_ORDER
     )
-    assert order_row[COLUMNS.order_date - 1] == ""
+    assert order_row[COLUMNS.order_date - 1] == sheet_serial(date(2026, 8, 3))
     assert order_row[COLUMNS.operational_date - 1] == sheet_serial(date(2026, 8, 3))
+    assert order_row[COLUMNS.first_seen_completed - 1] == sheet_serial(date(2026, 8, 3))
+    assert order_row[COLUMNS.order_status - 1] == "Виконано"
 
 
 def test_update_order_expenses_writes_net_total_only_to_first_item_row() -> None:
-    rows = [[""] * COLUMNS.operational_date for _ in range(6)]
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
     for index in (4, 5):
         rows[index][COLUMNS.row_type - 1] = ROW_ORDER
         rows[index][COLUMNS.sync_key - 1] = "rozetka:901"
@@ -219,7 +334,7 @@ def test_update_order_expenses_writes_net_total_only_to_first_item_row() -> None
 
 
 def test_sheet_integrity_rejects_formula_errors_negative_cost_and_split_order() -> None:
-    rows = [[""] * COLUMNS.operational_date for _ in range(8)]
+    rows = [[""] * LAST_COLUMN for _ in range(8)]
     for index in (4, 6):
         rows[index][COLUMNS.row_type - 1] = ROW_ORDER
         rows[index][COLUMNS.sync_key - 1] = "prom:501"
@@ -239,7 +354,7 @@ def test_sheet_integrity_rejects_formula_errors_negative_cost_and_split_order() 
 
 
 def test_shipment_status_updates_create_one_audit_change_per_order() -> None:
-    rows = [[""] * COLUMNS.operational_date for _ in range(6)]
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
     for index in (4, 5):
         rows[index][COLUMNS.row_type - 1] = ROW_ORDER
         rows[index][COLUMNS.source - 1] = "🟣 Prom"

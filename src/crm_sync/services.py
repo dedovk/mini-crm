@@ -133,8 +133,13 @@ class SyncService:
                 warnings.append(warning)
 
         refreshed = 0
+        completion_events: tuple[OrderAuditEvent, ...] = ()
         if not self.dry_run:
             self.sheets.ensure_schema(apply_changes=True)
+            completion_events = self.sheets.record_completion_observations(
+                fetched,
+                observed_at=now,
+            )
             refreshed = self.sheets.refresh_order_details(fetched)
         pending_ttns = self.sheets.pending_tracking_numbers()
 
@@ -193,6 +198,7 @@ class SyncService:
             statuses,
             sender_default=self.sender_default,
             operational_day=now.date(),
+            observed_at=now,
         )
         expense_updates = 0
         if expenses is not None:
@@ -213,6 +219,26 @@ class SyncService:
             )
             for order in unique_orders
         ]
+        audit_events.extend(
+            OrderAuditEvent(
+                occurred_at=now,
+                event_type="Змінено статус замовлення",
+                source=order.source,
+                order_id=order.external_id,
+                sync_key=order.sync_key,
+                tracking_number=order.tracking_number,
+                field="Статус замовлення",
+                old_value="Невідомо",
+                new_value="Виконано",
+                details=(
+                    "Точна дата статусу з API"
+                    if order.completion_is_exact
+                    else "Перше спостереження статусу синхронізацією"
+                ),
+            )
+            for order in unique_orders
+        )
+        audit_events.extend(completion_events)
         audit_events.extend(
             OrderAuditEvent(
                 occurred_at=now,
