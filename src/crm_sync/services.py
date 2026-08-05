@@ -81,9 +81,12 @@ class SyncService:
                     self.expense_source.source,
                     len(expenses),
                 )
-            except Exception:
-                LOGGER.exception("%s finance sync failed; existing sheet values are preserved", self.expense_source.source)
-                failed_sources.append(f"{self.expense_source.source}-finance")
+            except Exception as exc:
+                LOGGER.warning(
+                    "%s finance sync is unavailable; existing sheet values are preserved: %s",
+                    self.expense_source.source,
+                    exc,
+                )
 
         refreshed = 0
         if not self.dry_run:
