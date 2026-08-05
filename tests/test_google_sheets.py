@@ -54,6 +54,34 @@ class StubSpreadsheet:
         self.requests.extend(payload["requests"])
 
 
+class BackupWorksheet:
+    def __init__(self, title: str, sheet_id: int) -> None:
+        self.title = title
+        self.id = sheet_id
+
+
+class BackupSpreadsheet(StubSpreadsheet):
+    def __init__(self) -> None:
+        super().__init__()
+        self.copies = [
+            BackupWorksheet("_CRM backup - 20260801-000000 - БСК", 10),
+            BackupWorksheet("_CRM backup - 20260802-000000 - БСК", 11),
+            BackupWorksheet("_CRM backup - 20260803-000000 - БСК", 12),
+        ]
+        self.deleted: list[str] = []
+
+    def duplicate_sheet(self, *, source_sheet_id: int, new_sheet_name: str):
+        duplicate = BackupWorksheet(new_sheet_name, 99)
+        self.copies.append(duplicate)
+        return duplicate
+
+    def worksheets(self):
+        return self.copies
+
+    def del_worksheet(self, worksheet) -> None:
+        self.deleted.append(worksheet.title)
+
+
 def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_formula() -> None:
     rows = [[""] * LAST_COLUMN for _ in range(5)]
     rows[4][COLUMNS.row_type - 1] = ROW_ORDER
@@ -257,6 +285,19 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
         f"A{len(written) + 1}:{LAST_COLUMN_LETTER}{worksheet.row_count}"
     ]
     assert added == 1
+
+
+def test_structural_backup_is_hidden_and_retains_only_three_latest_copies() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = BackupWorksheet("БСК", 123)
+    gateway.spreadsheet = BackupSpreadsheet()
+
+    title = gateway.create_backup(created_at=datetime(2026, 8, 5, 12, 30, tzinfo=UTC))
+
+    assert title == "_CRM backup - 20260805-123000 - БСК"
+    request = gateway.spreadsheet.requests[0]["updateSheetProperties"]
+    assert request["properties"] == {"sheetId": 99, "hidden": True}
+    assert gateway.spreadsheet.deleted == ["_CRM backup - 20260801-000000 - БСК"]
 
 
 def test_append_orders_skips_sheet_rebuild_when_there_are_no_new_orders() -> None:

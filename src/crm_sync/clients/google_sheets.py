@@ -118,6 +118,8 @@ REPORT_METRIC_LABELS = {
 }
 ADVERTISING_REPORT_LABEL_COLUMNS = {11, 13, 15}
 AUDIT_WORKSHEET_NAME = "Журнал змін"
+BACKUP_PREFIX = "_CRM backup - "
+BACKUP_RETENTION = 3
 AUDIT_HEADERS = (
     "Час",
     "Подія",
@@ -207,6 +209,38 @@ class GoogleSheetsGateway:
         audit.append_rows(rows, value_input_option="USER_ENTERED")
         return len(rows)
 
+    def create_backup(self, *, created_at: datetime) -> str:
+        source_title = str(getattr(self.worksheet, "title", "CRM"))
+        title = f"{BACKUP_PREFIX}{created_at:%Y%m%d-%H%M%S} - {source_title}"[:100]
+        backup = self.spreadsheet.duplicate_sheet(
+            source_sheet_id=self.worksheet.id,
+            new_sheet_name=title,
+        )
+        self.spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {"sheetId": backup.id, "hidden": True},
+                            "fields": "hidden",
+                        }
+                    }
+                ]
+            }
+        )
+        backups = sorted(
+            (
+                worksheet
+                for worksheet in self.spreadsheet.worksheets()
+                if str(getattr(worksheet, "title", "")).startswith(BACKUP_PREFIX)
+            ),
+            key=lambda worksheet: str(getattr(worksheet, "title", "")),
+            reverse=True,
+        )
+        for obsolete in backups[BACKUP_RETENTION:]:
+            self.spreadsheet.del_worksheet(obsolete)
+        return title
+
     def ensure_schema(self, *, apply_changes: bool = True) -> None:
         preview = self.worksheet.get(
             f"A1:{LAST_COLUMN_LETTER}{min(self.worksheet.row_count, 100)}",
@@ -260,6 +294,7 @@ class GoogleSheetsGateway:
         formula_errors = ("#REF!", "#VALUE!", "#DIV/0!", "#NAME?", "#N/A")
         rows_by_key: dict[str, list[int]] = {}
         totals_by_key: dict[str, set[Decimal]] = {}
+        missing_completion_keys: set[str] = set()
 
         for row_number, row in enumerate(values, start=1):
             for column, value in enumerate(row, start=1):
@@ -285,7 +320,7 @@ class GoogleSheetsGateway:
             if str(raw_total).strip():
                 totals_by_key.setdefault(sync_key, set()).add(decimal_value(raw_total))
             if not str(row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else "").strip():
-                warnings.append(f"{sync_key}: completion date is not recorded")
+                missing_completion_keys.add(sync_key)
 
         for sync_key, row_numbers in rows_by_key.items():
             expected = list(range(min(row_numbers), max(row_numbers) + 1))
@@ -294,6 +329,11 @@ class GoogleSheetsGateway:
             totals = totals_by_key.get(sync_key, set())
             if len(totals) > 1:
                 errors.append(f"{sync_key}: conflicting order totals {sorted(totals)}")
+
+        if missing_completion_keys:
+            warnings.append(
+                f"{len(missing_completion_keys)} order(s) do not yet have a recorded completion date"
+            )
 
         return IntegrityReport(tuple(dict.fromkeys(errors)), tuple(dict.fromkeys(warnings)))
 

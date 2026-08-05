@@ -31,6 +31,7 @@ class SyncResult:
     status_updates: int = 0
     appended_rows: int = 0
     audit_events: int = 0
+    backup_created: str = ""
 
 
 class SourceSyncError(RuntimeError):
@@ -193,6 +194,10 @@ class SyncService:
             return result
 
         shipment_update = self.sheets.update_shipment_statuses(statuses)
+        backup_created = ""
+        if unique_orders:
+            backup_created = self.sheets.create_backup(created_at=now)
+            LOGGER.info("Created Google Sheets backup before structural rebuild: %s", backup_created)
         appended_rows = self.sheets.append_orders(
             unique_orders,
             statuses,
@@ -260,6 +265,16 @@ class SyncService:
             warning = f"Google Sheets audit log is unavailable: {exc}"
             warnings.append(warning)
             LOGGER.warning(warning)
+        post_integrity = self.sheets.validate_integrity()
+        if not post_integrity.ok:
+            if backup_created:
+                LOGGER.error("Post-write integrity failed; recovery copy is %s", backup_created)
+            raise IntegrityError(post_integrity)
+        warnings.extend(
+            warning
+            for warning in post_integrity.warnings
+            if warning not in warnings
+        )
         LOGGER.info(
             "Sync completed: %s detail/formula cell(s) refreshed, %s expense cell(s) updated, %s status cell(s) updated, %s item row(s) appended, %s audit event(s) written",
             refreshed,
@@ -283,6 +298,7 @@ class SyncService:
             status_updates=shipment_update.cell_updates,
             appended_rows=appended_rows,
             audit_events=audit_count,
+            backup_created=backup_created,
         )
         self._raise_for_source_failures(result)
         return result
