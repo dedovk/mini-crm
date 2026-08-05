@@ -11,6 +11,7 @@ from crm_sync.clients.prom import PromClient
 from crm_sync.clients.rozetka import RozetkaClient
 from crm_sync.config import ConfigurationError, Settings
 from crm_sync.reporting import write_github_summary
+from crm_sync.github_notifier import notify_sync_health
 from crm_sync.services import SourceSyncError, SyncService
 
 LOGGER = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ def main() -> int:
         configure_logging(settings.log_level)
         result = build_service(settings).run()
         write_github_summary(result)
+        notify_sync_health(result)
         return 0
     except SourceSyncError as exc:
         write_github_summary(exc.result)

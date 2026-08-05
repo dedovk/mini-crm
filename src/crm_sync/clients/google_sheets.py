@@ -17,6 +17,7 @@ from crm_sync.models import (
     ShipmentStatus,
     ShipmentStatusChange,
     ShipmentUpdateResult,
+    SyncHealthState,
 )
 from crm_sync.integrity import IntegrityReport
 from crm_sync.sheet_layout import (
@@ -120,6 +121,8 @@ ADVERTISING_REPORT_LABEL_COLUMNS = {11, 13, 15}
 AUDIT_WORKSHEET_NAME = "Журнал змін"
 BACKUP_PREFIX = "_CRM backup - "
 BACKUP_RETENTION = 3
+HEALTH_WORKSHEET_NAME = "_Стан синхронізації"
+HEALTH_ALERT_THRESHOLD = 3
 AUDIT_HEADERS = (
     "Час",
     "Подія",
@@ -240,6 +243,87 @@ class GoogleSheetsGateway:
         for obsolete in backups[BACKUP_RETENTION:]:
             self.spreadsheet.del_worksheet(obsolete)
         return title
+
+    def record_sync_health(
+        self,
+        failed_components: list[str],
+        *,
+        occurred_at: datetime,
+    ) -> SyncHealthState:
+        created = False
+        try:
+            health = self.spreadsheet.worksheet(HEALTH_WORKSHEET_NAME)
+        except WorksheetNotFound:
+            created = True
+            health = self.spreadsheet.add_worksheet(
+                title=HEALTH_WORKSHEET_NAME,
+                rows=10,
+                cols=2,
+            )
+        current = {
+            str(row[0]).strip(): str(row[1]).strip()
+            for row in health.get_all_values()
+            if len(row) >= 2 and str(row[0]).strip()
+        }
+        try:
+            previous_failures = max(0, int(current.get("consecutive_failures", "0")))
+        except ValueError:
+            previous_failures = 0
+        previous_alert_open = current.get("alert_open", "false").casefold() == "true"
+        components = tuple(dict.fromkeys(component for component in failed_components if component))
+
+        if components:
+            consecutive = previous_failures + 1
+            alert_due = consecutive == HEALTH_ALERT_THRESHOLD and not previous_alert_open
+            recovered = False
+            alert_open = previous_alert_open or consecutive >= HEALTH_ALERT_THRESHOLD
+            outcome = "failed"
+        else:
+            consecutive = 0
+            alert_due = False
+            recovered = previous_alert_open or previous_failures >= HEALTH_ALERT_THRESHOLD
+            alert_open = False
+            outcome = "recovered" if recovered else "ok"
+
+        rows = [
+            ["Параметр", "Значення"],
+            ["consecutive_failures", str(consecutive)],
+            ["alert_open", str(alert_open).lower()],
+            ["last_outcome", outcome],
+            ["failed_components", ", ".join(components)],
+            ["updated_at", occurred_at.isoformat()],
+        ]
+        health.update(values=rows, range_name="A1:B6", raw=True)
+        if created:
+            health.freeze(rows=1)
+            health.format(
+                "A1:B1",
+                {
+                    "backgroundColor": {"red": 0.12, "green": 0.31, "blue": 0.47},
+                    "textFormat": {
+                        "bold": True,
+                        "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                    },
+                },
+            )
+            self.spreadsheet.batch_update(
+                {
+                    "requests": [
+                        {
+                            "updateSheetProperties": {
+                                "properties": {"sheetId": health.id, "hidden": True},
+                                "fields": "hidden",
+                            }
+                        }
+                    ]
+                }
+            )
+        return SyncHealthState(
+            consecutive_failures=consecutive,
+            alert_due=alert_due,
+            recovered=recovered,
+            failed_components=components,
+        )
 
     def ensure_schema(self, *, apply_changes: bool = True) -> None:
         preview = self.worksheet.get(

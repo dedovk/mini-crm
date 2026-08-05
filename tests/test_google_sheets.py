@@ -444,6 +444,17 @@ class AuditWorksheetStub:
         self.appended.extend(rows)
 
 
+class HealthWorksheetStub(AuditWorksheetStub):
+    id = 555
+
+    def __init__(self, values=None) -> None:
+        super().__init__()
+        self.values = values or []
+
+    def get_all_values(self):
+        return self.values
+
+
 class AuditSpreadsheetStub:
     def __init__(self) -> None:
         self.audit = AuditWorksheetStub()
@@ -484,3 +495,31 @@ def test_audit_log_creates_technical_sheet_and_appends_event() -> None:
         "prom:501",
         "20451234567890",
     ]
+
+
+def test_health_state_triggers_once_on_third_failure_and_recovers() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    health = HealthWorksheetStub(
+        [["consecutive_failures", "2"], ["alert_open", "false"]]
+    )
+
+    class Spreadsheet:
+        def worksheet(self, title):
+            return health
+
+    gateway.spreadsheet = Spreadsheet()
+
+    failed = gateway.record_sync_health(
+        ["prom"], occurred_at=datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+    )
+
+    assert failed.consecutive_failures == 3
+    assert failed.alert_due
+    health.values = [["consecutive_failures", "3"], ["alert_open", "true"]]
+
+    recovered = gateway.record_sync_health(
+        [], occurred_at=datetime(2026, 8, 5, 12, 15, tzinfo=UTC)
+    )
+
+    assert recovered.consecutive_failures == 0
+    assert recovered.recovered

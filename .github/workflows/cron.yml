@@ -25,6 +25,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   sync:
@@ -61,6 +62,7 @@ jobs:
       SENDER_DEFAULT: "наш"
       SENDER_OPTIONS: ${{ secrets.SENDER_OPTIONS || 'imaxi-com,Melad,Melad дроп,наш' }}
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      GITHUB_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout

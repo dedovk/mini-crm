@@ -49,6 +49,18 @@ def render_github_summary(result: SyncResult) -> str:
     if result.warnings:
         lines.extend(["", "## Warnings", ""])
         lines.extend(f"- {warning}" for warning in result.warnings)
+    if result.health.consecutive_failures or result.health.recovered:
+        lines.extend(
+            [
+                "",
+                "## Integration health",
+                "",
+                f"- Consecutive degraded runs: {result.health.consecutive_failures}",
+                f"- Components: {', '.join(result.health.failed_components) or 'none'}",
+                f"- Alert created now: {'yes' if result.health.alert_due else 'no'}",
+                f"- Recovered now: {'yes' if result.health.recovered else 'no'}",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 

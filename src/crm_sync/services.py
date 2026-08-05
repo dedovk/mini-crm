@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from crm_sync.clients.google_sheets import GoogleSheetsGateway
 from crm_sync.clients.nova_poshta import NovaPoshtaClient
-from crm_sync.models import Order, OrderAuditEvent
+from crm_sync.models import Order, OrderAuditEvent, SyncHealthState
 from crm_sync.integrity import IntegrityError, validate_incoming_orders
 
 LOGGER = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ class SyncResult:
     appended_rows: int = 0
     audit_events: int = 0
     backup_created: str = ""
+    health: SyncHealthState = SyncHealthState()
 
 
 class SourceSyncError(RuntimeError):
@@ -275,6 +276,13 @@ class SyncService:
             for warning in post_integrity.warnings
             if warning not in warnings
         )
+        failed_components = list(dict.fromkeys(failed_sources))
+        failed_components.extend(
+            "rozetka-finance"
+            for warning in warnings
+            if warning.casefold().startswith("rozetka finance is unavailable")
+        )
+        health = self.sheets.record_sync_health(failed_components, occurred_at=now)
         LOGGER.info(
             "Sync completed: %s detail/formula cell(s) refreshed, %s expense cell(s) updated, %s status cell(s) updated, %s item row(s) appended, %s audit event(s) written",
             refreshed,
@@ -299,8 +307,10 @@ class SyncService:
             appended_rows=appended_rows,
             audit_events=audit_count,
             backup_created=backup_created,
+            health=health,
         )
-        self._raise_for_source_failures(result)
+        # Production failures are aggregated in the persisted health state and
+        # escalated through a single GitHub issue after the configured threshold.
         return result
 
     @staticmethod

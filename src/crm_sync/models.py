@@ -88,3 +88,11 @@ class OrderExpenseTransaction:
         if self.category == "logistics_refund":
             return -abs(self.credit or self.debit)
         return abs(self.debit) - abs(self.credit)
+
+
+@dataclass(frozen=True, slots=True)
+class SyncHealthState:
+    consecutive_failures: int = 0
+    alert_due: bool = False
+    recovered: bool = False
+    failed_components: tuple[str, ...] = ()
