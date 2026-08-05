@@ -1,7 +1,9 @@
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
+from crm_sync.models import Order, OrderItem
 from crm_sync.services import SourceSyncError, SyncService
 
 
@@ -47,6 +49,38 @@ class FailingExpenseSource:
         raise RuntimeError("finance access denied")
 
 
+class StaleInexactSource:
+    source = "prom"
+
+    def fetch_orders(self, since: datetime):
+        return [
+            Order(
+                source="prom",
+                external_id="old-order",
+                created_at=datetime(2020, 1, 1, tzinfo=UTC),
+                completed_at=datetime.now(UTC),
+                customer_name="Customer",
+                city="Kyiv",
+                phone="+380501234567",
+                tracking_number="20451234567890",
+                total=Decimal(100),
+                payment_method="",
+                note="",
+                sender="",
+                completion_is_exact=False,
+                items=[
+                    OrderItem(
+                        name="Product",
+                        product_code="SKU",
+                        quantity=Decimal(1),
+                        unit_price=Decimal(100),
+                        line_total=Decimal(100),
+                    )
+                ],
+            )
+        ]
+
+
 def test_source_failure_is_reported_after_other_sources_continue() -> None:
     successful = SuccessfulSource()
     service = SyncService(
@@ -81,3 +115,18 @@ def test_optional_finance_failure_does_not_fail_order_sync() -> None:
     service.run()
 
     assert successful.called
+
+
+def test_deep_run_does_not_backfill_previously_unseen_stale_order() -> None:
+    service = SyncService(
+        sheets=SheetsStub(),  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[StaleInexactSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=30,
+        new_order_max_age_days=7,
+        sender_default="-",
+        dry_run=True,
+    )
+
+    service.run()

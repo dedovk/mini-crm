@@ -66,6 +66,7 @@ def build_service(settings: Settings) -> SyncService:
         expense_source=rozetka,
         timezone=settings.timezone,
         lookback_days=settings.sync_lookback_days,
+        new_order_max_age_days=settings.new_order_max_age_days,
         expense_lookback_days=settings.rozetka_finance_lookback_days,
         sender_default=settings.sender_default,
         dry_run=settings.dry_run,

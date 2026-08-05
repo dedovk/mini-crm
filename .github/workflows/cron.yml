@@ -46,6 +46,9 @@ jobs:
       # Frequent runs fetch seven days to reduce Prom API usage. The daily run
       # reconciles the full 30-day history.
       SYNC_LOOKBACK_DAYS: ${{ github.event.schedule == '13 2 * * *' && '30' || '7' }}
+      # Deep runs may inspect older orders, but they must not backfill stale
+      # missing orders into the current reporting day.
+      NEW_ORDER_MAX_AGE_DAYS: "7"
       ROZETKA_FINANCE_LOOKBACK_DAYS: ${{ github.event.schedule == '13 2 * * *' && '90' || '45' }}
       HTTP_TIMEOUT_SECONDS: "30"
       HTTP_MAX_RETRIES: "4"

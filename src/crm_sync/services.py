@@ -39,6 +39,7 @@ class SyncService:
         expense_source: OrderExpenseSource | None = None,
         timezone: str,
         lookback_days: int,
+        new_order_max_age_days: int = 7,
         expense_lookback_days: int = 45,
         sender_default: str,
         dry_run: bool,
@@ -49,6 +50,7 @@ class SyncService:
         self.expense_source = expense_source
         self.timezone = timezone
         self.lookback_days = lookback_days
+        self.new_order_max_age_days = new_order_max_age_days
         self.expense_lookback_days = expense_lookback_days
         self.sender_default = sender_default
         self.dry_run = dry_run
@@ -95,12 +97,27 @@ class SyncService:
 
         unique_orders: list[Order] = []
         run_keys: set[str] = set()
+        stale_orders = 0
+        new_order_cutoff = (now - timedelta(days=self.new_order_max_age_days)).date()
         for order in fetched:
             key = order.sync_key.casefold()
             if key in existing_keys or key in run_keys:
                 continue
+            effective_day = (
+                order.completed_at.date() if order.completion_is_exact else order.created_at.date()
+            )
+            if effective_day < new_order_cutoff:
+                stale_orders += 1
+                continue
             run_keys.add(key)
             unique_orders.append(order)
+
+        if stale_orders:
+            LOGGER.warning(
+                "Skipped %s previously unseen order(s) older than %s; deep runs only refresh existing orders",
+                stale_orders,
+                new_order_cutoff.isoformat(),
+            )
 
         all_ttns = list(dict.fromkeys([*pending_ttns, *(order.tracking_number for order in unique_orders)]))
         statuses = self.nova_poshta.get_statuses(all_ttns)

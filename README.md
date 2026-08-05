@@ -146,6 +146,12 @@ reduces the original delivery expense without removing the order from the worksh
 resulting non-negative total is written once, on the first item row, in the advertising
 expense column. Frequent runs reconcile 45 days and the daily run reconciles 90 days;
 configure this with `ROZETKA_FINANCE_LOOKBACK_DAYS` when a longer backfill is required.
+Finance access is optional: if the Rozetka account does not expose logistics history,
+the order sync succeeds and preserves the existing advertising-expense cells.
+
+Daily deep reconciliation reads older orders to refresh TTNs and statuses, but does not
+insert previously unseen stale orders. `NEW_ORDER_MAX_AGE_DAYS` controls this independent
+new-order window and defaults to seven days.
 
 ## ocStore 2.1.0.2.1
 
