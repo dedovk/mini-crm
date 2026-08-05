@@ -24,15 +24,21 @@ class LayoutWorksheet(StubWorksheet):
     row_count = 1000
 
     def batch_clear(self, ranges) -> None:
+        self.operations.append("clear")
         self.cleared_ranges = ranges
 
     def update(self, *, values, range_name, raw) -> None:
+        self.operations.append("update")
         self.written_values = values
         self.written_range = range_name
         self.written_raw = raw
 
     def add_rows(self, count) -> None:
         self.row_count += count
+
+    def __init__(self, values: list[list[Any]]) -> None:
+        super().__init__(values)
+        self.operations: list[str] = []
 
 
 class StubSpreadsheet:
@@ -146,6 +152,8 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     assert report_row[15].endswith(";10)")
     forecast_row = written[report_indexes[2]]
     assert forecast_row[10:16] == ["", "", "", "", "", ""]
+    assert worksheet.operations == ["update", "clear"]
+    assert worksheet.cleared_ranges == [f"A{len(written) + 1}:W{worksheet.row_count}"]
     assert added == 0
 
 

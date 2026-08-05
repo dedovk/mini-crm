@@ -1281,12 +1281,13 @@ class GoogleSheetsGateway:
                 ]
             }
         )
-        self.worksheet.batch_clear([f"A1:W{self.worksheet.row_count}"])
         self.worksheet.update(
             values=rows,
             range_name=f"A1:W{last_used_row}",
             raw=False,
         )
+        if last_used_row < self.worksheet.row_count:
+            self.worksheet.batch_clear([f"A{last_used_row + 1}:W{self.worksheet.row_count}"])
         if merge_requests:
             self.spreadsheet.batch_update({"requests": merge_requests})
         self._apply_professional_formatting(last_used_row)
