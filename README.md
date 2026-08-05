@@ -10,8 +10,8 @@ through GitHub Actions.
 - The marketplace order number (column E) and order total (column N) are merged across
   the product rows of one order.
 - Only marketplace orders in the completed/successful status are imported.
-- Column D contains only the `HH:MM` time when the order became completed; the section
-  date is stored separately and all timestamps are converted to `Europe/Kyiv`.
+- Column D contains the completion date when the source exposes an exact status-change
+  timestamp; unknown completion dates are left blank instead of being invented.
 - Phones are written as text in `+380...` format.
 - Tracking numbers preserve the marketplace value and support Nova Poshta numbers with
   spaces, Rozetka Delivery `RMP-...`, Ukrposhta and hyphenated Meest identifiers. Only
@@ -42,6 +42,10 @@ through GitHub Actions.
   select the corresponding A:T range.
 - The sheet uses compact Ukrainian headers, 8-point body text, fixed narrow widths,
   status colors and hidden technical columns U:W so all business columns fit horizontally.
+- Sheet rebuilds write the new snapshot before clearing only obsolete trailing rows, so a
+  failed write cannot erase the existing worksheet contents.
+- Every GitHub Actions run publishes a structured step summary with source counts, skipped
+  stale orders, shipment updates, appended rows and non-fatal integration warnings.
 
 ## Google Sheet contract
 

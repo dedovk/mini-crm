@@ -93,10 +93,12 @@ def test_source_failure_is_reported_after_other_sources_continue() -> None:
         dry_run=True,
     )
 
-    with pytest.raises(SourceSyncError, match="prom"):
+    with pytest.raises(SourceSyncError, match="prom") as error:
         service.run()
 
     assert successful.called
+    assert error.value.result.failed_sources == ("prom",)
+    assert error.value.result.source_orders == {"rozetka": 0}
 
 
 def test_optional_finance_failure_does_not_fail_order_sync() -> None:
@@ -112,9 +114,14 @@ def test_optional_finance_failure_does_not_fail_order_sync() -> None:
         dry_run=True,
     )
 
-    service.run()
+    result = service.run()
 
     assert successful.called
+    assert result.failed_sources == ()
+    assert result.source_orders == {"rozetka": 0}
+    assert result.warnings == (
+        "rozetka finance is unavailable; existing sheet values were preserved: finance access denied",
+    )
 
 
 def test_deep_run_does_not_backfill_previously_unseen_stale_order() -> None:
@@ -129,4 +136,7 @@ def test_deep_run_does_not_backfill_previously_unseen_stale_order() -> None:
         dry_run=True,
     )
 
-    service.run()
+    result = service.run()
+
+    assert result.stale_orders == 1
+    assert result.new_orders == 0

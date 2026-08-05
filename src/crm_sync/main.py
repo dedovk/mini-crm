@@ -10,7 +10,8 @@ from crm_sync.clients.opencart import OpenCartClient
 from crm_sync.clients.prom import PromClient
 from crm_sync.clients.rozetka import RozetkaClient
 from crm_sync.config import ConfigurationError, Settings
-from crm_sync.services import SyncService
+from crm_sync.reporting import write_github_summary
+from crm_sync.services import SourceSyncError, SyncService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,8 +78,13 @@ def main() -> int:
     try:
         settings = Settings.from_env()
         configure_logging(settings.log_level)
-        build_service(settings).run()
+        result = build_service(settings).run()
+        write_github_summary(result)
         return 0
+    except SourceSyncError as exc:
+        write_github_summary(exc.result)
+        LOGGER.error("CRM synchronization completed with source failures: %s", exc)
+        return 1
     except ConfigurationError as exc:
         logging.basicConfig(level=logging.ERROR)
         LOGGER.error("Configuration error: %s", exc)

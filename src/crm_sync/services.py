@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -13,8 +14,30 @@ from crm_sync.models import Order
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class SyncResult:
+    dry_run: bool
+    source_orders: dict[str, int]
+    failed_sources: tuple[str, ...]
+    warnings: tuple[str, ...]
+    fetched_orders: int
+    new_orders: int
+    stale_orders: int
+    pending_shipments: int
+    shipment_statuses: int
+    refreshed_cells: int = 0
+    expense_updates: int = 0
+    status_updates: int = 0
+    appended_rows: int = 0
+
+
 class SourceSyncError(RuntimeError):
     """One or more order sources failed after the remaining work was completed."""
+
+    def __init__(self, result: SyncResult) -> None:
+        self.result = result
+        names = ", ".join(result.failed_sources)
+        super().__init__(f"Order source synchronization failed: {names}")
 
 
 class OrderSource(Protocol):
@@ -55,7 +78,7 @@ class SyncService:
         self.sender_default = sender_default
         self.dry_run = dry_run
 
-    def run(self) -> None:
+    def run(self) -> SyncResult:
         now = datetime.now(ZoneInfo(self.timezone))
         self.sheets.ensure_schema(apply_changes=not self.dry_run)
         existing_keys = self.sheets.read_existing_sync_keys()
@@ -63,6 +86,8 @@ class SyncService:
 
         fetched: list[Order] = []
         failed_sources: list[str] = []
+        source_counts: dict[str, int] = {}
+        warnings: list[str] = []
         for source in self.sources:
             try:
                 source_orders = source.fetch_orders(since)
@@ -70,6 +95,7 @@ class SyncService:
                 LOGGER.exception("%s source failed; other sources will continue", source.source)
                 failed_sources.append(source.source)
                 continue
+            source_counts[source.source] = len(source_orders)
             LOGGER.info("%s returned %s eligible order(s)", source.source, len(source_orders))
             fetched.extend(source_orders)
 
@@ -84,11 +110,16 @@ class SyncService:
                     len(expenses),
                 )
             except Exception as exc:
+                warning = (
+                    f"{self.expense_source.source} finance is unavailable; "
+                    f"existing sheet values were preserved: {exc}"
+                )
                 LOGGER.warning(
                     "%s finance sync is unavailable; existing sheet values are preserved: %s",
                     self.expense_source.source,
                     exc,
                 )
+                warnings.append(warning)
 
         refreshed = 0
         if not self.dry_run:
@@ -129,8 +160,20 @@ class SyncService:
                 len(unique_orders),
                 len(pending_ttns),
             )
-            self._raise_for_source_failures(failed_sources)
-            return
+            result = SyncResult(
+                dry_run=True,
+                source_orders=source_counts,
+                failed_sources=tuple(dict.fromkeys(failed_sources)),
+                warnings=tuple(warnings),
+                fetched_orders=len(fetched),
+                new_orders=len(unique_orders),
+                stale_orders=stale_orders,
+                pending_shipments=len(pending_ttns),
+                shipment_statuses=len(statuses),
+                refreshed_cells=refreshed,
+            )
+            self._raise_for_source_failures(result)
+            return result
 
         updated = self.sheets.update_shipment_statuses(statuses)
         appended_rows = self.sheets.append_orders(
@@ -152,10 +195,25 @@ class SyncService:
             updated,
             appended_rows,
         )
-        self._raise_for_source_failures(failed_sources)
+        result = SyncResult(
+            dry_run=False,
+            source_orders=source_counts,
+            failed_sources=tuple(dict.fromkeys(failed_sources)),
+            warnings=tuple(warnings),
+            fetched_orders=len(fetched),
+            new_orders=len(unique_orders),
+            stale_orders=stale_orders,
+            pending_shipments=len(pending_ttns),
+            shipment_statuses=len(statuses),
+            refreshed_cells=refreshed,
+            expense_updates=expense_updates,
+            status_updates=updated,
+            appended_rows=appended_rows,
+        )
+        self._raise_for_source_failures(result)
+        return result
 
     @staticmethod
-    def _raise_for_source_failures(failed_sources: list[str]) -> None:
-        if failed_sources:
-            names = ", ".join(dict.fromkeys(failed_sources))
-            raise SourceSyncError(f"Order source synchronization failed: {names}")
+    def _raise_for_source_failures(result: SyncResult) -> None:
+        if result.failed_sources:
+            raise SourceSyncError(result)
