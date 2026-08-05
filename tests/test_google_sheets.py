@@ -139,6 +139,49 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     assert added == 0
 
 
+def test_append_orders_does_not_invent_completion_date_for_inexact_source() -> None:
+    rows = [[""] * COLUMNS.operational_date for _ in range(4)]
+    worksheet = LayoutWorksheet(rows)
+    spreadsheet = StubSpreadsheet()
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.spreadsheet = spreadsheet
+    gateway.header_row = 4
+    gateway._apply_professional_formatting = lambda last_used_row: None
+    order = Order(
+        source="prom",
+        external_id="2",
+        created_at=datetime(2026, 8, 2, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 3, tzinfo=UTC),
+        customer_name="Test Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451234567890",
+        total=Decimal(100),
+        payment_method="",
+        note="",
+        sender="",
+        completion_is_exact=False,
+        items=[
+            OrderItem(
+                name="Product",
+                product_code="SKU-2",
+                quantity=Decimal(1),
+                unit_price=Decimal(100),
+                line_total=Decimal(100),
+            )
+        ],
+    )
+
+    gateway.append_orders([order], {}, sender_default="наш", operational_day=date(2026, 8, 3))
+
+    order_row = next(
+        row for row in worksheet.written_values if row[COLUMNS.row_type - 1] == ROW_ORDER
+    )
+    assert order_row[COLUMNS.order_date - 1] == ""
+    assert order_row[COLUMNS.operational_date - 1] == sheet_serial(date(2026, 8, 3))
+
+
 def test_update_order_expenses_writes_net_total_only_to_first_item_row() -> None:
     rows = [[""] * COLUMNS.operational_date for _ in range(6)]
     for index in (4, 5):

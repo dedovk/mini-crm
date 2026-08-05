@@ -1048,7 +1048,7 @@ class GoogleSheetsGateway:
             padded[COLUMNS.customer - 1] = clean_customer_display(padded[COLUMNS.customer - 1])
             raw_completion = padded[COLUMNS.order_date - 1]
             completion_day = parse_sheet_date(raw_completion)
-            if completion_day is None:
+            if completion_day is None and parse_sheet_time(raw_completion) is not None:
                 completion_day = order_day
             padded[COLUMNS.order_date - 1] = sheet_serial(completion_day) if completion_day else ""
             current_sender = str(padded[COLUMNS.sender - 1]).strip()
@@ -1085,7 +1085,9 @@ class GoogleSheetsGateway:
                     if shipment_status
                     else ("Невідомо" if extract_ttn(order.tracking_number) else "Інший перевізник")
                 )
-                row[COLUMNS.order_date - 1] = sheet_serial(order.completed_at.date())
+                row[COLUMNS.order_date - 1] = (
+                    sheet_serial(order.completed_at.date()) if order.completion_is_exact else ""
+                )
                 row[COLUMNS.order_number - 1] = order.external_id
                 row[COLUMNS.customer - 1] = customer_display(order.city, order.customer_name)
                 row[COLUMNS.phone - 1] = order.phone
