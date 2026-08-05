@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -48,6 +49,7 @@ class OpenCartClient:
         without_tracking = 0
         without_items = 0
         not_completed = 0
+        rejected_statuses: Counter[str] = Counter()
         offset = 0
         limit = 500
         while True:
@@ -70,6 +72,17 @@ class OpenCartClient:
                     continue
                 if not self._is_completed(raw):
                     not_completed += 1
+                    status = str(
+                        first_value(
+                            raw,
+                            "order_status",
+                            "status_name",
+                            "status",
+                            "order_status_id",
+                            default="missing",
+                        )
+                    ).strip()
+                    rejected_statuses[status or "missing"] += 1
                     continue
                 try:
                     order = self._normalize(raw)
@@ -93,11 +106,14 @@ class OpenCartClient:
             without_tracking,
             without_items,
         )
+        if rejected_statuses:
+            LOGGER.warning("OpenCart rejected completion statuses: %s", dict(rejected_statuses))
         return orders
 
     @staticmethod
     def _is_completed(raw: dict[str, Any]) -> bool:
-        if raw.get("is_completed") is True or str(raw.get("is_completed", "")).strip() == "1":
+        completion_flag = str(raw.get("is_completed", "")).strip().casefold()
+        if raw.get("is_completed") is True or completion_flag in {"1", "true", "yes"}:
             return True
         status = str(first_value(raw, "order_status", "status_name", "status")).strip().casefold()
         return any(marker in status for marker in ("виконан", "выполн", "заверш", "complete"))

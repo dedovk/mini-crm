@@ -223,6 +223,12 @@ def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
     assert order.completed_at.strftime("%d.%m.%Y %H:%M") == "03.08.2026 14:25"
 
 
+def test_opencart_completion_accepts_boolean_text_and_localized_statuses() -> None:
+    assert OpenCartClient._is_completed({"is_completed": "true"}) is True
+    assert OpenCartClient._is_completed({"order_status": "Виконано"}) is True
+    assert OpenCartClient._is_completed({"order_status": "Очікує обробки"}) is False
+
+
 class RozetkaSearchStub:
     def __init__(self) -> None:
         self.params: dict = {}
