@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 from datetime import datetime
 from decimal import Decimal
@@ -49,11 +50,19 @@ class RozetkaClient:
             return ""
         payload = self.http.request_json(
             "POST",
-            f"{self.base_url}/site/login",
-            json={"username": self.username, "password": self.password},
+            f"{self.base_url}/sites",
+            json={
+                "username": self.username,
+                "password": base64.b64encode(self.password.encode("utf-8")).decode("ascii"),
+            },
         )
         if not isinstance(payload, dict) or not payload.get("success"):
-            raise ApiError("Rozetka login failed")
+            errors = payload.get("errors") if isinstance(payload, dict) else None
+            if isinstance(errors, dict):
+                code = errors.get("code", "unknown")
+                message = errors.get("message", "unknown")
+                raise ApiError(f"Rozetka login failed: code={code}, message={message}")
+            raise ApiError("Rozetka login failed: malformed API response")
         content = payload.get("content") or {}
         token = content.get("access_token") or content.get("token") if isinstance(content, dict) else ""
         if not token:

@@ -1,4 +1,5 @@
 from datetime import datetime
+import base64
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -111,6 +112,15 @@ class RozetkaLogisticsHiddenStub(RozetkaDedicatedLogisticsDeniedStub):
         return super().request_json(method, url, **kwargs)
 
 
+class RozetkaLoginStub:
+    def __init__(self) -> None:
+        self.request: tuple[str, str, dict] | None = None
+
+    def request_json(self, method: str, url: str, **kwargs):
+        self.request = (method, url, kwargs)
+        return {"success": True, "content": {"access_token": "jwt-token"}}
+
+
 def test_rozetka_expenses_sum_commission_and_net_logistics_by_order_id() -> None:
     client = RozetkaClient(
         RozetkaExpenseStub(),  # type: ignore[arg-type]
@@ -171,3 +181,25 @@ def test_rozetka_expenses_reject_incomplete_royalty_only_result() -> None:
 
     with pytest.raises(ApiError, match="ROZETKA_USERNAME"):
         client.fetch_expenses(datetime(2026, 7, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+
+def test_rozetka_login_uses_sites_endpoint_and_base64_password() -> None:
+    http = RozetkaLoginStub()
+    client = RozetkaClient(
+        http,  # type: ignore[arg-type]
+        token="",
+        username="seller@example.test",
+        password="secret-password",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    assert client._login_token() == "jwt-token"
+    assert http.request is not None
+    method, url, kwargs = http.request
+    assert method == "POST"
+    assert url == "https://example.test/sites"
+    assert kwargs["json"] == {
+        "username": "seller@example.test",
+        "password": base64.b64encode(b"secret-password").decode("ascii"),
+    }
