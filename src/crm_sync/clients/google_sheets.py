@@ -33,13 +33,9 @@ from crm_sync.sheet_layout import (
     source_key,
 )
 from crm_sync.sheet_meta import (
-    append_audit_events as append_sheet_audit_events,
-)
-from crm_sync.sheet_meta import (
-    create_backup as create_sheet_backup,
-)
-from crm_sync.sheet_meta import (
-    record_sync_health as record_sheet_sync_health,
+    append_sheet_audit_events,
+    create_sheet_backup,
+    record_sheet_sync_health,
 )
 from crm_sync.sheet_orders import collect_order_groups
 from crm_sync.sheet_schema import (

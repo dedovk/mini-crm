@@ -25,7 +25,7 @@ HEADER_FORMAT = {
 }
 
 
-def append_audit_events(spreadsheet: Any, events: list[OrderAuditEvent]) -> int:
+def append_sheet_audit_events(spreadsheet: Any, events: list[OrderAuditEvent]) -> int:
     if not events:
         return 0
     audit = _ensure_audit_worksheet(spreadsheet)
@@ -75,7 +75,7 @@ def _ensure_audit_worksheet(spreadsheet: Any) -> Any:
     return audit
 
 
-def create_backup(spreadsheet: Any, worksheet: Any, *, created_at: datetime) -> str:
+def create_sheet_backup(spreadsheet: Any, worksheet: Any, *, created_at: datetime) -> str:
     source_title = str(getattr(worksheet, "title", "CRM"))
     title = f"{BACKUP_PREFIX}{created_at:%Y%m%d-%H%M%S} - {source_title}"[:100]
     backup = spreadsheet.duplicate_sheet(
@@ -108,7 +108,7 @@ def create_backup(spreadsheet: Any, worksheet: Any, *, created_at: datetime) -> 
     return title
 
 
-def record_sync_health(
+def record_sheet_sync_health(
     spreadsheet: Any,
     failed_components: list[str],
     *,

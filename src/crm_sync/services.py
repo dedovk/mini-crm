@@ -8,13 +8,13 @@ from decimal import Decimal
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from crm_sync.clients.google_sheets import GoogleSheetsGateway
-from crm_sync.clients.nova_poshta import NovaPoshtaClient
-from crm_sync.integrity import IntegrityError, validate_incoming_orders
+from crm_sync.integrity import IntegrityError, IntegrityReport, validate_incoming_orders
 from crm_sync.models import (
     Order,
     OrderAuditEvent,
+    ShipmentStatus,
     ShipmentStatusChange,
+    ShipmentUpdateResult,
     SyncHealthState,
 )
 
@@ -63,6 +63,55 @@ class OrderExpenseSource(Protocol):
     def fetch_expenses(self, since: datetime) -> dict[str, Decimal]: ...
 
 
+class ShipmentTracker(Protocol):
+    def get_statuses(self, tracking_numbers: list[str]) -> dict[str, ShipmentStatus]: ...
+
+
+class SheetGateway(Protocol):
+    def ensure_schema(self, *, apply_changes: bool) -> None: ...
+
+    def validate_integrity(self) -> IntegrityReport: ...
+
+    def read_existing_sync_keys(self) -> set[str]: ...
+
+    def backfill_completion_state(self, *, observed_at: datetime) -> int: ...
+
+    def record_completion_observations(
+        self, orders: list[Order], *, observed_at: datetime
+    ) -> tuple[OrderAuditEvent, ...]: ...
+
+    def refresh_order_details(self, orders: list[Order]) -> int: ...
+
+    def pending_tracking_numbers(self) -> list[str]: ...
+
+    def update_shipment_statuses(
+        self, statuses: dict[str, ShipmentStatus]
+    ) -> ShipmentUpdateResult: ...
+
+    def latest_layout_day(self) -> date | None: ...
+
+    def create_backup(self, *, created_at: datetime) -> str: ...
+
+    def append_orders(
+        self,
+        orders: list[Order],
+        statuses: dict[str, ShipmentStatus],
+        *,
+        sender_default: str,
+        operational_day: date,
+        observed_at: datetime,
+        force_rebuild: bool,
+    ) -> int: ...
+
+    def update_order_expenses(self, expenses: dict[str, Decimal], *, source: str) -> int: ...
+
+    def append_audit_events(self, events: list[OrderAuditEvent]) -> int: ...
+
+    def record_sync_health(
+        self, failed_components: list[str], *, occurred_at: datetime
+    ) -> SyncHealthState: ...
+
+
 @dataclass(frozen=True, slots=True)
 class SourceBatch:
     orders: tuple[Order, ...]
@@ -80,8 +129,8 @@ class SyncService:
     def __init__(
         self,
         *,
-        sheets: GoogleSheetsGateway,
-        nova_poshta: NovaPoshtaClient,
+        sheets: SheetGateway,
+        nova_poshta: ShipmentTracker,
         sources: list[OrderSource],
         expense_source: OrderExpenseSource | None = None,
         timezone: str,
