@@ -824,6 +824,20 @@ class GoogleSheetsGateway:
                 keys.add(f"{source.casefold()}:{order_id}")
         return keys
 
+    def latest_layout_day(self) -> date | None:
+        """Return the newest explicit day section without reading business columns."""
+        values = self.worksheet.get(
+            f"V1:W{self.worksheet.row_count}",
+            value_render_option="UNFORMATTED_VALUE",
+        )
+        days = [
+            parsed
+            for row in values
+            if row and str(row[0]).strip() == ROW_DAY
+            if (parsed := parse_sheet_date(row[1] if len(row) > 1 else "")) is not None
+        ]
+        return max(days, default=None)
+
     def pending_tracking_numbers(self) -> list[str]:
         values = self.worksheet.get_all_values()
         numbers: list[str] = []
@@ -1228,8 +1242,9 @@ class GoogleSheetsGateway:
         sender_default: str,
         operational_day: date,
         observed_at: datetime | None = None,
+        force_rebuild: bool = False,
     ) -> int:
-        if not orders:
+        if not orders and not force_rebuild:
             return 0
         observation_day = (observed_at.date() if observed_at else operational_day)
         existing_values = self.worksheet.get_all_values(value_render_option="FORMULA")

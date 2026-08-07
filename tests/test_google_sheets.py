@@ -37,6 +37,9 @@ class LayoutWorksheet(StubWorksheet):
     def add_rows(self, count) -> None:
         self.row_count += count
 
+    def get(self, range_name, **kwargs):
+        return self.values
+
     def __init__(self, values: list[list[Any]]) -> None:
         super().__init__(values)
         self.operations: list[str] = []
@@ -330,6 +333,40 @@ def test_append_orders_skips_sheet_rebuild_when_there_are_no_new_orders() -> Non
 
     assert added == 0
     assert worksheet.operations == []
+
+
+def test_append_orders_advances_layout_when_rebuild_is_forced() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    old = rows[4]
+    old[COLUMNS.source - 1] = "prom"
+    old[COLUMNS.tracking_number - 1] = "20451234567890"
+    old[COLUMNS.order_date - 1] = sheet_serial(date(2026, 8, 5))
+    old[COLUMNS.order_number - 1] = "1"
+    old[COLUMNS.sync_key - 1] = "prom:1"
+    old[COLUMNS.row_type - 1] = ROW_ORDER
+    old[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
+    worksheet = LayoutWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.spreadsheet = StubSpreadsheet()
+    gateway.header_row = 4
+    gateway._apply_professional_formatting = lambda last_used_row: None
+
+    added = gateway.append_orders(
+        [],
+        {},
+        sender_default="наш",
+        operational_day=date(2026, 8, 6),
+        force_rebuild=True,
+    )
+
+    assert added == 0
+    assert any(
+        row[COLUMNS.row_type - 1] == "DAY"
+        and row[COLUMNS.operational_date - 1] == sheet_serial(date(2026, 8, 6))
+        for row in worksheet.written_values
+    )
+    assert any(row[COLUMNS.row_type - 1] == "REPORT_DAY" for row in worksheet.written_values)
 
 
 def test_append_orders_does_not_invent_completion_date_for_inexact_source() -> None:

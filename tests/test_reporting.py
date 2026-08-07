@@ -28,6 +28,7 @@ def test_render_github_summary_contains_sources_metrics_and_warnings() -> None:
     assert "**Completed · Production**" in summary
     assert "| prom | 25 | OK |" in summary
     assert "| New orders | 2 |" in summary
+    assert "| Daily layout advanced | No |" in summary
     assert "- rozetka finance is unavailable" in summary
 
 

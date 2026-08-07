@@ -37,6 +37,8 @@ through GitHub Actions.
 - Orders are grouped by the date when they became completed. At local midnight the previous
   day receives formula-driven daily, month-to-date and month forecast rows. Summary rows
   are consecutive and place all KPI labels and values together in columns A:P.
+- Daily sections advance even when no new orders arrive; the rollover closes prior days and
+  creates the current day section during the first production run after local midnight.
 - Multi-item orders receive a black outer border across the complete order block.
 - Month and day title rows contain styled `Виділити місяць` / `Виділити день` links that
   select the corresponding A:T range.

@@ -32,6 +32,7 @@ class SyncResult:
     appended_rows: int = 0
     audit_events: int = 0
     backup_created: str = ""
+    layout_advanced: bool = False
     health: SyncHealthState = field(default_factory=SyncHealthState)
 
 
@@ -196,8 +197,10 @@ class SyncService:
             return result
 
         shipment_update = self.sheets.update_shipment_statuses(statuses)
+        latest_layout_day = self.sheets.latest_layout_day()
+        layout_advanced = latest_layout_day is None or latest_layout_day < now.date()
         backup_created = ""
-        if unique_orders:
+        if unique_orders or layout_advanced:
             backup_created = self.sheets.create_backup(created_at=now)
             LOGGER.info("Created Google Sheets backup before structural rebuild: %s", backup_created)
         appended_rows = self.sheets.append_orders(
@@ -206,6 +209,7 @@ class SyncService:
             sender_default=self.sender_default,
             operational_day=now.date(),
             observed_at=now,
+            force_rebuild=layout_advanced,
         )
         expense_updates = 0
         if expenses is not None:
@@ -308,6 +312,7 @@ class SyncService:
             appended_rows=appended_rows,
             audit_events=audit_count,
             backup_created=backup_created,
+            layout_advanced=layout_advanced,
             health=health,
         )
         # Production failures are aggregated in the persisted health state and

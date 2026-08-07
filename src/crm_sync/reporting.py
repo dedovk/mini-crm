@@ -43,6 +43,7 @@ def render_github_summary(result: SyncResult) -> str:
             f"| Shipment status cells updated | {result.status_updates} |",
             f"| Item rows appended | {result.appended_rows} |",
             f"| Audit events written | {result.audit_events} |",
+            f"| Daily layout advanced | {'Yes' if result.layout_advanced else 'No'} |",
             f"| Structural backup | {result.backup_created or 'Not required'} |",
         ]
     )

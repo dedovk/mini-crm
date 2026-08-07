@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -27,6 +27,8 @@ class ProductionSheetsStub(SheetsStub):
     def __init__(self) -> None:
         self.schema_modes: list[bool] = []
         self.health_calls: list[list[str]] = []
+        self.backups = 0
+        self.force_rebuild = False
 
     def ensure_schema(self, *, apply_changes: bool) -> None:
         self.schema_modes.append(apply_changes)
@@ -43,8 +45,16 @@ class ProductionSheetsStub(SheetsStub):
     def update_shipment_statuses(self, statuses):
         return ShipmentUpdateResult()
 
+    def latest_layout_day(self):
+        return datetime.now(UTC).date()
+
+    def create_backup(self, *, created_at) -> str:
+        self.backups += 1
+        return "backup"
+
     def append_orders(self, orders, statuses, **kwargs) -> int:
         assert orders == []
+        self.force_rebuild = kwargs.get("force_rebuild", False)
         return 0
 
     def update_order_expenses(self, expenses, *, source: str) -> int:
@@ -199,3 +209,23 @@ def test_production_run_performs_preflight_postflight_and_health_update() -> Non
     assert sheets.schema_modes == [False, True]
     assert sheets.health_calls == [[]]
     assert result.health.consecutive_failures == 0
+
+
+def test_production_run_advances_daily_layout_without_new_orders() -> None:
+    sheets = ProductionSheetsStub()
+    sheets.latest_layout_day = lambda: date(2020, 1, 1)
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[SuccessfulSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    result = service.run()
+
+    assert result.layout_advanced
+    assert sheets.force_rebuild
+    assert sheets.backups == 1
