@@ -57,11 +57,29 @@ through GitHub Actions.
 - Hidden columns X:Y persist the first observed completion date and the last marketplace
   order status. For sources without status history, the first real observation of `Виконано`
   is used instead of inventing a date from order creation.
-- No structural worksheet rebuild is performed when there are no new orders. A hidden
-  timestamped backup is created before an actual rebuild, and the three newest copies are kept.
+- No structural worksheet rebuild is performed when there are no new orders and the current
+  day section already exists. A hidden timestamped backup is created before a new-order rebuild
+  or daily rollover, and the three newest copies are kept.
 - Production integration failures are aggregated. One GitHub Issue is opened on the third
   consecutive degraded run and automatically closed after recovery, avoiding an email for
   every 15-minute attempt.
+
+## Architecture
+
+The code is split by responsibility so marketplace changes do not require editing Google
+Sheets formatting code:
+
+- `clients/` contains external API and Google Sheets I/O adapters.
+- `services.py` orchestrates a run through protocols, so it is tested without network calls.
+- `sheet_schema.py` is the single source of truth for columns, dropdowns and technical sheets.
+- `sheet_orders.py` converts marketplace orders and legacy rows into normalized order groups.
+- `sheet_snapshot.py` deterministically builds day/month/report rows, formulas, merges and links.
+- `sheet_meta.py` owns the audit log, structural backups and persistent integration health.
+- `sheet_layout.py` contains reusable dates, source labels and report formulas.
+- `integrity.py` validates incoming API data and the worksheet before and after writes.
+
+The production workflow installs only runtime dependencies. A separate quality workflow runs
+Ruff and the complete pytest suite on every push and pull request.
 
 ## Google Sheet contract
 
