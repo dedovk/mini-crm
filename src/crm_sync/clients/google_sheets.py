@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -11,6 +10,7 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 from gspread.utils import rowcol_to_a1
 
+from crm_sync.integrity import IntegrityReport
 from crm_sync.models import (
     Order,
     OrderAuditEvent,
@@ -19,7 +19,6 @@ from crm_sync.models import (
     ShipmentUpdateResult,
     SyncHealthState,
 )
-from crm_sync.integrity import IntegrityReport
 from crm_sync.sheet_layout import (
     ALL_HEADERS,
     BUSINESS_HEADERS,
@@ -34,11 +33,25 @@ from crm_sync.sheet_layout import (
     month_period_label,
     parse_order_day,
     parse_sheet_date,
-    parse_sheet_time,
     report_formulas,
     sheet_serial,
     source_display,
     source_key,
+)
+from crm_sync.sheet_schema import (
+    ADVERTISING_REPORT_LABEL_COLUMNS,
+    AUDIT_HEADERS,
+    AUDIT_WORKSHEET_NAME,
+    BACKUP_PREFIX,
+    BACKUP_RETENTION,
+    COLUMNS,
+    HEALTH_ALERT_THRESHOLD,
+    HEALTH_WORKSHEET_NAME,
+    LAST_COLUMN,
+    LAST_COLUMN_LETTER,
+    NOVA_POSHTA_STATUS_OPTIONS,
+    PAYMENT_OPTIONS,
+    REPORT_METRIC_LABELS,
 )
 from crm_sync.utils import (
     customer_display,
@@ -50,92 +63,6 @@ from crm_sync.utils import (
 )
 
 LOGGER = logging.getLogger(__name__)
-
-PAYMENT_OPTIONS = (
-    "пром оплата(оплата картой)",
-    "оплата частями",
-    "наложка",
-    "оплата на счет",
-    "смешанная",
-)
-
-NOVA_POSHTA_STATUS_OPTIONS = (
-    "Створено електронну накладну",
-    "Нова Пошта очікує надходження",
-    "Прийнято у відділенні",
-    "Відправлення у дорозі",
-    "Прибуло у відділення",
-    "Передано кур'єру",
-    "Отримано",
-    "Відмова від отримання",
-    "Повертається відправнику",
-    "Повернуто відправнику",
-    "Невідомо",
-    "Інший перевізник",
-)
-
-
-@dataclass(frozen=True, slots=True)
-class SheetColumns:
-    source: int = 1
-    tracking_number: int = 2
-    shipment_status: int = 3
-    order_date: int = 4
-    order_number: int = 5
-    customer: int = 6
-    phone: int = 7
-    product: int = 8
-    product_code: int = 9
-    sender: int = 10
-    quantity: int = 11
-    unit_price: int = 12
-    line_total: int = 13
-    order_total: int = 14
-    payment_method: int = 15
-    prepayment: int = 16
-    cost: int = 17
-    markup: int = 18
-    advertising: int = 19
-    manager_note: int = 20
-    sync_key: int = 21
-    row_type: int = 22
-    operational_date: int = 23
-    first_seen_completed: int = 24
-    order_status: int = 25
-
-
-COLUMNS = SheetColumns()
-LAST_COLUMN = COLUMNS.order_status
-LAST_COLUMN_LETTER = "Y"
-
-REPORT_METRIC_LABELS = {
-    3: "Замовлень",
-    5: "Сума, грн",
-    7: "Собівартість, грн",
-    9: "Націнка, грн",
-    11: "ProSale, грн",
-    13: "Rozetka, грн",
-    15: "Prom 10 грн",
-}
-ADVERTISING_REPORT_LABEL_COLUMNS = {11, 13, 15}
-AUDIT_WORKSHEET_NAME = "Журнал змін"
-BACKUP_PREFIX = "_CRM backup - "
-BACKUP_RETENTION = 3
-HEALTH_WORKSHEET_NAME = "_Стан синхронізації"
-HEALTH_ALERT_THRESHOLD = 3
-AUDIT_HEADERS = (
-    "Час",
-    "Подія",
-    "Джерело",
-    "№ замовлення",
-    "Sync Key",
-    "ТТН",
-    "Поле",
-    "Старе значення",
-    "Нове значення",
-    "Деталі",
-)
-
 
 class GoogleSheetsGateway:
     def __init__(
@@ -463,192 +390,6 @@ class GoogleSheetsGateway:
             },
         ]
         self.spreadsheet.batch_update({"requests": requests})
-
-    def prepare_daily_layout(self, current_day: date) -> None:
-        values = self.worksheet.get(
-            f"A1:{LAST_COLUMN_LETTER}{self.worksheet.row_count}",
-            value_render_option="UNFORMATTED_VALUE",
-        )
-        if not values:
-            raise RuntimeError("Google Sheet is empty; the expected CRM template was not found")
-
-        day_rows: list[tuple[int, date]] = []
-        header_rows: set[int] = set()
-        active_day: date | None = None
-        value_updates: list[dict[str, Any]] = []
-        row_types: dict[int, str] = {}
-        closed_days: set[date] = set()
-
-        for row_number, row in enumerate(values, start=1):
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
-            marker = str(row[0]).strip().casefold() if row else ""
-            if row_type == ROW_DAY or marker == "дата дня":
-                parsed = parse_sheet_date(row[1] if len(row) > 1 else "")
-                if parsed:
-                    active_day = parsed
-                    day_rows.append((row_number, parsed))
-                    row_types[row_number] = ROW_DAY
-                    stored_day = parse_sheet_date(
-                        row[COLUMNS.operational_date - 1] if len(row) >= COLUMNS.operational_date else ""
-                    )
-                    if row_type != ROW_DAY or stored_day != parsed:
-                        value_updates.extend(self._technical_cell_updates(row_number, ROW_DAY, parsed))
-                    header_row = row_number + 1
-                    header_rows.add(header_row)
-                    row_types[header_row] = ROW_HEADER
-                    existing_header = values[header_row - 1] if header_row <= len(values) else []
-                    if list(existing_header[:LAST_COLUMN]) != list(ALL_HEADERS):
-                        value_updates.append(
-                            {
-                                "range": f"A{header_row}:{LAST_COLUMN_LETTER}{header_row}",
-                                "values": [list(ALL_HEADERS)],
-                            }
-                        )
-                continue
-            if row_number in header_rows or (
-                marker == BUSINESS_HEADERS[0].casefold()
-                and len(row) > 1
-                and str(row[1]).strip().casefold() == BUSINESS_HEADERS[1].casefold()
-            ):
-                row_types[row_number] = ROW_HEADER
-                continue
-            if row_type in {ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST}:
-                report_day = parse_sheet_date(row[COLUMNS.operational_date - 1] if len(row) >= COLUMNS.operational_date else "")
-                if row_type == ROW_REPORT_DAY and report_day:
-                    closed_days.add(report_day)
-                row_types[row_number] = row_type
-                continue
-            if row_type == ROW_MONTH or marker == "місяць":
-                row_types[row_number] = ROW_MONTH
-                continue
-
-            sync_key = str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
-            source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
-            order_id = str(row[COLUMNS.order_number - 1]).strip() if len(row) >= COLUMNS.order_number else ""
-            if active_day and ((sync_key and sync_key.casefold() != "sync key") or (source and order_id)):
-                row_types[row_number] = ROW_ORDER
-                stored_day = parse_sheet_date(
-                    row[COLUMNS.operational_date - 1] if len(row) >= COLUMNS.operational_date else ""
-                )
-                if row_type != ROW_ORDER or stored_day != active_day:
-                    value_updates.extend(self._technical_cell_updates(row_number, ROW_ORDER, active_day))
-                if len(row) >= COLUMNS.customer:
-                    cleaned = clean_customer_display(row[COLUMNS.customer - 1])
-                    if cleaned != str(row[COLUMNS.customer - 1]).strip():
-                        value_updates.append({"range": f"F{row_number}", "values": [[cleaned]]})
-
-        if not day_rows:
-            raise RuntimeError("No 'Дата дня' row was found in the CRM worksheet")
-
-        first_day = day_rows[0][1]
-        first_month = first_day.replace(day=1)
-        first_row = values[0] if values else []
-        first_row_month = parse_sheet_date(
-            first_row[COLUMNS.operational_date - 1] if len(first_row) >= COLUMNS.operational_date else ""
-        )
-        if (
-            len(first_row) < 2
-            or str(first_row[0]).strip() != "Місяць"
-            or str(first_row[1]).strip() != month_period_label(first_day)
-            or (str(first_row[COLUMNS.row_type - 1]).strip() if len(first_row) >= COLUMNS.row_type else "") != ROW_MONTH
-            or first_row_month != first_month
-        ):
-            value_updates.extend(
-                [
-                    {"range": "A1:B1", "values": [["Місяць", month_period_label(first_day)]]},
-                    *self._technical_cell_updates(1, ROW_MONTH, first_month),
-                ]
-            )
-        row_types[1] = ROW_MONTH
-
-        last_used_row = max(
-            (row_number for row_number, row in enumerate(values, start=1) if any(str(value).strip() for value in row)),
-            default=self.header_row,
-        )
-        latest_day = day_rows[-1][1]
-        if latest_day > current_day:
-            raise RuntimeError(f"Latest sheet day {latest_day} is later than current day {current_day}")
-
-        while latest_day < current_day:
-            if latest_day not in closed_days:
-                formulas = report_formulas(
-                    latest_day,
-                    first_data_row=self.header_row + 1,
-                    last_data_row=last_used_row,
-                )
-                labels = {
-                    ROW_REPORT_DAY: f"Підсумок за {latest_day:%d.%m.%Y}",
-                    ROW_REPORT_MTD: f"Разом за {latest_day.day} дн. місяця",
-                    ROW_REPORT_FORECAST: "Прогноз на місяць",
-                }
-                for row_type in (ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST):
-                    last_used_row += 1
-                    report_row: list[Any] = [""] * LAST_COLUMN
-                    report_row[0] = labels[row_type]
-                    for column, label in REPORT_METRIC_LABELS.items():
-                        if row_type == ROW_REPORT_FORECAST and column in ADVERTISING_REPORT_LABEL_COLUMNS:
-                            continue
-                        report_row[column - 1] = label
-                    for column, formula in formulas[row_type].items():
-                        report_row[column - 1] = formula
-                    report_row[COLUMNS.row_type - 1] = row_type
-                    report_row[COLUMNS.operational_date - 1] = sheet_serial(latest_day)
-                    value_updates.append(
-                        {
-                            "range": f"A{last_used_row}:{LAST_COLUMN_LETTER}{last_used_row}",
-                            "values": [report_row],
-                        }
-                    )
-                    row_types[last_used_row] = row_type
-                closed_days.add(latest_day)
-
-            next_day = latest_day + timedelta(days=1)
-            last_used_row += 2  # one visual separator row
-            if next_day.month != latest_day.month:
-                value_updates.append(
-                    {
-                        "range": f"A{last_used_row}:{LAST_COLUMN_LETTER}{last_used_row}",
-                        "values": [["Місяць", month_period_label(next_day)] + [""] * 19 + [ROW_MONTH, sheet_serial(next_day.replace(day=1)), "", ""]],
-                    }
-                )
-                row_types[last_used_row] = ROW_MONTH
-                last_used_row += 2
-
-            day_row = last_used_row
-            header_row = day_row + 1
-            day_values: list[Any] = [""] * LAST_COLUMN
-            day_values[0] = "Дата дня"
-            day_values[1] = sheet_serial(next_day)
-            day_values[COLUMNS.row_type - 1] = ROW_DAY
-            day_values[COLUMNS.operational_date - 1] = sheet_serial(next_day)
-            value_updates.extend(
-                [
-                    {
-                        "range": f"A{day_row}:{LAST_COLUMN_LETTER}{day_row}",
-                        "values": [day_values],
-                    },
-                    {
-                        "range": f"A{header_row}:{LAST_COLUMN_LETTER}{header_row}",
-                        "values": [list(ALL_HEADERS)],
-                    },
-                ]
-            )
-            row_types[day_row] = ROW_DAY
-            row_types[header_row] = ROW_HEADER
-            latest_day = next_day
-            last_used_row = header_row
-
-        if last_used_row > self.worksheet.row_count:
-            self.worksheet.add_rows(last_used_row - self.worksheet.row_count)
-        if value_updates:
-            self.worksheet.batch_update(value_updates, raw=False)
-            self._apply_professional_formatting(last_used_row)
-
-    @staticmethod
-    def _technical_cell_updates(row_number: int, row_type: str, operational_day: date) -> list[dict[str, Any]]:
-        return [
-            {"range": f"V{row_number}:W{row_number}", "values": [[row_type, sheet_serial(operational_day)]]}
-        ]
 
     def _apply_professional_formatting(self, last_used_row: int) -> None:
         values = self.worksheet.get(
@@ -1514,9 +1255,7 @@ class GoogleSheetsGateway:
             padded[COLUMNS.tracking_number - 1] = tracking
             padded[COLUMNS.customer - 1] = clean_customer_display(padded[COLUMNS.customer - 1])
             raw_completion = padded[COLUMNS.order_date - 1]
-            completion_day = parse_sheet_date(raw_completion)
-            if completion_day is None and parse_sheet_time(raw_completion) is not None:
-                completion_day = order_day
+            completion_day = parse_order_day(raw_completion)
             padded[COLUMNS.order_date - 1] = sheet_serial(completion_day) if completion_day else ""
             current_sender = str(padded[COLUMNS.sender - 1]).strip()
             if not current_sender or current_sender == "-":

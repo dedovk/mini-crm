@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 
 from crm_sync.clients.google_sheets import GoogleSheetsGateway
 from crm_sync.clients.nova_poshta import NovaPoshtaClient
-from crm_sync.models import Order, OrderAuditEvent, SyncHealthState
 from crm_sync.integrity import IntegrityError, validate_incoming_orders
+from crm_sync.models import Order, OrderAuditEvent, SyncHealthState
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class SyncResult:
     appended_rows: int = 0
     audit_events: int = 0
     backup_created: str = ""
-    health: SyncHealthState = SyncHealthState()
+    health: SyncHealthState = field(default_factory=SyncHealthState)
 
 
 class SourceSyncError(RuntimeError):
@@ -122,7 +122,7 @@ class SyncService:
                     self.expense_source.source,
                     len(expenses),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - optional integration boundary
                 warning = (
                     f"{self.expense_source.source} finance is unavailable; "
                     f"existing sheet values were preserved: {exc}"
@@ -263,7 +263,7 @@ class SyncService:
         audit_count = 0
         try:
             audit_count = self.sheets.append_audit_events(audit_events)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - audit must not abort order sync
             warning = f"Google Sheets audit log is unavailable: {exc}"
             warnings.append(warning)
             LOGGER.warning(warning)

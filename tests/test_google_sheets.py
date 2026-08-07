@@ -2,14 +2,10 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from crm_sync.clients.google_sheets import (
-    COLUMNS,
-    LAST_COLUMN,
-    LAST_COLUMN_LETTER,
-    GoogleSheetsGateway,
-)
+from crm_sync.clients.google_sheets import GoogleSheetsGateway
 from crm_sync.models import Order, OrderAuditEvent, OrderItem, ShipmentStatus
 from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
+from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN, LAST_COLUMN_LETTER
 
 
 class StubWorksheet:

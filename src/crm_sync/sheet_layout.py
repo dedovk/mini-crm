@@ -115,16 +115,6 @@ def parse_order_day(value: Any) -> date | None:
     return parse_sheet_date(raw[:10])
 
 
-def parse_sheet_time(value: Any) -> str:
-    if isinstance(value, (int, float)):
-        total_minutes = round((float(value) % 1) * 24 * 60) % (24 * 60)
-        hours, minutes = divmod(total_minutes, 60)
-        return f"{hours:02d}:{minutes:02d}"
-    raw = str(value or "").strip()
-    match = re.search(r"(?:^|\s)(\d{2}:\d{2})(?::\d{2})?$", raw)
-    return match.group(1) if match else ""
-
-
 def month_period_label(day: date) -> str:
     last_day = calendar.monthrange(day.year, day.month)[1]
     return f"01.{day:%m.%Y} — {last_day:02d}.{day:%m.%Y}"
