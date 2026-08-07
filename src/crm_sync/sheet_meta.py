@@ -28,7 +28,7 @@ HEADER_FORMAT = {
 def append_sheet_audit_events(spreadsheet: Any, events: list[OrderAuditEvent]) -> int:
     if not events:
         return 0
-    audit = _ensure_audit_worksheet(spreadsheet)
+    audit = ensure_sheet_audit_worksheet(spreadsheet)
     rows = [
         [
             event.occurred_at.strftime("%d.%m.%Y %H:%M:%S"),
@@ -48,7 +48,7 @@ def append_sheet_audit_events(spreadsheet: Any, events: list[OrderAuditEvent]) -
     return len(rows)
 
 
-def _ensure_audit_worksheet(spreadsheet: Any) -> Any:
+def ensure_sheet_audit_worksheet(spreadsheet: Any) -> Any:
     created = False
     try:
         audit = spreadsheet.worksheet(AUDIT_WORKSHEET_NAME)

@@ -35,6 +35,7 @@ from crm_sync.sheet_layout import (
 from crm_sync.sheet_meta import (
     append_sheet_audit_events,
     create_sheet_backup,
+    ensure_sheet_audit_worksheet,
     record_sheet_sync_health,
 )
 from crm_sync.sheet_orders import collect_order_groups
@@ -140,7 +141,7 @@ class GoogleSheetsGateway:
                 raw=True,
             )
             self._configure_validations_and_hidden_key()
-            self._ensure_audit_worksheet()
+            ensure_sheet_audit_worksheet(self.spreadsheet)
 
     def validate_integrity(self) -> IntegrityReport:
         values = self.worksheet.get_all_values(value_render_option="FORMATTED_VALUE")

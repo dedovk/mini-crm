@@ -1,3 +1,5 @@
+import ast
+import inspect
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -6,6 +8,26 @@ from crm_sync.clients.google_sheets import GoogleSheetsGateway
 from crm_sync.models import Order, OrderAuditEvent, OrderItem, ShipmentStatus
 from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN, LAST_COLUMN_LETTER
+
+
+def test_gateway_has_no_calls_to_removed_private_methods() -> None:
+    tree = ast.parse(inspect.getsource(GoogleSheetsGateway))
+    methods = {
+        node.name
+        for node in tree.body[0].body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr.startswith("_")
+    }
+
+    assert called <= methods
 
 
 class StubWorksheet:
