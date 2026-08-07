@@ -30,7 +30,10 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Runner allocation can occasionally take longer than the synchronization
+    # itself. Keep the job alive while it is queued; the Python step below has
+    # its own tighter timeout for real hangs.
+    timeout-minutes: 60
     env:
       PYTHONUNBUFFERED: "1"
       GOOGLE_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}
@@ -78,6 +81,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Synchronize orders
+        timeout-minutes: 15
         run: python -m crm_sync.main
         env:
           PYTHONPATH: src
