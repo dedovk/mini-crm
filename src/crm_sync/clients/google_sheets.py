@@ -7,7 +7,6 @@ from typing import Any
 
 import gspread
 from google.oauth2.service_account import Credentials
-from gspread.exceptions import WorksheetNotFound
 from gspread.utils import rowcol_to_a1
 
 from crm_sync.integrity import IntegrityReport
@@ -31,18 +30,20 @@ from crm_sync.sheet_layout import (
     ROW_REPORT_MTD,
     parse_sheet_date,
     sheet_serial,
-    source_display,
     source_key,
+)
+from crm_sync.sheet_meta import (
+    append_audit_events as append_sheet_audit_events,
+)
+from crm_sync.sheet_meta import (
+    create_backup as create_sheet_backup,
+)
+from crm_sync.sheet_meta import (
+    record_sync_health as record_sheet_sync_health,
 )
 from crm_sync.sheet_orders import collect_order_groups
 from crm_sync.sheet_schema import (
-    AUDIT_HEADERS,
-    AUDIT_WORKSHEET_NAME,
-    BACKUP_PREFIX,
-    BACKUP_RETENTION,
     COLUMNS,
-    HEALTH_ALERT_THRESHOLD,
-    HEALTH_WORKSHEET_NAME,
     LAST_COLUMN,
     LAST_COLUMN_LETTER,
     NOVA_POSHTA_STATUS_OPTIONS,
@@ -81,89 +82,11 @@ class GoogleSheetsGateway:
         self.header_row = header_row
         self.sender_options = sender_options
 
-    def _ensure_audit_worksheet(self):
-        created = False
-        try:
-            audit = self.spreadsheet.worksheet(AUDIT_WORKSHEET_NAME)
-        except WorksheetNotFound:
-            created = True
-            audit = self.spreadsheet.add_worksheet(
-                title=AUDIT_WORKSHEET_NAME,
-                rows=1000,
-                cols=len(AUDIT_HEADERS),
-            )
-        header_changed = audit.row_values(1)[: len(AUDIT_HEADERS)] != list(AUDIT_HEADERS)
-        if header_changed:
-            audit.update(values=[list(AUDIT_HEADERS)], range_name="A1:J1", raw=True)
-        if created or header_changed:
-            audit.freeze(rows=1)
-            audit.format(
-                "A1:J1",
-                {
-                    "backgroundColor": {"red": 0.12, "green": 0.31, "blue": 0.47},
-                    "textFormat": {
-                        "bold": True,
-                        "foregroundColor": {"red": 1, "green": 1, "blue": 1},
-                    },
-                    "horizontalAlignment": "CENTER",
-                    "verticalAlignment": "MIDDLE",
-                },
-            )
-        return audit
-
     def append_audit_events(self, events: list[OrderAuditEvent]) -> int:
-        if not events:
-            return 0
-        audit = self._ensure_audit_worksheet()
-        rows = [
-            [
-                event.occurred_at.strftime("%d.%m.%Y %H:%M:%S"),
-                event.event_type,
-                source_display(event.source),
-                event.order_id,
-                event.sync_key,
-                event.tracking_number,
-                event.field,
-                event.old_value,
-                event.new_value,
-                event.details,
-            ]
-            for event in events
-        ]
-        audit.append_rows(rows, value_input_option="USER_ENTERED")
-        return len(rows)
+        return append_sheet_audit_events(self.spreadsheet, events)
 
     def create_backup(self, *, created_at: datetime) -> str:
-        source_title = str(getattr(self.worksheet, "title", "CRM"))
-        title = f"{BACKUP_PREFIX}{created_at:%Y%m%d-%H%M%S} - {source_title}"[:100]
-        backup = self.spreadsheet.duplicate_sheet(
-            source_sheet_id=self.worksheet.id,
-            new_sheet_name=title,
-        )
-        self.spreadsheet.batch_update(
-            {
-                "requests": [
-                    {
-                        "updateSheetProperties": {
-                            "properties": {"sheetId": backup.id, "hidden": True},
-                            "fields": "hidden",
-                        }
-                    }
-                ]
-            }
-        )
-        backups = sorted(
-            (
-                worksheet
-                for worksheet in self.spreadsheet.worksheets()
-                if str(getattr(worksheet, "title", "")).startswith(BACKUP_PREFIX)
-            ),
-            key=lambda worksheet: str(getattr(worksheet, "title", "")),
-            reverse=True,
-        )
-        for obsolete in backups[BACKUP_RETENTION:]:
-            self.spreadsheet.del_worksheet(obsolete)
-        return title
+        return create_sheet_backup(self.spreadsheet, self.worksheet, created_at=created_at)
 
     def record_sync_health(
         self,
@@ -171,79 +94,10 @@ class GoogleSheetsGateway:
         *,
         occurred_at: datetime,
     ) -> SyncHealthState:
-        created = False
-        try:
-            health = self.spreadsheet.worksheet(HEALTH_WORKSHEET_NAME)
-        except WorksheetNotFound:
-            created = True
-            health = self.spreadsheet.add_worksheet(
-                title=HEALTH_WORKSHEET_NAME,
-                rows=10,
-                cols=2,
-            )
-        current = {
-            str(row[0]).strip(): str(row[1]).strip()
-            for row in health.get_all_values()
-            if len(row) >= 2 and str(row[0]).strip()
-        }
-        try:
-            previous_failures = max(0, int(current.get("consecutive_failures", "0")))
-        except ValueError:
-            previous_failures = 0
-        previous_alert_open = current.get("alert_open", "false").casefold() == "true"
-        components = tuple(dict.fromkeys(component for component in failed_components if component))
-
-        if components:
-            consecutive = previous_failures + 1
-            alert_due = consecutive == HEALTH_ALERT_THRESHOLD and not previous_alert_open
-            recovered = False
-            alert_open = previous_alert_open or consecutive >= HEALTH_ALERT_THRESHOLD
-            outcome = "failed"
-        else:
-            consecutive = 0
-            alert_due = False
-            recovered = previous_alert_open or previous_failures >= HEALTH_ALERT_THRESHOLD
-            alert_open = False
-            outcome = "recovered" if recovered else "ok"
-
-        rows = [
-            ["Параметр", "Значення"],
-            ["consecutive_failures", str(consecutive)],
-            ["alert_open", str(alert_open).lower()],
-            ["last_outcome", outcome],
-            ["failed_components", ", ".join(components)],
-            ["updated_at", occurred_at.isoformat()],
-        ]
-        health.update(values=rows, range_name="A1:B6", raw=True)
-        if created:
-            health.freeze(rows=1)
-            health.format(
-                "A1:B1",
-                {
-                    "backgroundColor": {"red": 0.12, "green": 0.31, "blue": 0.47},
-                    "textFormat": {
-                        "bold": True,
-                        "foregroundColor": {"red": 1, "green": 1, "blue": 1},
-                    },
-                },
-            )
-            self.spreadsheet.batch_update(
-                {
-                    "requests": [
-                        {
-                            "updateSheetProperties": {
-                                "properties": {"sheetId": health.id, "hidden": True},
-                                "fields": "hidden",
-                            }
-                        }
-                    ]
-                }
-            )
-        return SyncHealthState(
-            consecutive_failures=consecutive,
-            alert_due=alert_due,
-            recovered=recovered,
-            failed_components=components,
+        return record_sheet_sync_health(
+            self.spreadsheet,
+            failed_components,
+            occurred_at=occurred_at,
         )
 
     def ensure_schema(self, *, apply_changes: bool = True) -> None:
