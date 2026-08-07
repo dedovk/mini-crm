@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -29,16 +29,13 @@ from crm_sync.sheet_layout import (
     ROW_REPORT_DAY,
     ROW_REPORT_FORECAST,
     ROW_REPORT_MTD,
-    month_period_label,
     parse_sheet_date,
-    report_formulas,
     sheet_serial,
     source_display,
     source_key,
 )
 from crm_sync.sheet_orders import collect_order_groups
 from crm_sync.sheet_schema import (
-    ADVERTISING_REPORT_LABEL_COLUMNS,
     AUDIT_HEADERS,
     AUDIT_WORKSHEET_NAME,
     BACKUP_PREFIX,
@@ -50,8 +47,8 @@ from crm_sync.sheet_schema import (
     LAST_COLUMN_LETTER,
     NOVA_POSHTA_STATUS_OPTIONS,
     PAYMENT_OPTIONS,
-    REPORT_METRIC_LABELS,
 )
+from crm_sync.sheet_snapshot import build_sheet_snapshot
 from crm_sync.utils import (
     customer_display,
     decimal_for_sheet,
@@ -1252,141 +1249,14 @@ class GoogleSheetsGateway:
             sender_default=sender_default,
             observation_day=observation_day,
         )
-        groups = order_groups.rows
-        group_days = order_groups.days
-        group_sort_values = order_groups.sort_values
-
-        earliest_day = min([operational_day, *group_days.values()])
-        groups_by_day: dict[date, list[tuple[str, list[list[Any]]]]] = {}
-        for key, group in groups.items():
-            groups_by_day.setdefault(group_days[key], []).append((key, group))
-        for day_groups in groups_by_day.values():
-            day_groups.sort(key=lambda pair: (group_sort_values[pair[0]], pair[0]))
-
-        rows: list[list[Any]] = []
-        merge_requests: list[dict[str, Any]] = []
-        report_rows: list[tuple[int, str, date]] = []
-        month_rows: list[int] = []
-        day_rows: list[int] = []
-        current_day = earliest_day
-        current_month: tuple[int, int] | None = None
-        while current_day <= operational_day:
-            month = (current_day.year, current_day.month)
-            if month != current_month:
-                month_row = [""] * LAST_COLUMN
-                month_row[0] = "Місяць"
-                month_row[1] = month_period_label(current_day)
-                month_row[COLUMNS.row_type - 1] = ROW_MONTH
-                month_row[COLUMNS.operational_date - 1] = sheet_serial(current_day.replace(day=1))
-                rows.append(month_row)
-                month_rows.append(len(rows))
-                current_month = month
-
-            day_row = [""] * LAST_COLUMN
-            day_row[0] = "Дата дня"
-            day_row[1] = sheet_serial(current_day)
-            day_row[COLUMNS.row_type - 1] = ROW_DAY
-            day_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)
-            rows.extend([day_row, list(ALL_HEADERS)])
-            day_rows.append(len(rows) - 1)
-
-            for _, group in groups_by_day.get(current_day, []):
-                order_start = len(rows) + 1
-                first_order_number = group[0][COLUMNS.order_number - 1]
-                first_order_total = group[0][COLUMNS.order_total - 1]
-                for item_index, row in enumerate(group):
-                    final_row = len(rows) + 1
-                    row[COLUMNS.markup - 1] = f"=(L{final_row}-Q{final_row})*K{final_row}"
-                    if item_index:
-                        row[COLUMNS.order_number - 1] = ""
-                        row[COLUMNS.order_total - 1] = ""
-                    else:
-                        row[COLUMNS.order_number - 1] = first_order_number
-                        row[COLUMNS.order_total - 1] = first_order_total
-                    rows.append(row)
-                order_end = len(rows)
-                if order_end > order_start:
-                    for column in (COLUMNS.order_number, COLUMNS.order_total):
-                        merge_requests.append(
-                            {
-                                "mergeCells": {
-                                    "range": {
-                                        "sheetId": self.worksheet.id,
-                                        "startRowIndex": order_start - 1,
-                                        "endRowIndex": order_end,
-                                        "startColumnIndex": column - 1,
-                                        "endColumnIndex": column,
-                                    },
-                                    "mergeType": "MERGE_ALL",
-                                }
-                            }
-                        )
-
-            if current_day < operational_day:
-                labels = {
-                    ROW_REPORT_DAY: f"Підсумок за {current_day:%d.%m.%Y}",
-                    ROW_REPORT_MTD: f"Разом за {current_day.day} дн. місяця",
-                    ROW_REPORT_FORECAST: "Прогноз на місяць",
-                }
-                for row_type in (ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST):
-                    report_row = [""] * LAST_COLUMN
-                    report_row[0] = labels[row_type]
-                    for column, label in REPORT_METRIC_LABELS.items():
-                        if row_type == ROW_REPORT_FORECAST and column in ADVERTISING_REPORT_LABEL_COLUMNS:
-                            continue
-                        report_row[column - 1] = label
-                    report_row[COLUMNS.row_type - 1] = row_type
-                    report_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)
-                    rows.append(report_row)
-                    report_row_number = len(rows)
-                    report_rows.append((report_row_number, row_type, current_day))
-                    merge_requests.append(
-                        {
-                            "mergeCells": {
-                                "range": {
-                                    "sheetId": self.worksheet.id,
-                                    "startRowIndex": report_row_number - 1,
-                                    "endRowIndex": report_row_number,
-                                    "startColumnIndex": 0,
-                                    "endColumnIndex": 2,
-                                },
-                                "mergeType": "MERGE_ALL",
-                            }
-                        }
-                    )
-
-            current_day += timedelta(days=1)
-
-        last_used_row = len(rows)
-        for row_number, row_type, report_day in report_rows:
-            formulas = report_formulas(report_day, first_data_row=1, last_data_row=last_used_row)
-            for column, formula in formulas[row_type].items():
-                rows[row_number - 1][column - 1] = formula
-
-        spreadsheet_id = getattr(self.spreadsheet, "id", "")
-
-        def selection_formula(start_row: int, end_row: int, label: str) -> str:
-            url = (
-                f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
-                f"#gid={self.worksheet.id}&range=A{start_row}:T{end_row}"
-            )
-            return f'=HYPERLINK("{url}";"{label}")'
-
-        for index, month_row_number in enumerate(month_rows):
-            month_end = month_rows[index + 1] - 1 if index + 1 < len(month_rows) else last_used_row
-            rows[month_row_number - 1][2] = selection_formula(
-                month_row_number,
-                month_end,
-                "Виділити місяць",
-            )
-        section_starts = sorted([*month_rows, *day_rows])
-        for day_row_number in day_rows:
-            next_start = next((start for start in section_starts if start > day_row_number), last_used_row + 1)
-            rows[day_row_number - 1][2] = selection_formula(
-                day_row_number,
-                next_start - 1,
-                "Виділити день",
-            )
+        snapshot = build_sheet_snapshot(
+            order_groups,
+            operational_day=operational_day,
+            sheet_id=self.worksheet.id,
+            spreadsheet_id=getattr(self.spreadsheet, "id", ""),
+        )
+        rows = snapshot.rows
+        last_used_row = snapshot.last_used_row
 
         if last_used_row > self.worksheet.row_count:
             self.worksheet.add_rows(last_used_row - self.worksheet.row_count)
@@ -1416,7 +1286,7 @@ class GoogleSheetsGateway:
             self.worksheet.batch_clear(
                 [f"A{last_used_row + 1}:{LAST_COLUMN_LETTER}{self.worksheet.row_count}"]
             )
-        if merge_requests:
-            self.spreadsheet.batch_update({"requests": merge_requests})
+        if snapshot.merge_requests:
+            self.spreadsheet.batch_update({"requests": snapshot.merge_requests})
         self._apply_professional_formatting(last_used_row)
         return order_groups.added_rows
