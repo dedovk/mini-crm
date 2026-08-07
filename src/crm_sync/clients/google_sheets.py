@@ -29,15 +29,14 @@ from crm_sync.sheet_layout import (
     ROW_REPORT_DAY,
     ROW_REPORT_FORECAST,
     ROW_REPORT_MTD,
-    clean_customer_display,
     month_period_label,
-    parse_order_day,
     parse_sheet_date,
     report_formulas,
     sheet_serial,
     source_display,
     source_key,
 )
+from crm_sync.sheet_orders import collect_order_groups
 from crm_sync.sheet_schema import (
     ADVERTISING_REPORT_LABEL_COLUMNS,
     AUDIT_HEADERS,
@@ -58,8 +57,6 @@ from crm_sync.utils import (
     decimal_for_sheet,
     decimal_value,
     extract_ttn,
-    normalize_tracking_number,
-    parse_prepayment,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -1248,103 +1245,16 @@ class GoogleSheetsGateway:
             return 0
         observation_day = (observed_at.date() if observed_at else operational_day)
         existing_values = self.worksheet.get_all_values(value_render_option="FORMULA")
-        groups: dict[str, list[list[Any]]] = {}
-        group_days: dict[str, date] = {}
-        group_sort_values: dict[str, str] = {}
-
-        for row in existing_values:
-            padded: list[Any] = list(row[:LAST_COLUMN]) + [""] * max(
-                0, LAST_COLUMN - len(row)
-            )
-            row_type = str(padded[COLUMNS.row_type - 1]).strip()
-            if row_type != ROW_ORDER:
-                continue
-            key = str(padded[COLUMNS.sync_key - 1]).strip().casefold()
-            order_day = parse_sheet_date(padded[COLUMNS.operational_date - 1]) or parse_order_day(
-                padded[COLUMNS.order_date - 1]
-            )
-            tracking = normalize_tracking_number(padded[COLUMNS.tracking_number - 1])
-            if not key or not order_day or not tracking:
-                continue
-            padded[COLUMNS.source - 1] = source_display(padded[COLUMNS.source - 1])
-            padded[COLUMNS.tracking_number - 1] = tracking
-            padded[COLUMNS.customer - 1] = clean_customer_display(padded[COLUMNS.customer - 1])
-            raw_completion = padded[COLUMNS.order_date - 1]
-            completion_day = parse_order_day(raw_completion)
-            padded[COLUMNS.order_date - 1] = sheet_serial(completion_day) if completion_day else ""
-            current_sender = str(padded[COLUMNS.sender - 1]).strip()
-            if not current_sender or current_sender == "-":
-                padded[COLUMNS.sender - 1] = sender_default
-            if not str(padded[COLUMNS.payment_method - 1]).strip() and str(
-                source_key(padded[COLUMNS.source - 1])
-            ) == "rozetka":
-                padded[COLUMNS.payment_method - 1] = "наложка"
-            padded[COLUMNS.row_type - 1] = ROW_ORDER
-            padded[COLUMNS.operational_date - 1] = sheet_serial(order_day)
-            if not parse_sheet_date(padded[COLUMNS.first_seen_completed - 1]):
-                existing_completion = parse_sheet_date(padded[COLUMNS.order_date - 1]) or order_day
-                padded[COLUMNS.first_seen_completed - 1] = sheet_serial(existing_completion)
-            if not str(padded[COLUMNS.order_status - 1]).strip():
-                padded[COLUMNS.order_status - 1] = "Виконано"
-            groups.setdefault(key, []).append(padded)
-            group_days[key] = order_day
-            group_sort_values[key] = str(padded[COLUMNS.order_date - 1])
-
-        existing_keys = set(groups)
-        added_rows = 0
-        for order in orders:
-            key = order.sync_key.casefold()
-            if key in existing_keys:
-                continue
-            shipment_status = shipment_statuses.get(extract_ttn(order.tracking_number)) or shipment_statuses.get(
-                order.tracking_number
-            )
-            prepayment = parse_prepayment(order.note)
-            sender = order.sender.strip() or sender_default
-            order_rows: list[list[Any]] = []
-            for item in order.items:
-                row: list[Any] = [""] * LAST_COLUMN
-                row[COLUMNS.source - 1] = source_display(order.source)
-                row[COLUMNS.tracking_number - 1] = order.tracking_number
-                row[COLUMNS.shipment_status - 1] = (
-                    shipment_status.status
-                    if shipment_status
-                    else ("Невідомо" if extract_ttn(order.tracking_number) else "Інший перевізник")
-                )
-                row[COLUMNS.order_date - 1] = sheet_serial(
-                    order.completed_at.date() if order.completion_is_exact else observation_day
-                )
-                row[COLUMNS.order_number - 1] = order.external_id
-                row[COLUMNS.customer - 1] = customer_display(order.city, order.customer_name)
-                row[COLUMNS.phone - 1] = order.phone
-                row[COLUMNS.product - 1] = item.name
-                row[COLUMNS.product_code - 1] = item.product_code
-                row[COLUMNS.sender - 1] = sender
-                row[COLUMNS.quantity - 1] = decimal_for_sheet(item.quantity)
-                row[COLUMNS.unit_price - 1] = decimal_for_sheet(item.unit_price)
-                row[COLUMNS.line_total - 1] = decimal_for_sheet(item.line_total)
-                row[COLUMNS.order_total - 1] = decimal_for_sheet(order.total)
-                row[COLUMNS.payment_method - 1] = order.payment_method or (
-                    "наложка" if order.source.casefold() == "rozetka" else ""
-                )
-                row[COLUMNS.prepayment - 1] = decimal_for_sheet(prepayment) if prepayment > Decimal(0) else ""
-                if not order_rows and order.advertising_cost > 0:
-                    row[COLUMNS.advertising - 1] = decimal_for_sheet(order.advertising_cost)
-                row[COLUMNS.sync_key - 1] = order.sync_key
-                row[COLUMNS.row_type - 1] = ROW_ORDER
-                effective_day = order.completed_at.date() if order.completion_is_exact else observation_day
-                row[COLUMNS.operational_date - 1] = sheet_serial(effective_day)
-                row[COLUMNS.first_seen_completed - 1] = sheet_serial(observation_day)
-                row[COLUMNS.order_status - 1] = "Виконано"
-                order_rows.append(row)
-            if order_rows:
-                groups[key] = order_rows
-                group_days[key] = (
-                    order.completed_at.date() if order.completion_is_exact else observation_day
-                )
-                group_sort_values[key] = order.completed_at.strftime("%Y-%m-%d %H:%M")
-                existing_keys.add(key)
-                added_rows += len(order_rows)
+        order_groups = collect_order_groups(
+            existing_values,
+            orders,
+            shipment_statuses,
+            sender_default=sender_default,
+            observation_day=observation_day,
+        )
+        groups = order_groups.rows
+        group_days = order_groups.days
+        group_sort_values = order_groups.sort_values
 
         earliest_day = min([operational_day, *group_days.values()])
         groups_by_day: dict[date, list[tuple[str, list[list[Any]]]]] = {}
@@ -1509,4 +1419,4 @@ class GoogleSheetsGateway:
         if merge_requests:
             self.spreadsheet.batch_update({"requests": merge_requests})
         self._apply_professional_formatting(last_used_row)
-        return added_rows
+        return order_groups.added_rows
