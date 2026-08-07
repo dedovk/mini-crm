@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import os
 from dataclasses import dataclass
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ConfigurationError(RuntimeError):
@@ -15,14 +17,17 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
     raw = _env(name)
     if not raw:
         return default
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError as exc:
         raise ConfigurationError(f"{name} must be an integer") from exc
+    if value < minimum:
+        raise ConfigurationError(f"{name} must be at least {minimum}")
+    return value
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -66,8 +71,10 @@ class Settings:
         if not credentials_b64:
             raise ConfigurationError("GOOGLE_SERVICE_ACCOUNT_JSON_B64 is required")
         try:
-            credentials = json.loads(base64.b64decode(credentials_b64).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            credentials = json.loads(
+                base64.b64decode(credentials_b64, validate=True).decode("utf-8")
+            )
+        except (binascii.Error, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ConfigurationError("GOOGLE_SERVICE_ACCOUNT_JSON_B64 is not valid Base64 JSON") from exc
         if credentials.get("type") != "service_account" or not credentials.get("private_key"):
             raise ConfigurationError("Google credentials are not a Service Account JSON key")
@@ -87,11 +94,17 @@ class Settings:
         )
         sender_options = tuple(dict.fromkeys((*sender_options, sender_default)))
 
+        timezone = _env("APP_TIMEZONE", "Europe/Kyiv")
+        try:
+            ZoneInfo(timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ConfigurationError(f"APP_TIMEZONE is unknown: {timezone}") from exc
+
         return cls(
             google_service_account_info=credentials,
             google_spreadsheet_id=spreadsheet_id,
             google_worksheet_name=worksheet_name,
-            google_header_row=_env_int("GOOGLE_HEADER_ROW", 4),
+            google_header_row=_env_int("GOOGLE_HEADER_ROW", 4, minimum=1),
             prom_token=_env("PROM_API_TOKEN"),
             prom_base_url=_env("PROM_API_BASE_URL", "https://my.prom.ua/api/v1"),
             rozetka_token=_env("ROZETKA_API_TOKEN"),
@@ -103,11 +116,13 @@ class Settings:
             opencart_orders_endpoint=_env("OPENCART_ORDERS_ENDPOINT", "/index.php?route=api/crm_orders"),
             nova_poshta_key=_env("NP_API_TOKEN") or _env("NOVA_POSHTA_API_KEY"),
             nova_poshta_url=_env("NOVA_POSHTA_API_URL", "https://api.novaposhta.ua/v2.0/json/"),
-            timezone=_env("APP_TIMEZONE", "Europe/Kyiv"),
-            sync_lookback_days=_env_int("SYNC_LOOKBACK_DAYS", 30),
+            timezone=timezone,
+            sync_lookback_days=_env_int("SYNC_LOOKBACK_DAYS", 30, minimum=1),
             new_order_max_age_days=_env_int("NEW_ORDER_MAX_AGE_DAYS", 7),
-            rozetka_finance_lookback_days=_env_int("ROZETKA_FINANCE_LOOKBACK_DAYS", 45),
-            http_timeout=_env_int("HTTP_TIMEOUT_SECONDS", 30),
+            rozetka_finance_lookback_days=_env_int(
+                "ROZETKA_FINANCE_LOOKBACK_DAYS", 45, minimum=1
+            ),
+            http_timeout=_env_int("HTTP_TIMEOUT_SECONDS", 30, minimum=1),
             http_max_retries=_env_int("HTTP_MAX_RETRIES", 4),
             log_level=_env("LOG_LEVEL", "INFO").upper(),
             sender_default=sender_default,

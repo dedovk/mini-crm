@@ -125,7 +125,8 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
     end = max(start, last_data_row)
     day_expr = f"DATE({day.year};{day.month};{day.day})"
     month_start = f"DATE({day.year};{day.month};1)"
-    range_for = lambda column: f"${column}${start}:${column}${end}"
+    def range_for(column: str) -> str:
+        return f"${column}${start}:${column}${end}"
     order_filter = f'{range_for("V")};"{ROW_ORDER}"'
     day_filter = f"{range_for('W')};{day_expr}"
     mtd_filter = f'{range_for("W")};">="&{month_start};{range_for("W")};"<="&{day_expr}'

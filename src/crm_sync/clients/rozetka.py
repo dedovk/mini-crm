@@ -318,7 +318,9 @@ class RozetkaClient:
             title = str(first_value(raw, "operation_type_title", "operationTypeTitle")).casefold()
             if operation_type == delivery_type:
                 category = "logistics_charge"
-            elif operation_type in refund_type_ids and (credit != 0 or debit != 0) or credit != 0 and ("повернен" in title or "відшкодуван" in title):
+            elif (
+                operation_type in refund_type_ids and (credit != 0 or debit != 0)
+            ) or (credit != 0 and ("повернен" in title or "відшкодуван" in title)):
                 category = "logistics_refund"
             else:
                 continue
