@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -10,7 +11,12 @@ from zoneinfo import ZoneInfo
 from crm_sync.clients.google_sheets import GoogleSheetsGateway
 from crm_sync.clients.nova_poshta import NovaPoshtaClient
 from crm_sync.integrity import IntegrityError, validate_incoming_orders
-from crm_sync.models import Order, OrderAuditEvent, SyncHealthState
+from crm_sync.models import (
+    Order,
+    OrderAuditEvent,
+    ShipmentStatusChange,
+    SyncHealthState,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +63,19 @@ class OrderExpenseSource(Protocol):
     def fetch_expenses(self, since: datetime) -> dict[str, Decimal]: ...
 
 
+@dataclass(frozen=True, slots=True)
+class SourceBatch:
+    orders: tuple[Order, ...]
+    counts: dict[str, int]
+    failed_sources: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NewOrderSelection:
+    orders: tuple[Order, ...]
+    stale_count: int
+
+
 class SyncService:
     def __init__(
         self,
@@ -71,6 +90,7 @@ class SyncService:
         expense_lookback_days: int = 45,
         sender_default: str,
         dry_run: bool,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.sheets = sheets
         self.nova_poshta = nova_poshta
@@ -82,30 +102,18 @@ class SyncService:
         self.expense_lookback_days = expense_lookback_days
         self.sender_default = sender_default
         self.dry_run = dry_run
+        self.clock = clock or (lambda: datetime.now(ZoneInfo(self.timezone)))
 
     def run(self) -> SyncResult:
-        now = datetime.now(ZoneInfo(self.timezone))
+        now = self.clock()
         self.sheets.ensure_schema(apply_changes=False)
         sheet_integrity = self.sheets.validate_integrity()
         if not sheet_integrity.ok:
             raise IntegrityError(sheet_integrity)
         existing_keys = self.sheets.read_existing_sync_keys()
-        since = now - timedelta(days=self.lookback_days)
-
-        fetched: list[Order] = []
-        failed_sources: list[str] = []
-        source_counts: dict[str, int] = {}
+        source_batch = self._fetch_orders(now - timedelta(days=self.lookback_days))
+        fetched = list(source_batch.orders)
         warnings: list[str] = []
-        for source in self.sources:
-            try:
-                source_orders = source.fetch_orders(since)
-            except Exception:
-                LOGGER.exception("%s source failed; other sources will continue", source.source)
-                failed_sources.append(source.source)
-                continue
-            source_counts[source.source] = len(source_orders)
-            LOGGER.info("%s returned %s eligible order(s)", source.source, len(source_orders))
-            fetched.extend(source_orders)
 
         incoming_integrity = validate_incoming_orders(fetched)
         if not incoming_integrity.ok:
@@ -113,27 +121,9 @@ class SyncService:
         warnings.extend(sheet_integrity.warnings)
         warnings.extend(incoming_integrity.warnings)
 
-        expenses: dict[str, Decimal] | None = None
-        if self.expense_source:
-            try:
-                expense_since = now - timedelta(days=self.expense_lookback_days)
-                expenses = self.expense_source.fetch_expenses(expense_since)
-                LOGGER.info(
-                    "%s finance returned expenses for %s order(s)",
-                    self.expense_source.source,
-                    len(expenses),
-                )
-            except Exception as exc:  # noqa: BLE001 - optional integration boundary
-                warning = (
-                    f"{self.expense_source.source} finance is unavailable; "
-                    f"existing sheet values were preserved: {exc}"
-                )
-                LOGGER.warning(
-                    "%s finance sync is unavailable; existing sheet values are preserved: %s",
-                    self.expense_source.source,
-                    exc,
-                )
-                warnings.append(warning)
+        expenses, expense_warning = self._fetch_expenses(now)
+        if expense_warning:
+            warnings.append(expense_warning)
 
         refreshed = 0
         completion_events: tuple[OrderAuditEvent, ...] = ()
@@ -147,27 +137,14 @@ class SyncService:
             refreshed += self.sheets.refresh_order_details(fetched)
         pending_ttns = self.sheets.pending_tracking_numbers()
 
-        unique_orders: list[Order] = []
-        run_keys: set[str] = set()
-        stale_orders = 0
         new_order_cutoff = (now - timedelta(days=self.new_order_max_age_days)).date()
-        for order in fetched:
-            key = order.sync_key.casefold()
-            if key in existing_keys or key in run_keys:
-                continue
-            effective_day = (
-                order.completed_at.date() if order.completion_is_exact else order.created_at.date()
-            )
-            if effective_day < new_order_cutoff:
-                stale_orders += 1
-                continue
-            run_keys.add(key)
-            unique_orders.append(order)
+        selection = self._select_new_orders(fetched, existing_keys, cutoff=new_order_cutoff)
+        unique_orders = list(selection.orders)
 
-        if stale_orders:
+        if selection.stale_count:
             LOGGER.warning(
                 "Skipped %s previously unseen order(s) older than %s; deep runs only refresh existing orders",
-                stale_orders,
+                selection.stale_count,
                 new_order_cutoff.isoformat(),
             )
 
@@ -183,12 +160,12 @@ class SyncService:
             )
             result = SyncResult(
                 dry_run=True,
-                source_orders=source_counts,
-                failed_sources=tuple(dict.fromkeys(failed_sources)),
+                source_orders=source_batch.counts,
+                failed_sources=source_batch.failed_sources,
                 warnings=tuple(warnings),
                 fetched_orders=len(fetched),
                 new_orders=len(unique_orders),
-                stale_orders=stale_orders,
+                stale_orders=selection.stale_count,
                 pending_shipments=len(pending_ttns),
                 shipment_statuses=len(statuses),
                 refreshed_cells=refreshed,
@@ -217,52 +194,11 @@ class SyncService:
                 expenses,
                 source=self.expense_source.source if self.expense_source else "rozetka",
             )
-        audit_events = [
-            OrderAuditEvent(
-                occurred_at=now,
-                event_type="Додано замовлення",
-                source=order.source,
-                order_id=order.external_id,
-                sync_key=order.sync_key,
-                tracking_number=order.tracking_number,
-                new_value="Додано до CRM",
-                details=f"Позицій: {len(order.items)}; сума: {order.total}",
-            )
-            for order in unique_orders
-        ]
-        audit_events.extend(
-            OrderAuditEvent(
-                occurred_at=now,
-                event_type="Змінено статус замовлення",
-                source=order.source,
-                order_id=order.external_id,
-                sync_key=order.sync_key,
-                tracking_number=order.tracking_number,
-                field="Статус замовлення",
-                old_value="Невідомо",
-                new_value="Виконано",
-                details=(
-                    "Точна дата статусу з API"
-                    if order.completion_is_exact
-                    else "Перше спостереження статусу синхронізацією"
-                ),
-            )
-            for order in unique_orders
-        )
-        audit_events.extend(completion_events)
-        audit_events.extend(
-            OrderAuditEvent(
-                occurred_at=now,
-                event_type="Змінено статус доставки",
-                source=change.source,
-                order_id=change.order_id,
-                sync_key=change.sync_key,
-                tracking_number=change.tracking_number,
-                field="Статус доставки",
-                old_value=change.old_status,
-                new_value=change.new_status,
-            )
-            for change in shipment_update.changes
+        audit_events = self._build_audit_events(
+            now=now,
+            new_orders=unique_orders,
+            completion_events=completion_events,
+            shipment_changes=shipment_update.changes,
         )
         audit_count = 0
         try:
@@ -281,7 +217,7 @@ class SyncService:
             for warning in post_integrity.warnings
             if warning not in warnings
         )
-        failed_components = list(dict.fromkeys(failed_sources))
+        failed_components = list(source_batch.failed_sources)
         failed_components.extend(
             "rozetka-finance"
             for warning in warnings
@@ -298,12 +234,12 @@ class SyncService:
         )
         result = SyncResult(
             dry_run=False,
-            source_orders=source_counts,
-            failed_sources=tuple(dict.fromkeys(failed_sources)),
+            source_orders=source_batch.counts,
+            failed_sources=source_batch.failed_sources,
             warnings=tuple(warnings),
             fetched_orders=len(fetched),
             new_orders=len(unique_orders),
-            stale_orders=stale_orders,
+            stale_orders=selection.stale_count,
             pending_shipments=len(pending_ttns),
             shipment_statuses=len(statuses),
             refreshed_cells=refreshed,
@@ -318,6 +254,124 @@ class SyncService:
         # Production failures are aggregated in the persisted health state and
         # escalated through a single GitHub issue after the configured threshold.
         return result
+
+    def _fetch_orders(self, since: datetime) -> SourceBatch:
+        fetched: list[Order] = []
+        failed_sources: list[str] = []
+        counts: dict[str, int] = {}
+        for source in self.sources:
+            try:
+                orders = source.fetch_orders(since)
+            except Exception:
+                LOGGER.exception("%s source failed; other sources will continue", source.source)
+                failed_sources.append(source.source)
+                continue
+            counts[source.source] = len(orders)
+            LOGGER.info("%s returned %s eligible order(s)", source.source, len(orders))
+            fetched.extend(orders)
+        return SourceBatch(
+            orders=tuple(fetched),
+            counts=counts,
+            failed_sources=tuple(dict.fromkeys(failed_sources)),
+        )
+
+    def _fetch_expenses(self, now: datetime) -> tuple[dict[str, Decimal] | None, str]:
+        if self.expense_source is None:
+            return None, ""
+        try:
+            since = now - timedelta(days=self.expense_lookback_days)
+            expenses = self.expense_source.fetch_expenses(since)
+        except Exception as exc:  # noqa: BLE001 - optional integration boundary
+            warning = (
+                f"{self.expense_source.source} finance is unavailable; "
+                f"existing sheet values were preserved: {exc}"
+            )
+            LOGGER.warning(warning)
+            return None, warning
+        LOGGER.info(
+            "%s finance returned expenses for %s order(s)",
+            self.expense_source.source,
+            len(expenses),
+        )
+        return expenses, ""
+
+    @staticmethod
+    def _select_new_orders(
+        fetched: list[Order], existing_keys: set[str], *, cutoff: date
+    ) -> NewOrderSelection:
+        selected: list[Order] = []
+        run_keys: set[str] = set()
+        stale_count = 0
+        for order in fetched:
+            key = order.sync_key.casefold()
+            if key in existing_keys or key in run_keys:
+                continue
+            effective_day = (
+                order.completed_at.date() if order.completion_is_exact else order.created_at.date()
+            )
+            if effective_day < cutoff:
+                stale_count += 1
+                continue
+            run_keys.add(key)
+            selected.append(order)
+        return NewOrderSelection(tuple(selected), stale_count)
+
+    @staticmethod
+    def _build_audit_events(
+        *,
+        now: datetime,
+        new_orders: list[Order],
+        completion_events: tuple[OrderAuditEvent, ...],
+        shipment_changes: tuple[ShipmentStatusChange, ...],
+    ) -> list[OrderAuditEvent]:
+        events = [
+            OrderAuditEvent(
+                occurred_at=now,
+                event_type="Додано замовлення",
+                source=order.source,
+                order_id=order.external_id,
+                sync_key=order.sync_key,
+                tracking_number=order.tracking_number,
+                new_value="Додано до CRM",
+                details=f"Позицій: {len(order.items)}; сума: {order.total}",
+            )
+            for order in new_orders
+        ]
+        events.extend(
+            OrderAuditEvent(
+                occurred_at=now,
+                event_type="Змінено статус замовлення",
+                source=order.source,
+                order_id=order.external_id,
+                sync_key=order.sync_key,
+                tracking_number=order.tracking_number,
+                field="Статус замовлення",
+                old_value="Невідомо",
+                new_value="Виконано",
+                details=(
+                    "Точна дата статусу з API"
+                    if order.completion_is_exact
+                    else "Перше спостереження статусу синхронізацією"
+                ),
+            )
+            for order in new_orders
+        )
+        events.extend(completion_events)
+        events.extend(
+            OrderAuditEvent(
+                occurred_at=now,
+                event_type="Змінено статус доставки",
+                source=change.source,
+                order_id=change.order_id,
+                sync_key=change.sync_key,
+                tracking_number=change.tracking_number,
+                field="Статус доставки",
+                old_value=change.old_status,
+                new_value=change.new_status,
+            )
+            for change in shipment_changes
+        )
+        return events
 
     @staticmethod
     def _raise_for_source_failures(result: SyncResult) -> None:
