@@ -15,16 +15,35 @@ MEEST_TRACKING_RE = re.compile(
     r"\b(?:MEEST-)?(?:\d{3}|[A-ZА-ЯІЇЄ]{3})-\d{6,9}\b",
     re.IGNORECASE,
 )
-PREPAYMENT_MARKER_RE = re.compile(
-    r"\b(?:перед|пред(?:оплат\w*|о)?)\b",
-    re.IGNORECASE,
+_PREPAYMENT_WORD = (
+    r"(?:"
+    r"перед(?:о?пл(?:ат)?\w*)?"
+    r"|пред(?:(?:о?пл(?:ат)?\w*)|о)?"
+    r"|аванс\w*|завдат\w*|задат\w*"
+    r"|частков\w*\s+оплат\w*|частичн\w*\s+оплат\w*"
+    r"|pered(?:o?pl(?:at)?\w*)?|pred(?:(?:o?pl(?:at)?\w*)|o)?|avans\w*"
+    r")"
 )
+_PREPAYMENT_AMOUNT = r"(?P<amount>\d[\d\s\u00a0]*(?:[.,]\d{1,2})?)"
+_PREPAYMENT_WITH_ABBREVIATION = rf"(?:{_PREPAYMENT_WORD}|п\s*[/.-]\s*о)"
+
+PREPAYMENT_MARKER_RE = re.compile(rf"\b{_PREPAYMENT_WORD}\b", re.IGNORECASE)
 NEGATIVE_PREPAYMENT_RE = re.compile(
-    r"\b(?:без|немає|нет)\s+(?:перед|пред(?:оплат\w*|о)?)\b",
+    rf"(?:"
+    rf"\b(?:без|немає|нет|не\s+треба|не\s+потрібн\w*|не\s+нужн\w*)\s+{_PREPAYMENT_WORD}\b"
+    rf"|\b{_PREPAYMENT_WORD}\s+(?:не\s+треба|не\s+потрібн\w*|не\s+нужн\w*|не\s+буде)\b"
+    rf")",
     re.IGNORECASE,
 )
-PREPAYMENT_RE = re.compile(
-    r"\b(?:перед|пред(?:оплат\w*|о)?)\b\s*[-:=]?\s*(\d[\d\s]*(?:[.,]\d{1,2})?)",
+PREPAYMENT_AFTER_RE = re.compile(
+    rf"\b{_PREPAYMENT_WITH_ABBREVIATION}\b\s*[-–—:=,.]?\s*"
+    rf"(?:(?:сума|сумма|у\s+розмірі|в\s+размере)\s*[-:=]?\s*)?"
+    rf"{_PREPAYMENT_AMOUNT}",
+    re.IGNORECASE,
+)
+PREPAYMENT_BEFORE_RE = re.compile(
+    rf"{_PREPAYMENT_AMOUNT}\s*(?:грн\.?|₴|uah)?\s*[-–—:=,.]?\s*"
+    rf"\b{_PREPAYMENT_WITH_ABBREVIATION}\b",
     re.IGNORECASE,
 )
 
@@ -161,8 +180,9 @@ def find_tracking_number(*values: Any) -> str:
 def parse_prepayment(note: str) -> Decimal:
     if NEGATIVE_PREPAYMENT_RE.search(note or ""):
         return Decimal(0)
-    match = PREPAYMENT_RE.search(note or "")
-    return decimal_value(match.group(1)) if match else Decimal(0)
+    text = note or ""
+    match = PREPAYMENT_AFTER_RE.search(text) or PREPAYMENT_BEFORE_RE.search(text)
+    return decimal_value(match.group("amount")) if match else Decimal(0)
 
 
 def has_prepayment_request(note: str) -> bool:
@@ -172,7 +192,7 @@ def has_prepayment_request(note: str) -> bool:
 
 def classify_payment(raw_method: str, note: str) -> str:
     raw = f"{raw_method} {note}".casefold()
-    has_prepayment = has_prepayment_request(note)
+    has_prepayment = parse_prepayment(note) > 0 or has_prepayment_request(note)
     if has_prepayment and any(word in raw for word in ("налож", "cod", "післяплат", "послеплат")):
         return "смешанная"
     if "част" in raw or "credit" in raw:
