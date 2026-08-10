@@ -192,6 +192,33 @@ def test_deep_run_does_not_backfill_previously_unseen_stale_order() -> None:
     assert result.new_orders == 0
 
 
+def test_recently_shipped_old_order_is_selected_by_shipping_date() -> None:
+    order = Order(
+        source="rozetka",
+        external_id="shipped",
+        created_at=datetime(2020, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 10, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="RMP-123456789",
+        total=Decimal(100),
+        payment_method="",
+        note="",
+        sender="",
+        completion_is_exact=False,
+        source_status="Відправлено",
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    selection = SyncService._select_new_orders(
+        [order], set(), cutoff=date(2026, 8, 9)
+    )
+
+    assert selection.orders == (order,)
+    assert selection.stale_count == 0
+
+
 def test_production_run_performs_preflight_postflight_and_health_update() -> None:
     sheets = ProductionSheetsStub()
     service = SyncService(

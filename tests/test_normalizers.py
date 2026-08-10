@@ -231,14 +231,14 @@ def test_opencart_completion_accepts_boolean_text_and_localized_statuses() -> No
 
 class RozetkaSearchStub:
     def __init__(self) -> None:
-        self.params: dict = {}
+        self.params: list[dict] = []
 
     def request_json(self, method: str, url: str, **kwargs):
-        self.params = kwargs["params"]
+        self.params.append(kwargs["params"])
         return {"success": True, "content": {"orders": [], "_meta": {"pageCount": 1}}}
 
 
-def test_rozetka_search_requests_only_successfully_completed_orders() -> None:
+def test_rozetka_search_requests_shipped_and_completed_orders() -> None:
     http = RozetkaSearchStub()
     client = RozetkaClient(
         http,  # type: ignore[arg-type]
@@ -250,4 +250,58 @@ def test_rozetka_search_requests_only_successfully_completed_orders() -> None:
     )
 
     assert client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv"))) == []
-    assert http.params["types"] == 3
+    assert {params["types"] for params in http.params} == {2, 3}
+
+
+class RozetkaShippedStub:
+    def request_json(self, method: str, url: str, **kwargs):
+        orders = []
+        if kwargs["params"]["types"] == 2:
+            orders = [
+                {
+                    "id": "902000001",
+                    "created": "2026-08-01 10:00:00",
+                    "changed": "2026-08-10 09:15:00",
+                    "status": 26,
+                    "status_group": 1,
+                    "status_data": {"id": 26, "name": "Відправлено", "status_group": 1},
+                    "current_seller_comment": "предо 400",
+                    "cost": "1200",
+                    "user": {"name": "Тестовий Покупець", "phone": "0501234567"},
+                    "delivery": {
+                        "ttn": "RMP-123456789",
+                        "locality": {"name": "Київ"},
+                    },
+                    "purchases": [
+                        {
+                            "item_id": "608037110",
+                            "item_name": "Товар",
+                            "quantity": 1,
+                            "price": 1200,
+                            "cost": 1200,
+                        }
+                    ],
+                }
+            ]
+        return {
+            "success": True,
+            "content": {"orders": orders, "_meta": {"pageCount": 1}},
+        }
+
+
+def test_rozetka_shipped_order_uses_status_change_date_and_comment() -> None:
+    client = RozetkaClient(
+        RozetkaShippedStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert len(orders) == 1
+    assert orders[0].source_status == "Відправлено"
+    assert orders[0].completed_at.strftime("%d.%m.%Y %H:%M") == "10.08.2026 09:15"
+    assert orders[0].note == "предо 400"

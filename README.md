@@ -1,6 +1,6 @@
 # Marketplace CRM Sync MVP
 
-Python 3 service that synchronizes completed orders with created TTNs from Prom.ua,
+Python 3 service that synchronizes operational orders with created TTNs from Prom.ua,
 Rozetka Seller and ocStore 2.1 into an existing Google Sheet. It runs every 15 minutes
 through GitHub Actions.
 
@@ -9,7 +9,8 @@ through GitHub Actions.
 - One product is written per row. A multi-product order occupies consecutive rows.
 - The marketplace order number (column E) and order total (column N) are merged across
   the product rows of one order.
-- Only marketplace orders in the completed/successful status are imported.
+- Prom.ua and ocStore orders are imported after completion. Rozetka orders are imported as
+  soon as they reach `Відправлено`, then updated in place when they become `Виконано`.
 - Column D contains the completion date when the source exposes an exact status-change
   timestamp; unknown completion dates are left blank instead of being invented.
 - Phones are written as text in `+380...` format.
@@ -21,8 +22,10 @@ through GitHub Actions.
 - Monetary fields are numeric and do not contain `грн`.
 - Duplicate key is `source:order_id`; it is stored in hidden column U (`Sync Key`).
 - Nova Poshta statuses are refreshed for every non-final TTN already present in the sheet.
+  In-transit states are normalized to one sortable value, `Прямує до покупця`.
 - `Отримано` and `Відмова від отримання` are treated as final.
-- A note such as `перед - 500` is parsed into numeric prepayment `500`.
+- Prom notes and Rozetka seller comments recognize `предоплата`, `предо`, `пред` and
+  `перед`; a nearby amount such as `пред - 500` is written as numeric prepayment `500`.
 - Existing manual cost, advertising and manager-note cells are never overwritten.
 - Markup in column R is created as `(unit price - cost) * quantity`.
 - Prom.ua advertising expense is written to column S from `prosale_commission.value`
@@ -34,7 +37,8 @@ through GitHub Actions.
   overwriting manual costs.
 - Dropdown validation is configured for Nova Poshta status, sender and payment method.
 - Individual source failures are logged and do not stop the other marketplaces.
-- Orders are grouped by the date when they became completed. At local midnight the previous
+- Orders are grouped by the operational status date (shipping date for Rozetka, completion
+  date for the other sources). At local midnight the previous
   day receives formula-driven daily, month-to-date and month forecast rows. Summary rows
   are consecutive and place all KPI labels and values together in columns A:P.
 - Daily sections advance even when no new orders arrive; the rollover closes prior days and
@@ -172,9 +176,9 @@ at which the script sees `delivered`; later runs keep that recorded time stable.
 
 ## Rozetka
 
-The client uses `GET /orders/search` with `types=3` and
-`expand=user,delivery,purchases,status_data`, handles pagination and retains only successfully
-completed orders with a TTN. The API `changed` value supplies the completion time, while an
+The client uses `GET /orders/search` for active (`types=2`) and completed (`types=3`) groups
+with `expand=user,delivery,purchases,status_data`, handles pagination and retains shipped or
+successfully completed orders with a TTN. The API `changed` value supplies the current status time, while an
 available `order_status_history` timestamp takes precedence. It accepts an existing token and
 supports the current `POST /sites` login flow when login/password secrets are configured.
 The current official base URL is `https://api-seller.rozetka.com.ua`; the former

@@ -33,6 +33,7 @@ def test_nova_poshta_filters_invalid_tracking_values() -> None:
 
     assert http.documents == [{"DocumentNumber": "20451234567890"}]
     assert statuses["20451234567890"].status_code == "5"
+    assert statuses["20451234567890"].status == "Прямує до покупця"
 
 
 def test_nova_poshta_uses_fallback_for_blank_status() -> None:

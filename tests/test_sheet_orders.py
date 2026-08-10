@@ -62,3 +62,32 @@ def test_collect_order_groups_writes_advertising_once_for_multi_item_order() -> 
     assert all(
         row[COLUMNS.operational_date - 1] == sheet_serial(date(2026, 8, 8)) for row in rows
     )
+
+
+def test_shipped_order_is_grouped_on_shipping_day_without_completion_marker() -> None:
+    order = Order(
+        source="rozetka",
+        external_id="902000001",
+        created_at=datetime(2026, 8, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 10, tzinfo=UTC),
+        customer_name="Покупець Тестовий",
+        city="Київ",
+        phone="+380501234567",
+        tracking_number="RMP-123456789",
+        total=Decimal(1200),
+        payment_method="наложка",
+        note="пред 400",
+        sender="",
+        source_status="Відправлено",
+        items=[OrderItem("Товар", "608037110", Decimal(1), Decimal(1200), Decimal(1200))],
+    )
+
+    groups = collect_order_groups(
+        [], [order], {}, sender_default="наш", observation_day=date(2026, 8, 10)
+    )
+
+    row = groups.rows["rozetka:902000001"][0]
+    assert row[COLUMNS.prepayment - 1] == 400
+    assert row[COLUMNS.operational_date - 1] == sheet_serial(date(2026, 8, 10))
+    assert row[COLUMNS.first_seen_completed - 1] == ""
+    assert row[COLUMNS.order_status - 1] == "Відправлено"

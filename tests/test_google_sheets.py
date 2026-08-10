@@ -227,6 +227,78 @@ def test_completion_observation_audits_previous_known_status() -> None:
     assert events[0].new_value == "Виконано"
 
 
+def test_shipped_order_does_not_set_completion_marker_then_transitions_in_place() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "rozetka:1"
+    row[COLUMNS.order_date - 1] = sheet_serial(date(2026, 8, 10))
+    row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 10))
+    row[COLUMNS.order_status - 1] = "Відправлено"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    order = Order(
+        source="rozetka",
+        external_id="1",
+        created_at=datetime(2026, 8, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 11, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="RMP-123456789",
+        total=Decimal(100),
+        payment_method="наложка",
+        note="",
+        sender="наш",
+        source_status="Виконано",
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    events = gateway.record_completion_observations(
+        [order], observed_at=datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
+    )
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert updates["D5"] == sheet_serial(date(2026, 8, 11))
+    assert updates["X5"] == sheet_serial(date(2026, 8, 11))
+    assert updates["Y5"] == "Виконано"
+    assert "W5" not in updates
+    assert len(events) == 1
+
+
+def test_refresh_order_details_backfills_numeric_prepayment_without_overwriting_manual_value() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "rozetka:1"
+    row[COLUMNS.prepayment - 1] = ""
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    order = Order(
+        source="rozetka",
+        external_id="1",
+        created_at=datetime(2026, 8, 10, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 10, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="RMP-123456789",
+        total=Decimal(100),
+        payment_method="смешанная",
+        note="предо 400",
+        sender="наш",
+        source_status="Відправлено",
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    gateway.refresh_order_details([order])
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert updates["P5"] == 400
+
+
 def test_completion_backfill_migrates_historical_rows_and_repeated_headers() -> None:
     rows = [[""] * LAST_COLUMN for _ in range(6)]
     rows[3][0:2] = ["Джерело", "ТТН"]

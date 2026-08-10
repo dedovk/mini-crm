@@ -9,6 +9,7 @@ from crm_sync.utils import (
     extract_ttn,
     find_tracking_number,
     normalize_phone,
+    normalize_shipment_status,
     parse_prepayment,
 )
 
@@ -30,7 +31,10 @@ def test_normalize_phone(raw: str, expected: str) -> None:
     [
         ("перед - 500", Decimal(500)),
         ("Предоплата: 1 250,50", Decimal("1250.50")),
+        ("пред 300", Decimal(300)),
+        ("предо - 450", Decimal(450)),
         ("без передоплати", Decimal(0)),
+        ("без предоплати 500", Decimal(0)),
     ],
 )
 def test_parse_prepayment(note: str, expected: Decimal) -> None:
@@ -39,6 +43,27 @@ def test_parse_prepayment(note: str, expected: Decimal) -> None:
 
 def test_mixed_payment_from_prepayment_and_cod() -> None:
     assert classify_payment("Наложенный платеж", "перед - 300") == "смешанная"
+
+
+def test_prepayment_marker_without_amount_still_marks_mixed_payment() -> None:
+    assert classify_payment("Наложенный платеж", "клієнту запитали пред") == "смешанная"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "Відправлення у дорозі",
+        "Прибуло у відділення",
+        "Передано кур'єру",
+        "Прийнято у відділенні",
+    ],
+)
+def test_normalize_shipment_status_groups_transit_states(status: str) -> None:
+    assert normalize_shipment_status(status) == "Прямує до покупця"
+
+
+def test_normalize_shipment_status_preserves_final_state() -> None:
+    assert normalize_shipment_status("Отримано") == "Отримано"
 
 
 def test_extract_ttn() -> None:
