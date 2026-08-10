@@ -31,6 +31,7 @@ def test_normalize_phone(raw: str, expected: str) -> None:
     [
         ("перед - 500", Decimal(500)),
         ("Предоплата: 1 250,50", Decimal("1250.50")),
+        ("Предоплата 200 грн.", Decimal(200)),
         ("пред 300", Decimal(300)),
         ("предо - 450", Decimal(450)),
         ("без передоплати", Decimal(0)),

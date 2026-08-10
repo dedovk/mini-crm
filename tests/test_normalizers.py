@@ -182,6 +182,38 @@ def test_prom_normalizer_uses_sku_as_product_code() -> None:
     assert order.completed_at.strftime("%H:%M") == "08:45"
 
 
+def test_prom_normalizer_reads_uppercase_prepayment_from_client_notes() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    order = client._normalize(
+        {
+            "id": 420579152,
+            "status": "delivered",
+            "date_created": "2026-08-10 11:42:00",
+            "client_notes": "Предоплата 200 грн.",
+            "delivery_provider_data": {"declaration_number": "20451508042941"},
+            "full_price": 1200,
+            "payment_option": {"name": "Наложенный платеж"},
+            "products": [
+                {
+                    "sku": "MSN-W3",
+                    "name": "Масажна подушка",
+                    "quantity": 1,
+                    "price": 1200,
+                }
+            ],
+        }
+    )
+
+    assert order.note == "Предоплата 200 грн."
+    assert order.payment_method == "смешанная"
+
+
 def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
     client = OpenCartClient(
         HttpClient(max_retries=0),
