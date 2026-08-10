@@ -356,7 +356,9 @@ class SyncService:
             if key in existing_keys or key in run_keys:
                 continue
             effective_day = (
-                order.completed_at.date() if order.completion_is_exact else order.created_at.date()
+                order.completed_at.date()
+                if order.completion_is_exact or not order.is_completed
+                else order.created_at.date()
             )
             if effective_day < cutoff:
                 stale_count += 1
@@ -396,7 +398,7 @@ class SyncService:
                 tracking_number=order.tracking_number,
                 field="Статус замовлення",
                 old_value="Невідомо",
-                new_value="Виконано",
+                new_value=order.source_status,
                 details=(
                     "Точна дата статусу з API"
                     if order.completion_is_exact

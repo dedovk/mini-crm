@@ -30,12 +30,17 @@ class Order:
     note: str
     sender: str
     completion_is_exact: bool = True
+    source_status: str = "Виконано"
     items: list[OrderItem] = field(default_factory=list)
     advertising_cost: Decimal = Decimal(0)
 
     @property
     def sync_key(self) -> str:
         return f"{self.source.casefold()}:{self.external_id.strip()}"
+
+    @property
+    def is_completed(self) -> bool:
+        return self.source_status.strip().casefold() == "виконано"
 
 
 @dataclass(slots=True)

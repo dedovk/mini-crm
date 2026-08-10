@@ -20,6 +20,7 @@ from crm_sync.utils import (
     customer_display,
     decimal_for_sheet,
     extract_ttn,
+    normalize_shipment_status,
     normalize_tracking_number,
     parse_prepayment,
 )
@@ -89,6 +90,9 @@ def _normalize_existing_row(
 
     row[COLUMNS.source - 1] = source_display(row[COLUMNS.source - 1])
     row[COLUMNS.tracking_number - 1] = tracking
+    row[COLUMNS.shipment_status - 1] = normalize_shipment_status(
+        row[COLUMNS.shipment_status - 1]
+    )
     row[COLUMNS.customer - 1] = clean_customer_display(row[COLUMNS.customer - 1])
     completion_day = parse_order_day(row[COLUMNS.order_date - 1])
     row[COLUMNS.order_date - 1] = sheet_serial(completion_day) if completion_day else ""
@@ -100,10 +104,13 @@ def _normalize_existing_row(
         row[COLUMNS.payment_method - 1] = "наложка"
     row[COLUMNS.row_type - 1] = ROW_ORDER
     row[COLUMNS.operational_date - 1] = sheet_serial(order_day)
-    if not parse_sheet_date(row[COLUMNS.first_seen_completed - 1]):
-        row[COLUMNS.first_seen_completed - 1] = sheet_serial(completion_day or order_day)
     if not str(row[COLUMNS.order_status - 1]).strip():
         row[COLUMNS.order_status - 1] = "Виконано"
+    if (
+        str(row[COLUMNS.order_status - 1]).strip().casefold() == "виконано"
+        and not parse_sheet_date(row[COLUMNS.first_seen_completed - 1])
+    ):
+        row[COLUMNS.first_seen_completed - 1] = sheet_serial(completion_day or order_day)
     return key, order_day, str(row[COLUMNS.order_date - 1]), row
 
 
@@ -152,7 +159,9 @@ def _new_order_rows(
         row[COLUMNS.sync_key - 1] = order.sync_key
         row[COLUMNS.row_type - 1] = ROW_ORDER
         row[COLUMNS.operational_date - 1] = sheet_serial(effective_day)
-        row[COLUMNS.first_seen_completed - 1] = sheet_serial(observation_day)
-        row[COLUMNS.order_status - 1] = "Виконано"
+        row[COLUMNS.first_seen_completed - 1] = (
+            sheet_serial(observation_day) if order.is_completed else ""
+        )
+        row[COLUMNS.order_status - 1] = order.source_status
         rows.append(row)
     return rows

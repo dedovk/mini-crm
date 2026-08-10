@@ -52,6 +52,7 @@ from crm_sync.utils import (
     decimal_for_sheet,
     decimal_value,
     extract_ttn,
+    parse_prepayment,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -814,7 +815,7 @@ class GoogleSheetsGateway:
                         if len(row) >= COLUMNS.operational_date
                         else ""
                     )
-                    if current_day != order.completed_at.date():
+                    if current_day is None:
                         updates.append(
                             {
                                 "range": f"W{row_number}",
@@ -859,6 +860,19 @@ class GoogleSheetsGateway:
                             {
                                 "range": f"S{row_number}",
                                 "values": [[decimal_for_sheet(order.advertising_cost)]],
+                            }
+                        )
+                    prepayment = parse_prepayment(order.note)
+                    current_prepayment = (
+                        row[COLUMNS.prepayment - 1]
+                        if len(row) >= COLUMNS.prepayment
+                        else ""
+                    )
+                    if prepayment > 0 and decimal_value(current_prepayment) == 0:
+                        updates.append(
+                            {
+                                "range": f"P{row_number}",
+                                "values": [[decimal_for_sheet(prepayment)]],
                             }
                         )
                 if order and order.payment_method:
@@ -910,14 +924,17 @@ class GoogleSheetsGateway:
             stored_day = parse_sheet_date(
                 row[COLUMNS.operational_date - 1] if len(row) >= COLUMNS.operational_date else ""
             )
-            completion_day = order.completed_at.date() if order.completion_is_exact else stored_day
             first_seen = parse_sheet_date(
                 row[COLUMNS.first_seen_completed - 1]
                 if len(row) >= COLUMNS.first_seen_completed
                 else ""
             )
-            if first_seen is None:
-                first_seen = completion_day or observed_at.date()
+            if order.is_completed and first_seen is None:
+                first_seen = (
+                    order.completed_at.date()
+                    if order.completion_is_exact
+                    else stored_day or observed_at.date()
+                )
                 updates.append(
                     {
                         "range": rowcol_to_a1(row_number, COLUMNS.first_seen_completed),
@@ -928,12 +945,16 @@ class GoogleSheetsGateway:
             current_completion = parse_sheet_date(
                 row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else ""
             )
-            desired_completion = order.completed_at.date() if order.completion_is_exact else first_seen
-            if current_completion != desired_completion:
+            desired_status_day = (
+                order.completed_at.date()
+                if order.completion_is_exact
+                else stored_day or observed_at.date()
+            )
+            if current_completion != desired_status_day:
                 updates.append(
                     {
                         "range": rowcol_to_a1(row_number, COLUMNS.order_date),
-                        "values": [[sheet_serial(desired_completion)]],
+                        "values": [[sheet_serial(desired_status_day)]],
                     }
                 )
 
@@ -942,11 +963,12 @@ class GoogleSheetsGateway:
                 if len(row) >= COLUMNS.order_status
                 else ""
             )
-            if old_status != "Виконано":
+            desired_status = order.source_status
+            if old_status != desired_status:
                 updates.append(
                     {
                         "range": rowcol_to_a1(row_number, COLUMNS.order_status),
-                        "values": [["Виконано"]],
+                        "values": [[desired_status]],
                     }
                 )
                 if old_status and key not in event_keys:
@@ -960,7 +982,7 @@ class GoogleSheetsGateway:
                             tracking_number=order.tracking_number,
                             field="Статус замовлення",
                             old_value=old_status,
-                            new_value="Виконано",
+                            new_value=desired_status,
                             details="Зафіксовано під час синхронізації джерела",
                         )
                     )

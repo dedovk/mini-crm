@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.models import Order, OrderExpenseTransaction, OrderItem
@@ -105,45 +106,78 @@ class RozetkaClient:
         if not token:
             LOGGER.info("Rozetka sync skipped: token or login credentials are not configured")
             return []
-        page_number = 1
-        orders: list[Order] = []
-        while True:
-            payload = self._request_authorized(
-                "/orders/search",
-                params={
-                    "page": page_number,
-                    "changed_from": since.strftime("%Y-%m-%d"),
-                    "types": 3,
-                    "sort": "-changed",
-                    "expand": "user,delivery,purchases,status_data",
-                },
+        observed_at = datetime.now(ZoneInfo(self.timezone))
+        orders_by_key: dict[str, Order] = {}
+        # Rozetka groups active and completed orders separately. Query both groups
+        # and then keep only the exact business statuses supported by the CRM.
+        for order_type in (2, 3):
+            page_number = 1
+            while True:
+                payload = self._request_authorized(
+                    "/orders/search",
+                    params={
+                        "page": page_number,
+                        "changed_from": since.strftime("%Y-%m-%d"),
+                        "types": order_type,
+                        "sort": "-changed",
+                        "expand": "user,delivery,purchases,status_data",
+                    },
+                )
+                content = payload.get("content") or {}
+                raw_orders = content.get("orders") or [] if isinstance(content, dict) else []
+                for raw in raw_orders:
+                    if not isinstance(raw, dict):
+                        continue
+                    source_status = self._eligible_source_status(raw)
+                    if not source_status:
+                        continue
+                    try:
+                        order = self._normalize(
+                            raw,
+                            source_status=source_status,
+                            observed_at=observed_at,
+                        )
+                    except (ValueError, TypeError) as exc:
+                        LOGGER.warning("Rozetka order skipped because normalization failed: %s", exc)
+                        continue
+                    if order.tracking_number and order.items:
+                        orders_by_key[order.sync_key.casefold()] = order
+                meta = content.get("_meta") or {} if isinstance(content, dict) else {}
+                page_count = int(meta.get("pageCount") or page_number)
+                if page_number >= page_count:
+                    break
+                page_number += 1
+        return list(orders_by_key.values())
+
+    @staticmethod
+    def _status_name(raw: dict[str, Any]) -> str:
+        status_data = raw.get("status_data") if isinstance(raw.get("status_data"), dict) else {}
+        return display_text(
+            first_value(
+                status_data,
+                "name",
+                "title",
+                "status_name",
+                "status_title",
+                default=first_value(raw, "status_name", "status_title"),
             )
-            content = payload.get("content") or {}
-            raw_orders = content.get("orders") or [] if isinstance(content, dict) else []
-            for raw in raw_orders:
-                if not isinstance(raw, dict):
-                    continue
-                status_data = raw.get("status_data") if isinstance(raw.get("status_data"), dict) else {}
-                status_group = first_value(raw, "status_group", default=status_data.get("status_group"))
-                try:
-                    is_completed = int(status_group) == 2
-                except (TypeError, ValueError):
-                    is_completed = False
-                if not is_completed:
-                    continue
-                try:
-                    order = self._normalize(raw)
-                except (ValueError, TypeError) as exc:
-                    LOGGER.warning("Rozetka order skipped because normalization failed: %s", exc)
-                    continue
-                if order.tracking_number and order.items:
-                    orders.append(order)
-            meta = content.get("_meta") or {} if isinstance(content, dict) else {}
-            page_count = int(meta.get("pageCount") or page_number)
-            if page_number >= page_count:
-                break
-            page_number += 1
-        return orders
+        )
+
+    @classmethod
+    def _eligible_source_status(cls, raw: dict[str, Any]) -> str:
+        status_data = raw.get("status_data") if isinstance(raw.get("status_data"), dict) else {}
+        status_group = first_value(raw, "status_group", default=status_data.get("status_group"))
+        try:
+            if int(status_group) == 2:
+                return "Виконано"
+        except (TypeError, ValueError):
+            pass
+        status_name = cls._status_name(raw).casefold()
+        if status_name.startswith(("виконано", "выполнен")):
+            return "Виконано"
+        if status_name.startswith(("відправлено", "отправлен")):
+            return "Відправлено"
+        return ""
 
     @staticmethod
     def _operation_entries(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
@@ -374,7 +408,13 @@ class RozetkaClient:
             for order_id in order_ids
         }
 
-    def _normalize(self, raw: dict[str, Any]) -> Order:
+    def _normalize(
+        self,
+        raw: dict[str, Any],
+        *,
+        source_status: str = "Виконано",
+        observed_at: datetime | None = None,
+    ) -> Order:
         purchases = raw.get("purchases") or []
         items: list[OrderItem] = []
         for purchase in purchases:
@@ -449,7 +489,7 @@ class RozetkaClient:
         completed_at = parse_optional_datetime(
             completion_value,
             self.timezone,
-        ) or created_at
+        ) or observed_at or datetime.now(ZoneInfo(self.timezone))
         return Order(
             source=self.source,
             external_id=str(first_value(raw, "id", "order_id")),
@@ -470,5 +510,6 @@ class RozetkaClient:
             note=note,
             sender=str(nested_value(raw, (("delivery", "sender", "name"),), default="")),
             completion_is_exact=bool(completion_value),
+            source_status=source_status,
             items=items,
         )

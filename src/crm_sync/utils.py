@@ -15,8 +15,16 @@ MEEST_TRACKING_RE = re.compile(
     r"\b(?:MEEST-)?(?:\d{3}|[A-ZА-ЯІЇЄ]{3})-\d{6,9}\b",
     re.IGNORECASE,
 )
+PREPAYMENT_MARKER_RE = re.compile(
+    r"\b(?:перед|пред(?:оплат\w*|о)?)\b",
+    re.IGNORECASE,
+)
+NEGATIVE_PREPAYMENT_RE = re.compile(
+    r"\b(?:без|немає|нет)\s+(?:перед|пред(?:оплат\w*|о)?)\b",
+    re.IGNORECASE,
+)
 PREPAYMENT_RE = re.compile(
-    r"(?:\bперед\b|\bпредоплат\w*\b)\s*[-:=]?\s*(\d[\d\s]*(?:[.,]\d{1,2})?)",
+    r"\b(?:перед|пред(?:оплат\w*|о)?)\b\s*[-:=]?\s*(\d[\d\s]*(?:[.,]\d{1,2})?)",
     re.IGNORECASE,
 )
 
@@ -151,14 +159,21 @@ def find_tracking_number(*values: Any) -> str:
 
 
 def parse_prepayment(note: str) -> Decimal:
+    if NEGATIVE_PREPAYMENT_RE.search(note or ""):
+        return Decimal(0)
     match = PREPAYMENT_RE.search(note or "")
     return decimal_value(match.group(1)) if match else Decimal(0)
 
 
+def has_prepayment_request(note: str) -> bool:
+    text = note or ""
+    return not NEGATIVE_PREPAYMENT_RE.search(text) and bool(PREPAYMENT_MARKER_RE.search(text))
+
+
 def classify_payment(raw_method: str, note: str) -> str:
     raw = f"{raw_method} {note}".casefold()
-    prepayment = parse_prepayment(note)
-    if prepayment > 0 and any(word in raw for word in ("налож", "cod", "післяплат", "послеплат")):
+    has_prepayment = has_prepayment_request(note)
+    if has_prepayment and any(word in raw for word in ("налож", "cod", "післяплат", "послеплат")):
         return "смешанная"
     if "част" in raw or "credit" in raw:
         return "оплата частями"
@@ -168,9 +183,38 @@ def classify_payment(raw_method: str, note: str) -> str:
         return "наложка"
     if any(word in raw for word in ("prom", "карт", "card", "liqpay", "wayforpay", "online")):
         return "пром оплата(оплата картой)"
-    if prepayment > 0:
+    if has_prepayment:
         return "смешанная"
     return raw_method.strip()
+
+
+def normalize_shipment_status(value: Any, status_code: Any = "") -> str:
+    """Collapse in-transit carrier states into one stable CRM value."""
+    status = str(value or "").strip() or "Невідомо"
+    normalized = status.casefold().replace("’", "'")
+    transit_terms = (
+        "у дороз",
+        "в дороз",
+        "прямує",
+        "прибуло у відділення",
+        "прибуло до відділення",
+        "прибыло в отделение",
+        "передано кур'єру",
+        "передано курьеру",
+        "кур'єр отримав",
+        "курьер получил",
+        "очікує у поштоматі",
+        "ожидает в почтомате",
+        "прийнято у відділенні",
+        "принято в отделении",
+        "відправлено у місто",
+        "відправлено до міста",
+        "отправлено в город",
+        "знаходиться в місті одержувача",
+    )
+    if any(term in normalized for term in transit_terms):
+        return "Прямує до покупця"
+    return status
 
 
 def parse_datetime(value: Any, timezone: str) -> datetime:

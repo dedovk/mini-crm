@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.models import ShipmentStatus
-from crm_sync.utils import extract_ttn, first_value
+from crm_sync.utils import extract_ttn, first_value, normalize_shipment_status
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,10 +50,13 @@ class NovaPoshtaClient:
                 number = str(first_value(item, "Number", "DocumentNumber", "IntDocNumber"))
                 if not number:
                     continue
-                status = str(first_value(item, "Status", "StatusDescription")).strip() or "Невідомо"
+                status_code = str(first_value(item, "StatusCode", "StateId"))
+                status = normalize_shipment_status(
+                    first_value(item, "Status", "StatusDescription"), status_code
+                )
                 result[number] = ShipmentStatus(
                     tracking_number=number,
                     status=status,
-                    status_code=str(first_value(item, "StatusCode", "StateId")),
+                    status_code=status_code,
                 )
         return result
