@@ -25,6 +25,52 @@ from crm_sync.utils import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _payment_text(raw: dict[str, Any]) -> str:
+    """Collect payment labels from both list and expanded Rozetka payloads."""
+    direct = first_value(
+        raw,
+        "payment_type_name",
+        "payment_method_name",
+        "payment_name",
+        "payment_type",
+        "payment_method",
+        "payment_status",
+    )
+    candidates: list[str] = []
+    if direct not in (None, ""):
+        candidates.append(display_text(direct) if isinstance(direct, dict) else str(direct))
+
+    def visit(value: Any, path: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                normalized_key = str(key).casefold()
+                next_path = (*path, normalized_key)
+                if isinstance(nested, (dict, list)):
+                    visit(nested, next_path)
+                elif any(
+                    marker in normalized_key or any(marker in part for part in next_path)
+                    for marker in ("payment", "pay", "credit", "installment", "част", "розстр")
+                ):
+                    text = str(nested or "").strip()
+                    if text and not text.isdigit():
+                        candidates.append(text)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested, path)
+
+    visit(raw)
+    unique = list(dict.fromkeys(candidate.strip() for candidate in candidates if candidate.strip()))
+    installment = next(
+        (
+            candidate
+            for candidate in unique
+            if any(term in candidate.casefold() for term in ("част", "розстр", "installment", "credit"))
+        ),
+        "",
+    )
+    return installment or " | ".join(unique)
+
+
 class RozetkaClient:
     source = "rozetka"
 
@@ -120,7 +166,10 @@ class RozetkaClient:
                         "changed_from": since.strftime("%Y-%m-%d"),
                         "types": order_type,
                         "sort": "-changed",
-                        "expand": "user,delivery,purchases,status_data",
+                        "expand": (
+                            "user,delivery,purchases,status_data,payment_type_name,"
+                            "payment_status,status_payment,credit_info"
+                        ),
                     },
                 )
                 content = payload.get("content") or {}
@@ -470,7 +519,7 @@ class RozetkaClient:
             )
         )
         user_name = person_name(first_value(user, "name", "full_name", "title")) or person_name(user)
-        payment_text = str(first_value(raw, "payment_type_name", "payment_type", "payment_status"))
+        payment_text = _payment_text(raw)
         created_at = parse_datetime(first_value(raw, "created", "created_at"), self.timezone)
         current_status = first_value(raw, "status", default=nested_value(raw, (("status_data", "id"),)))
         history = raw.get("order_status_history") or []
@@ -504,8 +553,6 @@ class RozetkaClient:
                 note,
             ),
             total=decimal_value(first_value(raw, "cost_with_discount", "cost", "amount_with_discount", "amount")),
-            # The orders/search response does not expose payment fields for this seller.
-            # The Rozetka cabinet labels these orders as payment on receipt.
             payment_method=classify_payment(payment_text, note) or "наложка",
             note=note,
             sender=str(nested_value(raw, (("delivery", "sender", "name"),), default="")),

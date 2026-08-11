@@ -34,6 +34,7 @@ class Order:
     source_status: str = "Виконано"
     items: list[OrderItem] = field(default_factory=list)
     advertising_cost: Decimal = Decimal(0)
+    installment_commission: Decimal = Decimal(0)
     updated_at: datetime | None = None
 
     @property
@@ -43,6 +44,11 @@ class Order:
     @property
     def is_completed(self) -> bool:
         return self.source_status.strip().casefold() == "виконано"
+
+    @property
+    def is_cancelled(self) -> bool:
+        status = self.source_status.strip().casefold()
+        return status in {"скасовано", "отменено", "canceled", "cancelled"}
 
 
 @dataclass(slots=True)

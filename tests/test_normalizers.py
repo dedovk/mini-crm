@@ -214,6 +214,73 @@ def test_prom_normalizer_reads_uppercase_prepayment_from_client_notes() -> None:
     assert order.payment_method == "смешанная"
 
 
+def test_prom_normalizer_reads_installment_commission_separately() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+    order = client._normalize(
+        {
+            "id": 417697593,
+            "status": "delivered",
+            "date_created": "2026-07-25 12:33:00",
+            "full_price": 4449,
+            "payment_option": {"name": "Оплата частинами", "parts_count": 3},
+            "prosale_commission": {"value": 295.86},
+            "payment_data": {"installment_commission": {"amount": 164.61}},
+            "products": [{"name": "Товар", "sku": "KR65-GR-5P", "quantity": 1, "price": 4449}],
+        }
+    )
+
+    assert order.payment_method == "оплата частями"
+    assert order.advertising_cost == Decimal("295.86")
+    assert order.installment_commission == Decimal("164.61")
+
+
+def test_prom_normalizer_calculates_installment_commission_from_parts_count() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+    )
+    order = client._normalize(
+        {
+            "id": 2,
+            "status": "delivered",
+            "date_created": "2026-07-25 12:33:00",
+            "full_price": 4449,
+            "payment_option": {"name": "Оплата частинами", "parts_count": 3},
+            "products": [{"name": "Товар", "quantity": 1, "price": 4449}],
+        }
+    )
+
+    assert order.installment_commission == Decimal("164.61")
+
+
+def test_rozetka_normalizer_detects_nested_installment_payment() -> None:
+    client = RozetkaClient(
+        HttpClient(max_retries=0),
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+    order = client._normalize(
+        {
+            "id": 902504468,
+            "created": "2026-08-07 12:41:00",
+            "changed": "2026-08-08 12:00:00",
+            "cost": 2549,
+            "payment": {"method": {"title": "Оплатити частинами від Rozetka 6"}},
+            "ttn": "20451505735803",
+            "purchases": [{"item_name": "Товар", "quantity": 1, "price": 2549}],
+        }
+    )
+
+    assert order.payment_method == "оплата частями"
+
+
 def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
     client = OpenCartClient(
         HttpClient(max_retries=0),

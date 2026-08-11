@@ -48,8 +48,9 @@ def test_prom_uses_last_id_cursor_instead_of_offset() -> None:
     orders = client.fetch_orders(datetime(2026, 7, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
 
     assert len(orders) == 101
-    assert len(http.calls) == 2
+    assert len(http.calls) == 3
     assert "offset" not in http.calls[0]
     assert http.calls[0]["status"] == "delivered"
     assert http.calls[1]["last_id"] == 100
-    assert http.calls[0]["date_from"].startswith("2026-06-30")
+    assert http.calls[0]["last_modified_from"].startswith("2026-06-30")
+    assert http.calls[2]["status"] == "canceled"
