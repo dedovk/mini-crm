@@ -53,5 +53,7 @@ def test_source_icons_are_stable_and_reversible() -> None:
     assert source_display("prom") == "🟣 Prom"
     assert source_display("Rozetka") == "🟢 Rozetka"
     assert source_display("opencart") == "🔵 Сайт"
+    assert source_display("phone") == "🟠 Телефон"
     assert source_key("🟢 Rozetka") == "rozetka"
     assert source_key("🔵 Сайт") == "opencart"
+    assert source_key("🟠 Телефон") == "opencart"

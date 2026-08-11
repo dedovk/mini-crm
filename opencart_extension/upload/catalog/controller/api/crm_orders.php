@@ -45,8 +45,8 @@ class ControllerApiCrmOrders extends Controller {
             "LEFT JOIN `" . DB_PREFIX . "order_status` os " .
             "ON (o.order_status_id = os.order_status_id AND os.language_id = '" . (int)$this->config->get('config_language_id') . "') " .
             "WHERE o.order_status_id > 0 " .
-            "AND (os.name LIKE '%Викон%' OR os.name LIKE '%Выполн%' " .
-            "OR os.name LIKE '%Заверш%' OR os.name LIKE '%Complete%') " .
+            "AND (os.name LIKE '%Сделка завершена%' OR os.name LIKE '%Виконано%' " .
+            "OR os.name LIKE '%Выполнено%' OR os.name LIKE '%Complete%') " .
             "AND o.date_modified >= '" . $this->db->escape($changed_from) . "' " .
             "ORDER BY o.date_modified ASC LIMIT " . $offset . "," . $limit
         );

@@ -29,6 +29,7 @@ class Order:
     payment_method: str
     note: str
     sender: str
+    channel: str = ""
     completion_is_exact: bool = True
     source_status: str = "Виконано"
     items: list[OrderItem] = field(default_factory=list)

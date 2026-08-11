@@ -176,6 +176,8 @@ def _add_selection_links(
     for row_number in day_rows:
         next_start = next((start for start in section_starts if start > row_number), len(rows) + 1)
         rows[row_number - 1][2] = link(row_number, next_start - 1, "Виділити день")
+    if rows and day_rows:
+        rows[0][3] = link(day_rows[-1], len(rows), "⬇ До кінця таблиці")
 
 
 def _merge_request(

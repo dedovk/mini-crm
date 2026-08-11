@@ -68,11 +68,16 @@ def source_key(value: Any) -> str:
         "сайт": "opencart",
         "site": "opencart",
         "opencart": "opencart",
+        "phone": "opencart",
+        "телефон": "opencart",
     }
     return aliases.get(normalized, normalized)
 
 
 def source_display(value: Any) -> str:
+    raw = str(value or "").strip()
+    if raw.casefold() in {"phone", "телефон"} or "телефон" in raw.casefold():
+        return "🟠 Телефон"
     key = source_key(value)
     if not key:
         return ""

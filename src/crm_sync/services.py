@@ -90,6 +90,8 @@ class SheetGateway(Protocol):
 
     def latest_layout_day(self) -> date | None: ...
 
+    def has_refused_orders(self) -> bool: ...
+
     def create_backup(self, *, created_at: datetime) -> str: ...
 
     def append_orders(
@@ -223,10 +225,11 @@ class SyncService:
             return result
 
         shipment_update = self.sheets.update_shipment_statuses(statuses)
+        refused_orders_present = self.sheets.has_refused_orders()
         latest_layout_day = self.sheets.latest_layout_day()
         layout_advanced = latest_layout_day is None or latest_layout_day < now.date()
         backup_created = ""
-        if unique_orders or layout_advanced:
+        if unique_orders or layout_advanced or refused_orders_present:
             backup_created = self.sheets.create_backup(created_at=now)
             LOGGER.info("Created Google Sheets backup before structural rebuild: %s", backup_created)
         appended_rows = self.sheets.append_orders(
@@ -235,7 +238,7 @@ class SyncService:
             sender_default=self.sender_default,
             operational_day=now.date(),
             observed_at=now,
-            force_rebuild=layout_advanced,
+            force_rebuild=layout_advanced or refused_orders_present,
         )
         expense_updates = 0
         if expenses is not None:
@@ -354,6 +357,10 @@ class SyncService:
         for order in fetched:
             key = order.sync_key.casefold()
             if key in existing_keys or key in run_keys:
+                continue
+            if order.source.casefold() == "rozetka" and order.is_completed:
+                # New Rozetka orders enter the CRM on "Відправлено". Completed
+                # orders remain in the fetch set only to refresh existing rows.
                 continue
             effective_day = (
                 order.completed_at.date()

@@ -30,6 +30,7 @@ from crm_sync.sheet_layout import (
     ROW_REPORT_MTD,
     parse_sheet_date,
     sheet_serial,
+    source_display,
     source_key,
 )
 from crm_sync.sheet_meta import (
@@ -52,6 +53,7 @@ from crm_sync.utils import (
     decimal_for_sheet,
     decimal_value,
     extract_ttn,
+    is_refused_shipment_status,
     parse_prepayment,
 )
 
@@ -684,6 +686,11 @@ class GoogleSheetsGateway:
         ]
         return max(days, default=None)
 
+    def has_refused_orders(self) -> bool:
+        """Return whether a refused order block still needs to be removed."""
+        statuses = self.worksheet.col_values(COLUMNS.shipment_status)
+        return any(is_refused_shipment_status(status) for status in statuses)
+
     def pending_tracking_numbers(self) -> list[str]:
         values = self.worksheet.get_all_values()
         numbers: list[str] = []
@@ -793,6 +800,15 @@ class GoogleSheetsGateway:
             if order:
                 customer = customer_display(order.city, order.customer_name)
             for item_index, (row_number, row) in enumerate(sheet_rows):
+                if order and order.channel:
+                    desired_source = source_display(order.channel or order.source)
+                    current_source = (
+                        str(row[COLUMNS.source - 1]).strip()
+                        if len(row) >= COLUMNS.source
+                        else ""
+                    )
+                    if current_source != desired_source:
+                        updates.append({"range": f"A{row_number}", "values": [[desired_source]]})
                 if order and order.tracking_number:
                     current = (
                         str(row[COLUMNS.tracking_number - 1]).strip()

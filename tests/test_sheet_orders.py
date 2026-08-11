@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from crm_sync.models import Order, OrderItem
+from crm_sync.models import Order, OrderItem, ShipmentStatus
 from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
 from crm_sync.sheet_orders import collect_order_groups
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN
@@ -91,3 +91,56 @@ def test_shipped_order_is_grouped_on_shipping_day_without_completion_marker() ->
     assert row[COLUMNS.operational_date - 1] == sheet_serial(date(2026, 8, 10))
     assert row[COLUMNS.first_seen_completed - 1] == ""
     assert row[COLUMNS.order_status - 1] == "Відправлено"
+
+
+def test_refused_existing_order_is_removed_from_groups() -> None:
+    refused_row = [""] * LAST_COLUMN
+    refused_row[COLUMNS.source - 1] = "prom"
+    refused_row[COLUMNS.tracking_number - 1] = "20451234567890"
+    refused_row[COLUMNS.shipment_status - 1] = "Відмова від отримання"
+    refused_row[COLUMNS.order_date - 1] = sheet_serial(date(2026, 8, 5))
+    refused_row[COLUMNS.sync_key - 1] = "prom:refused"
+    refused_row[COLUMNS.row_type - 1] = ROW_ORDER
+    refused_row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
+    second_item_row = refused_row.copy()
+    second_item_row[COLUMNS.shipment_status - 1] = "Прямує до покупця"
+
+    groups = collect_order_groups(
+        [refused_row, second_item_row],
+        [],
+        {},
+        sender_default="наш",
+        observation_day=date(2026, 8, 11),
+    )
+
+    assert groups.rows == {}
+
+
+def test_new_order_already_refused_is_not_added() -> None:
+    order = Order(
+        source="prom",
+        external_id="refused",
+        created_at=datetime(2026, 8, 10, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 11, tzinfo=UTC),
+        customer_name="Покупець",
+        city="Київ",
+        phone="+380501234567",
+        tracking_number="20451234567890",
+        total=Decimal(100),
+        payment_method="наложка",
+        note="",
+        sender="",
+        items=[OrderItem("Товар", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+    statuses = {
+        "20451234567890": ShipmentStatus(
+            "20451234567890", "Відмова від отримання", "102"
+        )
+    }
+
+    groups = collect_order_groups(
+        [], [order], statuses, sender_default="наш", observation_day=date(2026, 8, 11)
+    )
+
+    assert groups.rows == {}
+    assert groups.added_rows == 0

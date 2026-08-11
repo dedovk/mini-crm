@@ -259,6 +259,11 @@ def test_opencart_completion_accepts_boolean_text_and_localized_statuses() -> No
     assert OpenCartClient._is_completed({"is_completed": "true"}) is True
     assert OpenCartClient._is_completed({"order_status": "Виконано"}) is True
     assert OpenCartClient._is_completed({"order_status": "Очікує обробки"}) is False
+    assert OpenCartClient._channel({"order_status": "Сделка завершена"}) == "site"
+    assert (
+        OpenCartClient._channel({"order_status": "Сделка завершена(Заказ по тел)"})
+        == "phone"
+    )
 
 
 class RozetkaSearchStub:

@@ -20,6 +20,7 @@ from crm_sync.utils import (
     customer_display,
     decimal_for_sheet,
     extract_ttn,
+    is_refused_shipment_status,
     normalize_shipment_status,
     normalize_tracking_number,
     parse_prepayment,
@@ -43,7 +44,25 @@ def collect_order_groups(
     observation_day: date,
 ) -> OrderGroups:
     result = OrderGroups(rows={}, days={}, sort_values={})
+    refused_keys = {
+        str(row[COLUMNS.sync_key - 1]).strip().casefold()
+        for row in existing_values
+        if len(row) >= COLUMNS.sync_key
+        and str(row[COLUMNS.row_type - 1]).strip() == ROW_ORDER
+        and is_refused_shipment_status(
+            row[COLUMNS.shipment_status - 1]
+            if len(row) >= COLUMNS.shipment_status
+            else ""
+        )
+    }
     for source_row in existing_values:
+        key = (
+            str(source_row[COLUMNS.sync_key - 1]).strip().casefold()
+            if len(source_row) >= COLUMNS.sync_key
+            else ""
+        )
+        if key in refused_keys:
+            continue
         normalized = _normalize_existing_row(source_row, sender_default=sender_default)
         if normalized is None:
             continue
@@ -93,6 +112,8 @@ def _normalize_existing_row(
     row[COLUMNS.shipment_status - 1] = normalize_shipment_status(
         row[COLUMNS.shipment_status - 1]
     )
+    if is_refused_shipment_status(row[COLUMNS.shipment_status - 1]):
+        return None
     row[COLUMNS.customer - 1] = clean_customer_display(row[COLUMNS.customer - 1])
     completion_day = parse_order_day(row[COLUMNS.order_date - 1])
     row[COLUMNS.order_date - 1] = sheet_serial(completion_day) if completion_day else ""
@@ -124,13 +145,15 @@ def _new_order_rows(
     shipment_status = shipment_statuses.get(extract_ttn(order.tracking_number)) or shipment_statuses.get(
         order.tracking_number
     )
+    if shipment_status and is_refused_shipment_status(shipment_status.status):
+        return []
     prepayment = parse_prepayment(order.note)
     sender = order.sender.strip() or sender_default
     effective_day = order.completed_at.date() if order.completion_is_exact else observation_day
     rows: list[list[Any]] = []
     for item in order.items:
         row: list[Any] = [""] * LAST_COLUMN
-        row[COLUMNS.source - 1] = source_display(order.source)
+        row[COLUMNS.source - 1] = source_display(order.channel or order.source)
         row[COLUMNS.tracking_number - 1] = order.tracking_number
         row[COLUMNS.shipment_status - 1] = (
             shipment_status.status

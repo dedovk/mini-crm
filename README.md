@@ -11,6 +11,7 @@ through GitHub Actions.
   the product rows of one order.
 - Prom.ua and ocStore orders are imported after completion. Rozetka orders are imported as
   soon as they reach `Відправлено`, then updated in place when they become `Виконано`.
+  A previously unseen Rozetka order that is already completed is not backfilled.
 - Column D contains the completion date when the source exposes an exact status-change
   timestamp; unknown completion dates are left blank instead of being invented.
 - Phones are written as text in `+380...` format.
@@ -23,7 +24,9 @@ through GitHub Actions.
 - Duplicate key is `source:order_id`; it is stored in hidden column U (`Sync Key`).
 - Nova Poshta statuses are refreshed for every non-final TTN already present in the sheet.
   In-transit states are normalized to one sortable value, `Прямує до покупця`.
-- `Отримано` and `Відмова від отримання` are treated as final.
+- `Отримано` is treated as final. `Відмова від отримання` removes the complete order block
+  from the operational sheet (after creating a structural backup), so its sale and markup
+  no longer participate in daily or monthly totals.
 - Prom notes and Rozetka seller comments recognize `предоплата`, `предо`, `пред` and
   `перед`; a nearby amount such as `пред - 500` is written as numeric prepayment `500`.
 - Existing manual cost, advertising and manager-note cells are never overwritten.
@@ -46,6 +49,9 @@ through GitHub Actions.
 - Multi-item orders receive a black outer border across the complete order block.
 - Month and day title rows contain styled `Виділити місяць` / `Виділити день` links that
   select the corresponding A:T range.
+- The month header contains a `⬇ До кінця таблиці` link to the latest day. Google Sheets
+  does not expose an API for remotely scrolling a browser tab that is already open, so this
+  one-click link is the reliable navigation mechanism.
 - The sheet uses compact Ukrainian headers, 8-point body text, fixed narrow widths,
   status colors and hidden technical columns U:W so all business columns fit horizontally.
 - Sheet rebuilds write the new snapshot before clearing only obsolete trailing rows, so a
@@ -208,6 +214,8 @@ controller from [opencart_extension](opencart_extension/README.md) on
 The read-only endpoint returns only completed orders and derives `completed_at` from the
 latest history entry for the current completed status. The installed Nova Poshta module
 stores TTNs in the `novaposhta_cn_number` order field; the normalizer reads this field directly.
+`Сделка завершена` is displayed as `🔵 Сайт`; `Сделка завершена(Заказ по тел)` (and equivalent
+phone wording) is displayed as `🟠 Телефон`. Both retain the stable `opencart:order_id` sync key.
 Rejected completion statuses are logged as aggregate status names without customer data,
 which makes a zero-result OpenCart run diagnosable from GitHub Actions.
 

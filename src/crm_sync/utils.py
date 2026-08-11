@@ -212,6 +212,17 @@ def normalize_shipment_status(value: Any, status_code: Any = "") -> str:
     """Collapse in-transit carrier states into one stable CRM value."""
     status = str(value or "").strip() or "Невідомо"
     normalized = status.casefold().replace("’", "'")
+    refusal_terms = (
+        "відмова від отримання",
+        "відмовився від отримання",
+        "відмовилась від отримання",
+        "відмовився від посилки",
+        "отказ от получения",
+        "отказался от получения",
+        "отказалась от получения",
+    )
+    if any(term in normalized for term in refusal_terms):
+        return "Відмова від отримання"
     transit_terms = (
         "у дороз",
         "в дороз",
@@ -235,6 +246,10 @@ def normalize_shipment_status(value: Any, status_code: Any = "") -> str:
     if any(term in normalized for term in transit_terms):
         return "Прямує до покупця"
     return status
+
+
+def is_refused_shipment_status(value: Any) -> bool:
+    return normalize_shipment_status(value).casefold() == "відмова від отримання"
 
 
 def parse_datetime(value: Any, timezone: str) -> datetime:

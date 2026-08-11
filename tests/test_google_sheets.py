@@ -381,6 +381,7 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     day_rows = [row for row in written if row[COLUMNS.row_type - 1] == "DAY"]
     assert all("Виділити місяць" in row[2] for row in month_rows)
     assert all("Виділити день" in row[2] for row in day_rows)
+    assert "⬇ До кінця таблиці" in written[0][3]
     report_indexes = [
         index
         for index, row in enumerate(written)

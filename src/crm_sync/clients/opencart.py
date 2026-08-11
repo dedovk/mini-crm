@@ -118,6 +118,14 @@ class OpenCartClient:
         status = str(first_value(raw, "order_status", "status_name", "status")).strip().casefold()
         return any(marker in status for marker in ("виконан", "выполн", "заверш", "complete"))
 
+    @staticmethod
+    def _channel(raw: dict[str, Any]) -> str:
+        """Classify manually entered phone orders without changing their stable sync key."""
+        status = str(first_value(raw, "order_status", "status_name", "status")).strip().casefold()
+        compact = " ".join(status.replace("(", " ").replace(")", " ").split())
+        phone_markers = ("по тел", "телефон", "заказ по тел", "замовлення по тел", "phone")
+        return "phone" if any(marker in compact for marker in phone_markers) else "site"
+
     def _normalize(self, raw: dict[str, Any]) -> Order:
         products = raw.get("products") or []
         items: list[OrderItem] = []
@@ -175,6 +183,7 @@ class OpenCartClient:
             payment_method=classify_payment(payment_text, note),
             note=note,
             sender=str(first_value(raw, "sender", "store_name")),
+            channel=self._channel(raw),
             completion_is_exact=exact_completed_at is not None,
             items=items,
         )
