@@ -30,11 +30,13 @@ class SheetColumns:
     operational_date: int = 23
     first_seen_completed: int = 24
     order_status: int = 25
+    advertising_base: int = 26
+    installment_commission: int = 27
 
 
 COLUMNS = SheetColumns()
-LAST_COLUMN = COLUMNS.order_status
-LAST_COLUMN_LETTER = "Y"
+LAST_COLUMN = COLUMNS.installment_commission
+LAST_COLUMN_LETTER = "AA"
 
 PAYMENT_OPTIONS = (
     "пром оплата(оплата картой)",

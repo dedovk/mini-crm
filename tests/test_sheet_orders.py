@@ -46,6 +46,7 @@ def test_collect_order_groups_writes_advertising_once_for_multi_item_order() -> 
         sender="",
         completion_is_exact=False,
         advertising_cost=Decimal(10),
+        installment_commission=Decimal("3.70"),
         items=[
             OrderItem("A", "A-1", Decimal(1), Decimal(100), Decimal(100)),
             OrderItem("B", "B-1", Decimal(1), Decimal(200), Decimal(200)),
@@ -58,7 +59,10 @@ def test_collect_order_groups_writes_advertising_once_for_multi_item_order() -> 
 
     rows = groups.rows["prom:2"]
     assert groups.added_rows == 2
-    assert [row[COLUMNS.advertising - 1] for row in rows] == [10, ""]
+    assert rows[0][COLUMNS.advertising - 1] == "ProSale: 10.00\nОплата частинами: 3.70"
+    assert rows[0][COLUMNS.advertising_base - 1] == 10
+    assert rows[0][COLUMNS.installment_commission - 1] == 3.7
+    assert rows[1][COLUMNS.advertising - 1] == ""
     assert all(
         row[COLUMNS.operational_date - 1] == sheet_serial(date(2026, 8, 8)) for row in rows
     )

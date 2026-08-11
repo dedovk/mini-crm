@@ -29,10 +29,12 @@ through GitHub Actions.
   no longer participate in daily or monthly totals.
 - Prom notes and Rozetka seller comments recognize `предоплата`, `предо`, `пред` and
   `перед`; a nearby amount such as `пред - 500` is written as numeric prepayment `500`.
-- Existing manual cost, advertising and manager-note cells are never overwritten.
+- Existing manual cost and manager-note cells are never overwritten. Marketplace expenses
+  are reconciled from their APIs.
 - Markup in column R is created as `(unit price - cost) * quantity`.
 - Prom.ua advertising expense is written to column S from `prosale_commission.value`
-  (with `cpa_commission.amount` as a compatibility fallback). Report rows split it into
+  (with `cpa_commission.amount` as a compatibility fallback). Installment-payment commission
+  is shown on a second line and stored separately in hidden numeric column AA. Report rows split it into
   ProSale and exact fixed `10.00` Prom charges; Rozetka expenses are reported separately.
   Advertising values are shown in daily and month-to-date rows without a monthly forecast.
 - Existing order rows are refreshed from their source for tracking number, combined
@@ -170,10 +172,14 @@ including TTNs added to older orders. The workflow also supports manual dispatch
 
 ## Prom.ua
 
-The client uses `GET /orders/list?status=delivered` with `Authorization: Bearer ...`, handles
+The client uses `GET /orders/list` with `Authorization: Bearer ...`, filters by `last_modified`
+and requests both `delivered` and `canceled` statuses. Canceled orders already present in the
+sheet are removed from the operational data and totals after a backup. The client handles
 pagination, normalizes product rows and retains only completed orders containing a supported TTN. Prom prices
 such as `1 149 грн` are converted to numeric values, the product code comes from `sku`,
-and the ProSale commission is recorded as advertising expense. Frequent automation scans
+and the ProSale commission is recorded as advertising expense. For installment payments,
+the separate commission is read from the order payload or calculated from the documented
+number-of-payments tariff when only the installment count is supplied. Frequent automation scans
 seven days to stay within API limits, while the daily deep reconciliation scans 30 days.
 The HTTP client honors Prom's `Retry-After` response and uses a longer fallback pause for
 rate limits. Duplicate filtering makes both overlaps safe. Prom's public Order model does
@@ -183,7 +189,7 @@ at which the script sees `delivered`; later runs keep that recorded time stable.
 ## Rozetka
 
 The client uses `GET /orders/search` for active (`types=2`) and completed (`types=3`) groups
-with `expand=user,delivery,purchases,status_data`, handles pagination and retains shipped or
+with expanded user, delivery, product, payment and credit fields, handles pagination and retains shipped or
 successfully completed orders with a TTN. The API `changed` value supplies the current status time, while an
 available `order_status_history` timestamp takes precedence. It accepts an existing token and
 supports the current `POST /sites` login flow when login/password secrets are configured.

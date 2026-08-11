@@ -96,6 +96,29 @@ class SuccessfulSource:
         return []
 
 
+class CancelledPromSource:
+    source = "prom"
+
+    def fetch_orders(self, since: datetime):
+        return [
+            Order(
+                source="prom",
+                external_id="417709650",
+                created_at=datetime(2026, 7, 25, tzinfo=UTC),
+                completed_at=datetime(2026, 8, 11, tzinfo=UTC),
+                customer_name="",
+                city="",
+                phone="",
+                tracking_number="",
+                total=Decimal(0),
+                payment_method="",
+                note="",
+                sender="",
+                source_status="Скасовано",
+            )
+        ]
+
+
 class FailingExpenseSource:
     source = "rozetka"
 
@@ -327,4 +350,34 @@ def test_production_run_rebuilds_and_backs_up_when_refused_order_exists() -> Non
     service.run()
 
     assert sheets.force_rebuild
+    assert sheets.backups == 1
+
+
+def test_production_run_removes_existing_cancelled_prom_order() -> None:
+    sheets = ProductionSheetsStub()
+    sheets.read_existing_sync_keys = lambda: {"prom:417709650"}
+    captured: dict = {}
+
+    def append_orders(orders, statuses, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    sheets.append_orders = append_orders
+    now = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+    sheets.latest_layout_day = lambda: now.date()
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[CancelledPromSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=30,
+        sender_default="наш",
+        dry_run=False,
+        clock=lambda: now,
+    )
+
+    service.run()
+
+    assert captured["force_rebuild"] is True
+    assert captured["excluded_sync_keys"] == {"prom:417709650"}
     assert sheets.backups == 1

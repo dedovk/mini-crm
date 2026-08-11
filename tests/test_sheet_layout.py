@@ -35,9 +35,10 @@ def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
     assert ")*31/2" in formulas[ROW_REPORT_FORECAST][8]
     assert formulas[ROW_REPORT_DAY][8].startswith("=SUMIFS($M$5:$M$30;")
     assert "-SUMIFS($R$5:$R$30;" in formulas[ROW_REPORT_DAY][8]
-    assert '$A$5:$A$30;"*Prom*";$S$5:$S$30;"<>10"' in formulas[ROW_REPORT_DAY][12]
+    assert '$A$5:$A$30;"*Prom*";$Z$5:$Z$30;"<>10"' in formulas[ROW_REPORT_DAY][12]
+    assert 'SUMIFS($AA$5:$AA$30;' in formulas[ROW_REPORT_DAY][12]
     assert '$A$5:$A$30;"*Rozetka*"' in formulas[ROW_REPORT_DAY][14]
-    assert '$A$5:$A$30;"*Prom*";$S$5:$S$30;10' in formulas[ROW_REPORT_DAY][16]
+    assert '$A$5:$A$30;"*Prom*";$Z$5:$Z$30;10' in formulas[ROW_REPORT_DAY][16]
     assert 12 not in formulas[ROW_REPORT_FORECAST]
     assert 14 not in formulas[ROW_REPORT_FORECAST]
     assert 16 not in formulas[ROW_REPORT_FORECAST]

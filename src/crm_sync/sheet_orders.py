@@ -19,12 +19,23 @@ from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN
 from crm_sync.utils import (
     customer_display,
     decimal_for_sheet,
+    decimal_value,
     extract_ttn,
     is_refused_shipment_status,
     normalize_shipment_status,
     normalize_tracking_number,
     parse_prepayment,
 )
+
+
+def advertising_display(base: Decimal, installment: Decimal) -> Any:
+    """Return a compact two-line display while numeric components stay hidden."""
+    if installment > 0:
+        return (
+            f"ProSale: {decimal_for_sheet(base):.2f}\n"
+            f"Оплата частинами: {decimal_for_sheet(installment):.2f}"
+        )
+    return decimal_for_sheet(base) if base > 0 else ""
 
 
 @dataclass(slots=True)
@@ -42,8 +53,10 @@ def collect_order_groups(
     *,
     sender_default: str,
     observation_day: date,
+    excluded_sync_keys: set[str] | None = None,
 ) -> OrderGroups:
     result = OrderGroups(rows={}, days={}, sort_values={})
+    excluded = {key.strip().casefold() for key in (excluded_sync_keys or set())}
     refused_keys = {
         str(row[COLUMNS.sync_key - 1]).strip().casefold()
         for row in existing_values
@@ -61,7 +74,7 @@ def collect_order_groups(
             if len(source_row) >= COLUMNS.sync_key
             else ""
         )
-        if key in refused_keys:
+        if key in refused_keys or key in excluded:
             continue
         normalized = _normalize_existing_row(source_row, sender_default=sender_default)
         if normalized is None:
@@ -132,6 +145,13 @@ def _normalize_existing_row(
         and not parse_sheet_date(row[COLUMNS.first_seen_completed - 1])
     ):
         row[COLUMNS.first_seen_completed - 1] = sheet_serial(completion_day or order_day)
+    base = decimal_value(row[COLUMNS.advertising_base - 1])
+    installment = decimal_value(row[COLUMNS.installment_commission - 1])
+    if base == 0 and installment == 0:
+        # One-time migration from the former numeric business column.
+        base = decimal_value(row[COLUMNS.advertising - 1])
+        row[COLUMNS.advertising_base - 1] = decimal_for_sheet(base) if base > 0 else ""
+    row[COLUMNS.advertising - 1] = advertising_display(base, installment)
     return key, order_day, str(row[COLUMNS.order_date - 1]), row
 
 
@@ -177,8 +197,18 @@ def _new_order_rows(
         row[COLUMNS.prepayment - 1] = (
             decimal_for_sheet(prepayment) if prepayment > Decimal(0) else ""
         )
-        if not rows and order.advertising_cost > 0:
-            row[COLUMNS.advertising - 1] = decimal_for_sheet(order.advertising_cost)
+        if not rows:
+            row[COLUMNS.advertising_base - 1] = (
+                decimal_for_sheet(order.advertising_cost) if order.advertising_cost > 0 else ""
+            )
+            row[COLUMNS.installment_commission - 1] = (
+                decimal_for_sheet(order.installment_commission)
+                if order.installment_commission > 0
+                else ""
+            )
+            row[COLUMNS.advertising - 1] = advertising_display(
+                order.advertising_cost, order.installment_commission
+            )
         row[COLUMNS.sync_key - 1] = order.sync_key
         row[COLUMNS.row_type - 1] = ROW_ORDER
         row[COLUMNS.operational_date - 1] = sheet_serial(effective_day)

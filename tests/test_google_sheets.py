@@ -140,7 +140,7 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     changed = gateway.refresh_order_details([order])
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
-    assert changed == 11
+    assert changed == 12
     assert updates["B5"] == "RMP-483122083"
     assert updates["D5"] == sheet_serial(date(2026, 8, 3))
     assert updates["F5"] == "Київ, Тестовий Отримувач"
@@ -151,6 +151,7 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     assert updates["N5"] == 100
     assert updates["R5"] == "=(L5-Q5)*K5"
     assert updates["S5"] == 10
+    assert updates["Z5"] == 10
     assert updates["W5"] > 0
 
 
@@ -316,7 +317,7 @@ def test_completion_backfill_migrates_historical_rows_and_repeated_headers() -> 
 
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert changed == 3
-    assert updates["U4:Y4"][-2:] == [
+    assert updates["U4:AA4"][3:5] == [
         "Перше спостереження виконання",
         "Статус замовлення джерела",
     ]
@@ -523,8 +524,8 @@ def test_update_order_expenses_writes_net_total_only_to_first_item_row() -> None
     changed = gateway.update_order_expenses({"901": Decimal("183.42")}, source="rozetka")
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
-    assert changed == 2
-    assert updates == {"S5": 183.42, "S6": ""}
+    assert changed == 3
+    assert updates == {"S5": 183.42, "S6": "", "Z5": 183.42}
 
 
 def test_sheet_integrity_rejects_formula_errors_negative_cost_and_split_order() -> None:

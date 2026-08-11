@@ -37,6 +37,8 @@ TECHNICAL_HEADERS = (
     "Операційна дата",
     "Перше спостереження виконання",
     "Статус замовлення джерела",
+    "Базові витрати маркетплейсу, грн",
+    "Комісія оплати частинами, грн",
 )
 ALL_HEADERS = BUSINESS_HEADERS + TECHNICAL_HEADERS
 
@@ -138,7 +140,8 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
     day_filter = f"{range_for('W')};{day_expr}"
     mtd_filter = f'{range_for("W")};">="&{month_start};{range_for("W")};"<="&{day_expr}'
     source_range = range_for("A")
-    advertising_range = range_for("S")
+    advertising_range = range_for("Z")
+    installment_range = range_for("AA")
     elapsed = day.day
     days_in_month = calendar.monthrange(day.year, day.month)[1]
 
@@ -151,10 +154,16 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
             if category == "prosale"
             else ""
         )
-        return (
+        base = (
             f"=SUMIFS({advertising_range};{order_filter};{period_filter};"
             f'{source_range};"{source_criterion}"{amount_filter})'
         )
+        if category == "prosale":
+            return (
+                f"={base[1:]}+SUMIFS({installment_range};{order_filter};{period_filter};"
+                f'{source_range};"*Prom*")'
+            )
+        return base
 
     daily = {
         4: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{day_filter})",

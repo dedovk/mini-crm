@@ -39,7 +39,7 @@ from crm_sync.sheet_meta import (
     ensure_sheet_audit_worksheet,
     record_sheet_sync_health,
 )
-from crm_sync.sheet_orders import collect_order_groups
+from crm_sync.sheet_orders import advertising_display, collect_order_groups
 from crm_sync.sheet_schema import (
     COLUMNS,
     LAST_COLUMN,
@@ -870,13 +870,44 @@ class GoogleSheetsGateway:
                     current_total = row[COLUMNS.order_total - 1] if len(row) >= COLUMNS.order_total else ""
                     if decimal_value(current_total) != order.total:
                         updates.append({"range": f"N{row_number}", "values": [[decimal_for_sheet(order.total)]]})
-                    current_advertising = row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
-                    if order.advertising_cost > 0 and decimal_value(current_advertising) == 0:
+                    current_base = (
+                        row[COLUMNS.advertising_base - 1]
+                        if len(row) >= COLUMNS.advertising_base
+                        else ""
+                    )
+                    current_installment = (
+                        row[COLUMNS.installment_commission - 1]
+                        if len(row) >= COLUMNS.installment_commission
+                        else ""
+                    )
+                    if order.advertising_cost > 0 and decimal_value(current_base) != order.advertising_cost:
                         updates.append(
                             {
-                                "range": f"S{row_number}",
+                                "range": rowcol_to_a1(row_number, COLUMNS.advertising_base),
                                 "values": [[decimal_for_sheet(order.advertising_cost)]],
                             }
+                        )
+                    if (
+                        order.installment_commission > 0
+                        and decimal_value(current_installment) != order.installment_commission
+                    ):
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.installment_commission),
+                                "values": [[decimal_for_sheet(order.installment_commission)]],
+                            }
+                        )
+                    expected_advertising = advertising_display(
+                        order.advertising_cost, order.installment_commission
+                    )
+                    current_advertising = (
+                        row[COLUMNS.advertising - 1]
+                        if len(row) >= COLUMNS.advertising
+                        else ""
+                    )
+                    if expected_advertising and str(current_advertising) != str(expected_advertising):
+                        updates.append(
+                            {"range": f"S{row_number}", "values": [[expected_advertising]]}
                         )
                     prepayment = parse_prepayment(order.note)
                     current_prepayment = (
@@ -1102,17 +1133,33 @@ class GoogleSheetsGateway:
         for order_id, order_rows in rows_by_order.items():
             expected = max(Decimal(0), expenses[order_id])
             for index, (row_number, row) in enumerate(order_rows):
-                current = row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
+                current = (
+                    row[COLUMNS.advertising_base - 1]
+                    if len(row) >= COLUMNS.advertising_base
+                    else ""
+                )
                 if index == 0:
                     if decimal_value(current) != expected:
                         updates.append(
                             {
-                                "range": f"S{row_number}",
+                                "range": rowcol_to_a1(row_number, COLUMNS.advertising_base),
                                 "values": [[decimal_for_sheet(expected)]],
                             }
                         )
-                elif str(current).strip():
-                    updates.append({"range": f"S{row_number}", "values": [[""]]})
+                    display = advertising_display(expected, Decimal(0))
+                    shown = row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
+                    if str(shown) != str(display):
+                        updates.append({"range": f"S{row_number}", "values": [[display]]})
+                else:
+                    if str(current).strip():
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.advertising_base),
+                                "values": [[""]],
+                            }
+                        )
+                    if len(row) >= COLUMNS.advertising and str(row[COLUMNS.advertising - 1]).strip():
+                        updates.append({"range": f"S{row_number}", "values": [[""]]})
         if updates:
             self.worksheet.batch_update(updates, raw=False)
         return len(updates)
@@ -1126,6 +1173,7 @@ class GoogleSheetsGateway:
         operational_day: date,
         observed_at: datetime | None = None,
         force_rebuild: bool = False,
+        excluded_sync_keys: set[str] | None = None,
     ) -> int:
         if not orders and not force_rebuild:
             return 0
@@ -1137,6 +1185,7 @@ class GoogleSheetsGateway:
             shipment_statuses,
             sender_default=sender_default,
             observation_day=observation_day,
+            excluded_sync_keys=excluded_sync_keys,
         )
         snapshot = build_sheet_snapshot(
             order_groups,

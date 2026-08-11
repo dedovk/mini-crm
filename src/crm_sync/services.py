@@ -103,6 +103,7 @@ class SheetGateway(Protocol):
         operational_day: date,
         observed_at: datetime,
         force_rebuild: bool,
+        excluded_sync_keys: set[str] | None = None,
     ) -> int: ...
 
     def update_order_expenses(self, expenses: dict[str, Decimal], *, source: str) -> int: ...
@@ -163,7 +164,11 @@ class SyncService:
             raise IntegrityError(sheet_integrity)
         existing_keys = self.sheets.read_existing_sync_keys()
         source_batch = self._fetch_orders(now - timedelta(days=self.lookback_days))
-        fetched = list(source_batch.orders)
+        fetched_all = list(source_batch.orders)
+        cancelled_orders = [order for order in fetched_all if order.is_cancelled]
+        cancelled_keys = {order.sync_key.casefold() for order in cancelled_orders}
+        cancelled_existing = cancelled_keys & {key.casefold() for key in existing_keys}
+        fetched = [order for order in fetched_all if not order.is_cancelled]
         warnings: list[str] = []
 
         incoming_integrity = validate_incoming_orders(fetched)
@@ -229,7 +234,7 @@ class SyncService:
         latest_layout_day = self.sheets.latest_layout_day()
         layout_advanced = latest_layout_day is None or latest_layout_day < now.date()
         backup_created = ""
-        if unique_orders or layout_advanced or refused_orders_present:
+        if unique_orders or layout_advanced or refused_orders_present or cancelled_existing:
             backup_created = self.sheets.create_backup(created_at=now)
             LOGGER.info("Created Google Sheets backup before structural rebuild: %s", backup_created)
         appended_rows = self.sheets.append_orders(
@@ -238,7 +243,8 @@ class SyncService:
             sender_default=self.sender_default,
             operational_day=now.date(),
             observed_at=now,
-            force_rebuild=layout_advanced or refused_orders_present,
+            force_rebuild=layout_advanced or refused_orders_present or bool(cancelled_existing),
+            excluded_sync_keys=cancelled_existing,
         )
         expense_updates = 0
         if expenses is not None:
@@ -251,6 +257,9 @@ class SyncService:
             new_orders=unique_orders,
             completion_events=completion_events,
             shipment_changes=shipment_update.changes,
+            cancelled_orders=[
+                order for order in cancelled_orders if order.sync_key.casefold() in cancelled_existing
+            ],
         )
         audit_count = 0
         try:
@@ -383,6 +392,7 @@ class SyncService:
         new_orders: list[Order],
         completion_events: tuple[OrderAuditEvent, ...],
         shipment_changes: tuple[ShipmentStatusChange, ...],
+        cancelled_orders: list[Order] | None = None,
     ) -> list[OrderAuditEvent]:
         events = [
             OrderAuditEvent(
@@ -417,6 +427,21 @@ class SyncService:
             for order in new_orders
         )
         events.extend(completion_events)
+        events.extend(
+            OrderAuditEvent(
+                occurred_at=now,
+                event_type="Видалено скасоване замовлення",
+                source=order.source,
+                order_id=order.external_id,
+                sync_key=order.sync_key,
+                tracking_number=order.tracking_number,
+                field="Статус замовлення джерела",
+                old_value="Виконано",
+                new_value=order.source_status,
+                details="Замовлення виключено з CRM та всіх підсумків",
+            )
+            for order in (cancelled_orders or [])
+        )
         events.extend(
             OrderAuditEvent(
                 occurred_at=now,
