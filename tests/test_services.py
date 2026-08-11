@@ -247,6 +247,31 @@ def test_unseen_completed_rozetka_order_is_not_inserted() -> None:
     assert selection.stale_count == 0
 
 
+def test_recently_modified_opencart_order_is_selected_despite_old_completion() -> None:
+    order = Order(
+        source="opencart",
+        external_id="934",
+        created_at=datetime(2026, 7, 30, tzinfo=UTC),
+        completed_at=datetime(2026, 7, 30, tzinfo=UTC),
+        updated_at=datetime(2026, 8, 11, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451234567890",
+        total=Decimal(100),
+        payment_method="",
+        note="",
+        sender="",
+        source_status="Виконано",
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    selection = SyncService._select_new_orders([order], set(), cutoff=date(2026, 8, 4))
+
+    assert selection.orders == (order,)
+    assert selection.stale_count == 0
+
+
 def test_production_run_performs_preflight_postflight_and_health_update() -> None:
     sheets = ProductionSheetsStub()
     service = SyncService(

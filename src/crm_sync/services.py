@@ -363,7 +363,9 @@ class SyncService:
                 # orders remain in the fetch set only to refresh existing rows.
                 continue
             effective_day = (
-                order.completed_at.date()
+                order.updated_at.date()
+                if order.source.casefold() == "opencart" and order.updated_at
+                else order.completed_at.date()
                 if order.completion_is_exact or not order.is_completed
                 else order.created_at.date()
             )

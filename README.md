@@ -214,8 +214,10 @@ controller from [opencart_extension](opencart_extension/README.md) on
 The read-only endpoint returns only completed orders and derives `completed_at` from the
 latest history entry for the current completed status. The installed Nova Poshta module
 stores TTNs in the `novaposhta_cn_number` order field; the normalizer reads this field directly.
-`Сделка завершена` is displayed as `🔵 Сайт`; `Сделка завершена(Заказ по тел)` (and equivalent
-phone wording) is displayed as `🟠 Телефон`. Both retain the stable `opencart:order_id` sync key.
+`Сделка завершена` is displayed as `🔴 IBOX-SHOP`; `Сделка завершена(Заказ по тел)` (and equivalent
+phone wording) is displayed as `🔵 Телефон`. Both retain the stable `opencart:order_id` sync key.
+The stale-order safety window uses OpenCart's last-modified date, so an older completed order
+becomes eligible when a TTN is added later, while its reporting day remains the completion date.
 Rejected completion statuses are logged as aggregate status names without customer data,
 which makes a zero-result OpenCart run diagnosable from GitHub Actions.
 

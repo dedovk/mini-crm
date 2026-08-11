@@ -52,8 +52,8 @@ def test_clean_customer_display_removes_serialized_rozetka_city() -> None:
 def test_source_icons_are_stable_and_reversible() -> None:
     assert source_display("prom") == "🟣 Prom"
     assert source_display("Rozetka") == "🟢 Rozetka"
-    assert source_display("opencart") == "🔵 Сайт"
-    assert source_display("phone") == "🟠 Телефон"
+    assert source_display("opencart") == "🔴 IBOX-SHOP"
+    assert source_display("phone") == "🔵 Телефон"
     assert source_key("🟢 Rozetka") == "rozetka"
-    assert source_key("🔵 Сайт") == "opencart"
-    assert source_key("🟠 Телефон") == "opencart"
+    assert source_key("🔴 IBOX-SHOP") == "opencart"
+    assert source_key("🔵 Телефон") == "opencart"

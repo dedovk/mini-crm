@@ -34,6 +34,7 @@ class Order:
     source_status: str = "Виконано"
     items: list[OrderItem] = field(default_factory=list)
     advertising_cost: Decimal = Decimal(0)
+    updated_at: datetime | None = None
 
     @property
     def sync_key(self) -> str:

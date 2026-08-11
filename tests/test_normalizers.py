@@ -227,6 +227,7 @@ def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
             "order_id": "501",
             "order_status": "Виконано",
             "date_added": "2026-08-01 12:00:00",
+            "date_modified": "2026-08-05 09:30:00",
             "completed_at": "2026-08-03 14:25:00",
             "firstname": "Клієнт",
             "lastname": "Тестовий",
@@ -253,6 +254,7 @@ def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
     assert order.payment_method == "смешанная"
     assert order.items[0].product_code == "10"
     assert order.completed_at.strftime("%d.%m.%Y %H:%M") == "03.08.2026 14:25"
+    assert order.updated_at and order.updated_at.strftime("%d.%m.%Y %H:%M") == "05.08.2026 09:30"
 
 
 def test_opencart_completion_accepts_boolean_text_and_localized_statuses() -> None:

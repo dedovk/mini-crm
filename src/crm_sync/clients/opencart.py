@@ -48,6 +48,8 @@ class OpenCartClient:
         raw_count = 0
         without_tracking = 0
         without_items = 0
+        without_tracking_ids: list[str] = []
+        without_item_ids: list[str] = []
         not_completed = 0
         rejected_statuses: Counter[str] = Counter()
         offset = 0
@@ -91,9 +93,11 @@ class OpenCartClient:
                     continue
                 if not order.tracking_number:
                     without_tracking += 1
+                    without_tracking_ids.append(order.external_id)
                     continue
                 if not order.items:
                     without_items += 1
+                    without_item_ids.append(order.external_id)
                     continue
                 orders.append(order)
             if len(raw_orders) < limit:
@@ -108,6 +112,10 @@ class OpenCartClient:
         )
         if rejected_statuses:
             LOGGER.warning("OpenCart rejected completion statuses: %s", dict(rejected_statuses))
+        if without_tracking_ids:
+            LOGGER.warning("OpenCart orders skipped without TTN: %s", without_tracking_ids[:20])
+        if without_item_ids:
+            LOGGER.warning("OpenCart orders skipped without products: %s", without_item_ids[:20])
         return orders
 
     @staticmethod
@@ -157,10 +165,11 @@ class OpenCartClient:
             part for part in (str(raw.get("lastname", "")), str(raw.get("firstname", ""))) if part
         )
         created_at = parse_datetime(first_value(raw, "date_added", "created_at"), self.timezone)
-        exact_completed_at = parse_optional_datetime(first_value(raw, "completed_at"), self.timezone)
-        completed_at = exact_completed_at or parse_optional_datetime(
+        updated_at = parse_optional_datetime(
             first_value(raw, "date_modified", "changed", "updated_at"), self.timezone
-        ) or created_at
+        )
+        exact_completed_at = parse_optional_datetime(first_value(raw, "completed_at"), self.timezone)
+        completed_at = exact_completed_at or updated_at or created_at
         return Order(
             source=self.source,
             external_id=str(first_value(raw, "order_id", "id")),
@@ -186,4 +195,5 @@ class OpenCartClient:
             channel=self._channel(raw),
             completion_is_exact=exact_completed_at is not None,
             items=items,
+            updated_at=updated_at,
         )

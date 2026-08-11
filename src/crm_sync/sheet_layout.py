@@ -53,9 +53,9 @@ EXCEL_EPOCH = date(1899, 12, 30)
 SOURCE_LABELS = {
     "prom": "🟣 Prom",
     "rozetka": "🟢 Rozetka",
-    "opencart": "🔵 Сайт",
-    "site": "🔵 Сайт",
-    "сайт": "🔵 Сайт",
+    "opencart": "🔴 IBOX-SHOP",
+    "site": "🔴 IBOX-SHOP",
+    "сайт": "🔴 IBOX-SHOP",
 }
 
 
@@ -68,6 +68,8 @@ def source_key(value: Any) -> str:
         "сайт": "opencart",
         "site": "opencart",
         "opencart": "opencart",
+        "ibox-shop": "opencart",
+        "ibox shop": "opencart",
         "phone": "opencart",
         "телефон": "opencart",
     }
@@ -77,7 +79,7 @@ def source_key(value: Any) -> str:
 def source_display(value: Any) -> str:
     raw = str(value or "").strip()
     if raw.casefold() in {"phone", "телефон"} or "телефон" in raw.casefold():
-        return "🟠 Телефон"
+        return "🔵 Телефон"
     key = source_key(value)
     if not key:
         return ""
