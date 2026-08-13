@@ -266,6 +266,19 @@ class GoogleSheetsGateway:
         row_count = self.worksheet.row_count
         requests: list[dict[str, Any]] = [
             {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 4,
+                    },
+                    "cell": {"userEnteredFormat": {"textFormat": {"fontSize": 8}}},
+                    "fields": "userEnteredFormat.textFormat.fontSize",
+                }
+            },
+            {
                 "updateSheetProperties": {
                     "properties": {
                         "sheetId": sheet_id,

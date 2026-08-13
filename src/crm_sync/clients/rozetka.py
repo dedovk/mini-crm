@@ -473,6 +473,8 @@ class RozetkaClient:
             quantity = decimal_value(first_value(purchase, "quantity", default=1), Decimal(1))
             unit_price = decimal_value(first_value(purchase, "price_with_discount", "price"))
             line_total = decimal_value(first_value(purchase, "cost_with_discount", "cost"), quantity * unit_price)
+            if quantity > 0 and line_total > 0 and unit_price <= 1 and line_total / quantity > 1:
+                unit_price = line_total / quantity
             items.append(
                 OrderItem(
                     name=str(first_value(purchase, "item_name", default=first_value(item, "name", "name_ua"))),

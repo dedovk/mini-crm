@@ -257,6 +257,35 @@ def test_prom_normalizer_calculates_installment_commission_from_parts_count() ->
     assert order.installment_commission == Decimal("164.61")
 
 
+def test_prom_normalizer_recovers_unit_price_and_nested_prepayment_note() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+    )
+    order = client._normalize(
+        {
+            "id": 421221060,
+            "status": "delivered",
+            "date_created": "2026-08-13 12:18:00",
+            "full_price": 4449,
+            "payment_option": {"name": "Наложенный платеж"},
+            "seller_data": {"manager_comment": "Предоплата 1000 грн."},
+            "products": [
+                {
+                    "name": "Крісло",
+                    "sku": "KR65-GR-5P",
+                    "quantity": 1,
+                    "price": 1,
+                    "total_price": 4449,
+                }
+            ],
+        }
+    )
+
+    assert order.items[0].unit_price == Decimal("4449")
+    assert order.items[0].line_total == Decimal("4449")
+    assert order.payment_method == "смешанная"
+
+
 def test_rozetka_normalizer_detects_nested_installment_payment() -> None:
     client = RozetkaClient(
         HttpClient(max_retries=0),

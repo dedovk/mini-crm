@@ -48,6 +48,29 @@ def _find_named_value(value: Any, names: set[str]) -> Any:
     return None
 
 
+def _collect_note_text(value: Any) -> list[str]:
+    result: list[str] = []
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_name = str(key).casefold()
+            if any(marker in key_name for marker in ("note", "comment", "remark")):
+                if isinstance(nested, str) and nested.strip():
+                    result.append(nested.strip())
+                elif isinstance(nested, list):
+                    result.extend(
+                        str(item.get("comment", item)).strip()
+                        if isinstance(item, dict)
+                        else str(item).strip()
+                        for item in nested
+                        if str(item).strip()
+                    )
+            result.extend(_collect_note_text(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            result.extend(_collect_note_text(nested))
+    return result
+
+
 def _installment_cost(raw: dict[str, Any], payment_text: str, total: Decimal) -> Decimal:
     explicit = _find_named_value(
         raw,
@@ -210,8 +233,15 @@ class PromClient:
             if not isinstance(product, dict):
                 continue
             quantity = decimal_value(first_value(product, "quantity", "count", default=1), Decimal(1))
-            unit_price = decimal_value(first_value(product, "price", "unit_price"))
-            line_total = decimal_value(first_value(product, "total_price", "total", "sum"), quantity * unit_price)
+            unit_price = decimal_value(
+                first_value(product, "price_with_discount", "price", "unit_price", "final_price")
+            )
+            line_total = decimal_value(
+                first_value(product, "total_price", "total", "sum", "line_total"),
+                quantity * unit_price,
+            )
+            if quantity > 0 and line_total > 0 and unit_price <= 1 and line_total / quantity > 1:
+                unit_price = line_total / quantity
             items.append(
                 OrderItem(
                     name=str(first_value(product, "name", "title", "product_name")),
@@ -222,14 +252,8 @@ class PromClient:
                 )
             )
 
-        note = " | ".join(
-            str(value).strip()
-            for value in (
-                first_value(raw, "client_notes", "client_note"),
-                first_value(raw, "seller_notes", "seller_note", "notes", "comment"),
-            )
-            if value
-        )
+        note_parts = _collect_note_text(raw)
+        note = " | ".join(dict.fromkeys(note_parts))
         delivery = next(
             (
                 raw.get(key)
