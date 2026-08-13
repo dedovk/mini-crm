@@ -155,6 +155,50 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     assert updates["W5"] > 0
 
 
+def test_refresh_order_details_repairs_text_unit_price_without_product_code() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:421221060"
+    row[COLUMNS.quantity - 1] = 1
+    row[COLUMNS.unit_price - 1] = "'1"
+    row[COLUMNS.line_total - 1] = 4449
+    row[COLUMNS.markup - 1] = "#VALUE!"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 4
+    order = Order(
+        source="prom",
+        external_id="421221060",
+        created_at=datetime(2026, 8, 13, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 13, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451510462545",
+        total=Decimal(4449),
+        payment_method="наложка",
+        note="",
+        sender="наш",
+        items=[
+            OrderItem(
+                name="Product",
+                product_code="",
+                quantity=Decimal(1),
+                unit_price=Decimal(1),
+                line_total=Decimal(4449),
+            )
+        ],
+    )
+
+    gateway.refresh_order_details([order])
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert updates["L5"] == 4449
+    assert updates["R5"] == "=(L5-Q5)*K5"
+
+
 def test_completion_observation_backfills_first_seen_date_and_status() -> None:
     rows = [[""] * LAST_COLUMN for _ in range(5)]
     row = rows[4]

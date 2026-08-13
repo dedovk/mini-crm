@@ -19,6 +19,7 @@ from crm_sync.models import (
 )
 
 LOGGER = logging.getLogger(__name__)
+REPAIRABLE_PREFLIGHT_ERROR_PREFIXES = ("formula error at ",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +161,9 @@ class SyncService:
         now = self.clock()
         self.sheets.ensure_schema(apply_changes=False)
         sheet_integrity = self.sheets.validate_integrity()
-        if not sheet_integrity.ok:
+        if not sheet_integrity.ok and (
+            self.dry_run or not _only_repairable_preflight_errors(sheet_integrity.errors)
+        ):
             raise IntegrityError(sheet_integrity)
         existing_keys = self.sheets.read_existing_sync_keys()
         source_batch = self._fetch_orders(now - timedelta(days=self.lookback_days))
@@ -175,6 +178,10 @@ class SyncService:
         if not incoming_integrity.ok:
             raise IntegrityError(incoming_integrity)
         warnings.extend(sheet_integrity.warnings)
+        if sheet_integrity.errors:
+            warnings.append(
+                "Sheet contains formula errors before repair; production sync will try to refresh formulas and values."
+            )
         warnings.extend(incoming_integrity.warnings)
 
         expenses, expense_warning = self._fetch_expenses(now)
@@ -462,3 +469,9 @@ class SyncService:
     def _raise_for_source_failures(result: SyncResult) -> None:
         if result.failed_sources:
             raise SourceSyncError(result)
+
+
+def _only_repairable_preflight_errors(errors: tuple[str, ...]) -> bool:
+    return bool(errors) and all(
+        error.startswith(REPAIRABLE_PREFLIGHT_ERROR_PREFIXES) for error in errors
+    )

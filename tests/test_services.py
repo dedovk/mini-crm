@@ -72,6 +72,25 @@ class ProductionSheetsStub(SheetsStub):
         return SyncHealthState()
 
 
+class RepairableFormulaErrorSheetsStub(ProductionSheetsStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.validate_calls = 0
+        self.refresh_calls = 0
+
+    def validate_integrity(self):
+        from crm_sync.integrity import IntegrityReport
+
+        self.validate_calls += 1
+        if self.validate_calls == 1:
+            return IntegrityReport(errors=("formula error at R5: #VALUE!",))
+        return IntegrityReport()
+
+    def refresh_order_details(self, orders) -> int:
+        self.refresh_calls += 1
+        return 2
+
+
 class NovaPoshtaStub:
     def get_statuses(self, tracking_numbers: list[str]) -> dict[str, str]:
         assert tracking_numbers == []
@@ -312,6 +331,28 @@ def test_production_run_performs_preflight_postflight_and_health_update() -> Non
     assert sheets.schema_modes == [False, True]
     assert sheets.health_calls == [[]]
     assert result.health.consecutive_failures == 0
+
+
+def test_production_run_repairs_formula_errors_before_fatal_postflight() -> None:
+    sheets = RepairableFormulaErrorSheetsStub()
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[SuccessfulSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    result = service.run()
+
+    assert sheets.validate_calls == 2
+    assert sheets.refresh_calls == 1
+    assert result.refreshed_cells == 2
+    assert result.warnings == (
+        "Sheet contains formula errors before repair; production sync will try to refresh formulas and values.",
+    )
 
 
 def test_production_run_advances_daily_layout_without_new_orders() -> None:

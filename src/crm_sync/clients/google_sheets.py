@@ -855,16 +855,17 @@ class GoogleSheetsGateway:
                     current = str(row[COLUMNS.customer - 1]).strip() if len(row) >= COLUMNS.customer else ""
                     if current != customer:
                         updates.append({"range": f"F{row_number}", "values": [[customer]]})
-                if order and item_index < len(order.items) and order.items[item_index].product_code:
+                if order and item_index < len(order.items):
                     item = order.items[item_index]
-                    product_code = item.product_code
-                    current = (
-                        str(row[COLUMNS.product_code - 1]).strip()
-                        if len(row) >= COLUMNS.product_code
-                        else ""
-                    )
-                    if current != product_code:
-                        updates.append({"range": f"I{row_number}", "values": [[product_code]]})
+                    if item.product_code:
+                        product_code = item.product_code
+                        current = (
+                            str(row[COLUMNS.product_code - 1]).strip()
+                            if len(row) >= COLUMNS.product_code
+                            else ""
+                        )
+                        if current != product_code:
+                            updates.append({"range": f"I{row_number}", "values": [[product_code]]})
                     numeric_updates = {
                         COLUMNS.quantity: item.quantity,
                         COLUMNS.unit_price: item.unit_price,
