@@ -64,10 +64,20 @@ def _collect_note_text(value: Any) -> list[str]:
                         for item in nested
                         if str(item).strip()
                     )
+            if isinstance(nested, str) and any(
+                marker in nested.casefold()
+                for marker in ("предоплат", "передоплат", "пред ", "перед ", "аванс", "задат")
+            ):
+                result.append(nested.strip())
             result.extend(_collect_note_text(nested))
     elif isinstance(value, list):
         for nested in value:
             result.extend(_collect_note_text(nested))
+    elif isinstance(value, str) and any(
+        marker in value.casefold()
+        for marker in ("предоплат", "передоплат", "пред ", "перед ", "аванс", "задат")
+    ):
+        result.append(value.strip())
     return result
 
 

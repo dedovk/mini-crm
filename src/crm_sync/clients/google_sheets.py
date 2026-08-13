@@ -870,6 +870,21 @@ class GoogleSheetsGateway:
                         COLUMNS.unit_price: item.unit_price,
                         COLUMNS.line_total: item.line_total,
                     }
+                    existing_quantity = decimal_value(
+                        row[COLUMNS.quantity - 1] if len(row) >= COLUMNS.quantity else ""
+                    )
+                    existing_line_total = decimal_value(
+                        row[COLUMNS.line_total - 1] if len(row) >= COLUMNS.line_total else ""
+                    )
+                    # Some historical Prom payloads exposed price=1 while the
+                    # line total was correct. Repair the source value from the
+                    # already trusted line total until the next full rebuild.
+                    if (
+                        numeric_updates[COLUMNS.unit_price] <= 1
+                        and existing_quantity > 0
+                        and existing_line_total > 1
+                    ):
+                        numeric_updates[COLUMNS.unit_price] = existing_line_total / existing_quantity
                     for column, expected in numeric_updates.items():
                         current = row[column - 1] if len(row) >= column else ""
                         if decimal_value(current) != expected:
