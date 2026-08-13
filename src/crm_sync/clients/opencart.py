@@ -191,7 +191,8 @@ class OpenCartClient:
             total=decimal_value(first_value(raw, "total")),
             payment_method=classify_payment(payment_text, note),
             note=note,
-            sender=str(first_value(raw, "sender", "store_name")),
+            # OpenCart store labels are installation-specific; CRM uses one stable sender.
+            sender="наш",
             channel=self._channel(raw),
             completion_is_exact=exact_completed_at is not None,
             items=items,

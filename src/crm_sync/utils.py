@@ -193,19 +193,29 @@ def has_prepayment_request(note: str) -> bool:
 def classify_payment(raw_method: str, note: str) -> str:
     raw = f"{raw_method} {note}".casefold()
     has_prepayment = parse_prepayment(note) > 0 or has_prepayment_request(note)
-    if has_prepayment and any(word in raw for word in ("налож", "cod", "післяплат", "послеплат")):
+    if has_prepayment:
         return "смешанная"
+    if any(word in raw for word in ("зачет", "залік", "взаємозалік", "offset", "credit note")):
+        return "Зачет"
     if "част" in raw or "credit" in raw:
         return "оплата частями"
     if any(word in raw for word in ("счет", "рахун", "invoice", "bank transfer")):
         return "оплата на счет"
     if any(word in raw for word in ("налож", "cod", "cash on delivery", "післяплат", "послеплат")):
         return "наложка"
-    if any(word in raw for word in ("prom", "карт", "card", "liqpay", "wayforpay", "online")):
+    if any(
+        word in raw
+        for word in (
+            "prom", "карт", "card", "apple pay", "applepay", "google pay", "googlepay",
+            "visa", "mastercard", "liqpay", "wayforpay", "online", "онлайн",
+        )
+    ):
         return "пром оплата(оплата картой)"
-    if has_prepayment:
-        return "смешанная"
-    return raw_method.strip()
+    normalized = raw_method.strip()
+    return normalized if normalized in {
+        "пром оплата(оплата картой)", "оплата частями", "наложка",
+        "оплата на счет", "смешанная", "Зачет",
+    } else "наложка"
 
 
 def normalize_shipment_status(value: Any, status_code: Any = "") -> str:

@@ -113,3 +113,10 @@ def test_customer_display_keeps_city_surname_and_first_name() -> None:
 def test_decimal_value_parses_prom_currency_and_nested_amount() -> None:
     assert decimal_value("1\u00a0149 грн") == Decimal(1149)
     assert decimal_value({"amount": "69.30"}) == Decimal("69.30")
+
+
+def test_payment_methods_are_normalized_to_sheet_options() -> None:
+    assert classify_payment("Оплата при получении товара", "") == "наложка"
+    assert classify_payment("Apple Pay | paid", "") == "пром оплата(оплата картой)"
+    assert classify_payment("Зачет", "") == "Зачет"
+    assert classify_payment("Apple Pay", "Предоплата 200 грн") == "смешанная"

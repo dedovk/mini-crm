@@ -59,7 +59,7 @@ def test_collect_order_groups_writes_advertising_once_for_multi_item_order() -> 
 
     rows = groups.rows["prom:2"]
     assert groups.added_rows == 2
-    assert rows[0][COLUMNS.advertising - 1] == "ProSale: 10.00\nОплата частинами: 3.70"
+    assert rows[0][COLUMNS.advertising - 1] == "10.00\n3.70"
     assert rows[0][COLUMNS.advertising_base - 1] == 10
     assert rows[0][COLUMNS.installment_commission - 1] == 3.7
     assert rows[1][COLUMNS.advertising - 1] == ""

@@ -317,6 +317,7 @@ def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
         }
     )
     assert order.tracking_number == "20451234567890"
+    assert order.sender == "наш"
     assert order.sync_key == "opencart:501"
     assert order.payment_method == "смешанная"
     assert order.items[0].product_code == "10"

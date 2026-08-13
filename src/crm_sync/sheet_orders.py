@@ -32,8 +32,8 @@ def advertising_display(base: Decimal, installment: Decimal) -> Any:
     """Return a compact two-line display while numeric components stay hidden."""
     if installment > 0:
         return (
-            f"ProSale: {decimal_for_sheet(base):.2f}\n"
-            f"Оплата частинами: {decimal_for_sheet(installment):.2f}"
+            f"{decimal_for_sheet(base):.2f}\n"
+            f"{decimal_for_sheet(installment):.2f}"
         )
     return decimal_for_sheet(base) if base > 0 else ""
 

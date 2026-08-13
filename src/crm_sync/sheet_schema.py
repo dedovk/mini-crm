@@ -44,6 +44,7 @@ PAYMENT_OPTIONS = (
     "наложка",
     "оплата на счет",
     "смешанная",
+    "Зачет",
 )
 
 NOVA_POSHTA_STATUS_OPTIONS = (
