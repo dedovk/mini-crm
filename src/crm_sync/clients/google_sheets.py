@@ -153,10 +153,7 @@ class GoogleSheetsGateway:
             return
         values = self.worksheet.get_all_values(value_render_option="FORMULA")
         last_used_row = max(1, len(values))
-        url = (
-            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
-            f"?gid={self.worksheet.id}#gid={self.worksheet.id}&range=A{last_used_row}"
-        )
+        url = f"#gid={self.worksheet.id}&range=A{last_used_row}"
         self.worksheet.update(
             values=[[f'=HYPERLINK("{url}";"↓ До кінця")']],
             range_name="D1",

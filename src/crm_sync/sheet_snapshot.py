@@ -163,17 +163,11 @@ def _add_selection_links(
     sheet_id: int,
 ) -> None:
     def link(start_row: int, end_row: int, label: str) -> str:
-        url = (
-            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
-            f"?gid={sheet_id}#gid={sheet_id}&range=A{start_row}:T{end_row}"
-        )
+        url = f"#gid={sheet_id}&range=A{start_row}:T{end_row}"
         return f'=HYPERLINK("{url}";"{label}")'
 
     def cell_link(row_number: int, label: str) -> str:
-        url = (
-            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
-            f"?gid={sheet_id}#gid={sheet_id}&range=A{row_number}"
-        )
+        url = f"#gid={sheet_id}&range=A{row_number}"
         return f'=HYPERLINK("{url}";"{label}")'
 
     for index, row_number in enumerate(month_rows):
