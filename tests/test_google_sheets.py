@@ -437,6 +437,7 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     assert all("Виділити місяць" in row[2] for row in month_rows)
     assert all("Виділити день" in row[2] for row in day_rows)
     assert "↓ До кінця" in written[0][3]
+    assert "edit?gid=123#gid=123" in written[0][3]
     assert f"range=A{len(written)}" in written[0][3]
     report_indexes = [
         index
