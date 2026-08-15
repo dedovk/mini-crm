@@ -17,6 +17,7 @@ from crm_sync.models import (
     ShipmentUpdateResult,
     SyncHealthState,
 )
+from crm_sync.utils import extract_ttn, parse_prepayment
 
 LOGGER = logging.getLogger(__name__)
 REPAIRABLE_PREFLIGHT_ERROR_PREFIXES = ("formula error at ",)
@@ -193,11 +194,6 @@ class SyncService:
         if not self.dry_run:
             self.sheets.ensure_schema(apply_changes=True)
             refreshed += self.sheets.backfill_completion_state(observed_at=now)
-            completion_events = self.sheets.record_completion_observations(
-                fetched,
-                observed_at=now,
-            )
-            refreshed += self.sheets.refresh_order_details(fetched)
         pending_ttns = self.sheets.pending_tracking_numbers()
 
         new_order_cutoff = (now - timedelta(days=self.new_order_max_age_days)).date()
@@ -211,9 +207,24 @@ class SyncService:
                 new_order_cutoff.isoformat(),
             )
 
-        all_ttns = list(dict.fromkeys([*pending_ttns, *(order.tracking_number for order in unique_orders)]))
+        all_ttns = list(
+            dict.fromkeys([*pending_ttns, *(order.tracking_number for order in fetched)])
+        )
         statuses = self.nova_poshta.get_statuses(all_ttns)
         LOGGER.info("Nova Poshta returned %s shipment status(es)", len(statuses))
+        inferred_prepayments = self._apply_tracking_prepayments(fetched, statuses)
+        if inferred_prepayments:
+            LOGGER.info(
+                "Inferred prepayment from Nova Poshta COD for %s order(s)",
+                inferred_prepayments,
+            )
+
+        if not self.dry_run:
+            completion_events = self.sheets.record_completion_observations(
+                fetched,
+                observed_at=now,
+            )
+            refreshed += self.sheets.refresh_order_details(fetched)
 
         if self.dry_run:
             LOGGER.info(
@@ -387,6 +398,31 @@ class SyncService:
             run_keys.add(key)
             selected.append(order)
         return NewOrderSelection(tuple(selected), stale_count)
+
+    @staticmethod
+    def _apply_tracking_prepayments(
+        orders: list[Order], statuses: dict[str, ShipmentStatus]
+    ) -> int:
+        inferred_count = 0
+        for order in orders:
+            explicit = order.prepayment or parse_prepayment(order.note)
+            if explicit > 0:
+                order.prepayment = explicit
+                order.payment_method = "смешанная"
+                continue
+
+            tracking = extract_ttn(order.tracking_number)
+            shipment = statuses.get(tracking)
+            if not shipment or shipment.redelivery_sum <= 0:
+                continue
+            goods_total = sum((item.line_total for item in order.items), Decimal(0))
+            inferred = goods_total - shipment.redelivery_sum
+            if inferred <= 0:
+                continue
+            order.prepayment = inferred.quantize(Decimal("0.01"))
+            order.payment_method = "смешанная"
+            inferred_count += 1
+        return inferred_count
 
     @staticmethod
     def _build_audit_events(

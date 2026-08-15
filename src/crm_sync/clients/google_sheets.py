@@ -978,7 +978,7 @@ class GoogleSheetsGateway:
                         updates.append(
                             {"range": f"S{row_number}", "values": [[expected_advertising]]}
                         )
-                    prepayment = parse_prepayment(order.note)
+                    prepayment = order.prepayment or parse_prepayment(order.note)
                     current_prepayment = (
                         row[COLUMNS.prepayment - 1]
                         if len(row) >= COLUMNS.prepayment

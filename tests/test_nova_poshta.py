@@ -14,6 +14,7 @@ class StubHttpClient:
                     "Number": "20451234567890",
                     "Status": "Відправлення у дорозі",
                     "StatusCode": "5",
+                    "RedeliverySum": "3449.00",
                 }
             ],
         }
@@ -34,6 +35,7 @@ def test_nova_poshta_filters_invalid_tracking_values() -> None:
     assert http.documents == [{"DocumentNumber": "20451234567890"}]
     assert statuses["20451234567890"].status_code == "5"
     assert statuses["20451234567890"].status == "Прямує до покупця"
+    assert str(statuses["20451234567890"].redelivery_sum) == "3449.00"
 
 
 def test_nova_poshta_uses_fallback_for_blank_status() -> None:

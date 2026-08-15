@@ -167,7 +167,7 @@ def _new_order_rows(
     )
     if shipment_status and is_refused_shipment_status(shipment_status.status):
         return []
-    prepayment = parse_prepayment(order.note)
+    prepayment = order.prepayment or parse_prepayment(order.note)
     sender = order.sender.strip() or sender_default
     effective_day = order.completed_at.date() if order.completion_is_exact else observation_day
     rows: list[list[Any]] = []

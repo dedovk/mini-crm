@@ -97,6 +97,31 @@ def test_shipped_order_is_grouped_on_shipping_day_without_completion_marker() ->
     assert row[COLUMNS.order_status - 1] == "Відправлено"
 
 
+def test_explicit_order_prepayment_is_written_without_note_text() -> None:
+    order = Order(
+        source="prom",
+        external_id="prepaid",
+        created_at=datetime(2026, 8, 13, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 13, tzinfo=UTC),
+        customer_name="Покупець",
+        city="Київ",
+        phone="+380501234567",
+        tracking_number="20451510462545",
+        total=Decimal(4449),
+        payment_method="смешанная",
+        note="",
+        sender="наш",
+        prepayment=Decimal(1000),
+        items=[OrderItem("Товар", "SKU", Decimal(1), Decimal(4449), Decimal(4449))],
+    )
+
+    groups = collect_order_groups(
+        [], [order], {}, sender_default="наш", observation_day=date(2026, 8, 13)
+    )
+
+    assert groups.rows["prom:prepaid"][0][COLUMNS.prepayment - 1] == 1000
+
+
 def test_refused_existing_order_is_removed_from_groups() -> None:
     refused_row = [""] * LAST_COLUMN
     refused_row[COLUMNS.source - 1] = "prom"

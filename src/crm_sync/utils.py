@@ -178,16 +178,48 @@ def find_tracking_number(*values: Any) -> str:
 
 
 def parse_prepayment(note: str) -> Decimal:
-    if NEGATIVE_PREPAYMENT_RE.search(note or ""):
-        return Decimal(0)
-    text = note or ""
-    match = PREPAYMENT_AFTER_RE.search(text) or PREPAYMENT_BEFORE_RE.search(text)
-    return decimal_value(match.group("amount")) if match else Decimal(0)
+    # Marketplace histories can contain an old "без передоплати" entry and a
+    # newer positive seller note. Remove only negative phrases instead of
+    # rejecting the whole combined history.
+    text = NEGATIVE_PREPAYMENT_RE.sub("", note or "")
+    matches = sorted(
+        [*PREPAYMENT_AFTER_RE.finditer(text), *PREPAYMENT_BEFORE_RE.finditer(text)],
+        key=lambda match: match.start(),
+    )
+    if matches:
+        return decimal_value(matches[-1].group("amount"))
+    return Decimal(0)
 
 
 def has_prepayment_request(note: str) -> bool:
     text = note or ""
-    return not NEGATIVE_PREPAYMENT_RE.search(text) and bool(PREPAYMENT_MARKER_RE.search(text))
+    without_negative_statements = NEGATIVE_PREPAYMENT_RE.sub("", text)
+    return bool(PREPAYMENT_MARKER_RE.search(without_negative_statements))
+
+
+def collect_note_text(value: Any) -> list[str]:
+    """Collect note-like API text, including undocumented nested seller comments."""
+    result: list[str] = []
+
+    def visit(current: Any, *, note_context: bool = False) -> None:
+        if isinstance(current, dict):
+            for key, nested in current.items():
+                key_name = str(key).casefold()
+                nested_note_context = note_context or any(
+                    marker in key_name
+                    for marker in ("note", "comment", "remark", "примітк", "примеч")
+                )
+                visit(nested, note_context=nested_note_context)
+        elif isinstance(current, (list, tuple)):
+            for nested in current:
+                visit(nested, note_context=note_context)
+        elif isinstance(current, str):
+            text = current.strip()
+            if text and (note_context or PREPAYMENT_MARKER_RE.search(text)):
+                result.append(text)
+
+    visit(value)
+    return list(dict.fromkeys(result))
 
 
 def classify_payment(raw_method: str, note: str) -> str:

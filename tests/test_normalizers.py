@@ -44,6 +44,7 @@ def test_rozetka_normalizer_creates_item_rows() -> None:
     assert order.sync_key == "rozetka:248888186"
     assert order.phone == "+380501234567"
     assert order.payment_method == "смешанная"
+    assert order.prepayment == Decimal(200)
     assert order.items[0].product_code == "10"
     assert order.completed_at.strftime("%d.%m.%Y %H:%M") == "02.08.2026 11:22"
     assert order.completion_is_exact is True
@@ -284,6 +285,7 @@ def test_prom_normalizer_recovers_unit_price_and_nested_prepayment_note() -> Non
     assert order.items[0].unit_price == Decimal("4449")
     assert order.items[0].line_total == Decimal("4449")
     assert order.payment_method == "смешанная"
+    assert order.prepayment == Decimal(1000)
 
 
 def test_rozetka_normalizer_detects_nested_installment_payment() -> None:
@@ -441,3 +443,48 @@ def test_rozetka_shipped_order_uses_status_change_date_and_comment() -> None:
     assert orders[0].source_status == "Відправлено"
     assert orders[0].completed_at.strftime("%d.%m.%Y %H:%M") == "10.08.2026 09:15"
     assert orders[0].note == "предо 400"
+
+
+class RozetkaDetailCommentStub:
+    def request_json(self, method: str, url: str, **kwargs):
+        if url.endswith("/orders/902000002"):
+            return {
+                "success": True,
+                "content": {
+                    "id": "902000002",
+                    "current_seller_comment": "Предоплата 700 грн.",
+                },
+            }
+        orders = []
+        if kwargs["params"]["types"] == 2:
+            orders = [
+                {
+                    "id": "902000002",
+                    "created": "2026-08-12 10:00:00",
+                    "changed": "2026-08-13 09:15:00",
+                    "status_data": {"name": "Відправлено"},
+                    "cost": "1200",
+                    "ttn": "RMP-123456780",
+                    "purchases": [
+                        {"item_id": "123", "item_name": "Товар", "quantity": 1, "price": 1200}
+                    ],
+                }
+            ]
+        return {"success": True, "content": {"orders": orders, "_meta": {"pageCount": 1}}}
+
+
+def test_rozetka_fetches_details_when_search_omits_seller_comment() -> None:
+    client = RozetkaClient(
+        RozetkaDetailCommentStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert len(orders) == 1
+    assert orders[0].prepayment == Decimal(700)
+    assert orders[0].payment_method == "смешанная"

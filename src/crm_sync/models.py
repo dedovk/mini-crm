@@ -33,6 +33,7 @@ class Order:
     completion_is_exact: bool = True
     source_status: str = "Виконано"
     items: list[OrderItem] = field(default_factory=list)
+    prepayment: Decimal = Decimal(0)
     advertising_cost: Decimal = Decimal(0)
     installment_commission: Decimal = Decimal(0)
     updated_at: datetime | None = None
@@ -56,6 +57,7 @@ class ShipmentStatus:
     tracking_number: str
     status: str
     status_code: str = ""
+    redelivery_sum: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from decimal import Decimal
 
 from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.models import ShipmentStatus
-from crm_sync.utils import extract_ttn, first_value, normalize_shipment_status
+from crm_sync.utils import decimal_value, extract_ttn, first_value, normalize_shipment_status
 
 LOGGER = logging.getLogger(__name__)
 
@@ -58,5 +59,19 @@ class NovaPoshtaClient:
                     tracking_number=number,
                     status=status,
                     status_code=status_code,
+                    redelivery_sum=decimal_value(
+                        first_value(
+                            item,
+                            "RedeliverySum",
+                            "RedeliveryAmount",
+                            "AfterpaymentOnGoodsCost",
+                            default=Decimal(0),
+                        )
+                    ),
                 )
+        LOGGER.info(
+            "Nova Poshta tracking data contains COD amount for %s/%s shipment(s)",
+            sum(status.redelivery_sum > 0 for status in result.values()),
+            len(result),
+        )
         return result

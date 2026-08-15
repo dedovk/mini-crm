@@ -11,6 +11,7 @@ from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.models import Order, OrderExpenseTransaction, OrderItem
 from crm_sync.utils import (
     classify_payment,
+    collect_note_text,
     decimal_value,
     display_text,
     find_tracking_number,
@@ -19,6 +20,7 @@ from crm_sync.utils import (
     normalize_phone,
     parse_datetime,
     parse_optional_datetime,
+    parse_prepayment,
     person_name,
 )
 
@@ -180,9 +182,36 @@ class RozetkaClient:
                     source_status = self._eligible_source_status(raw)
                     if not source_status:
                         continue
+                    normalized_raw = raw
+                    # The search response commonly omits seller-only comments.
+                    # Fetch order details only when no note-like field is present,
+                    # keeping the normal polling request count small.
+                    if not collect_note_text(raw):
+                        order_id = str(first_value(raw, "id", "order_id")).strip()
+                        if order_id:
+                            try:
+                                detail_payload = self._request_authorized(
+                                    f"/orders/{order_id}",
+                                    params={
+                                        "expand": (
+                                            "user,delivery,purchases,status_data,payment_type_name,"
+                                            "payment_status,status_payment,credit_info,item_details"
+                                        )
+                                    },
+                                )
+                            except ApiError as exc:
+                                LOGGER.warning(
+                                    "Rozetka order %s details are unavailable; using search data: %s",
+                                    order_id,
+                                    exc,
+                                )
+                            else:
+                                detail = detail_payload.get("content")
+                                if isinstance(detail, dict):
+                                    normalized_raw = {**raw, **detail}
                     try:
                         order = self._normalize(
-                            raw,
+                            normalized_raw,
                             source_status=source_status,
                             observed_at=observed_at,
                         )
@@ -492,15 +521,7 @@ class RozetkaClient:
                 )
             )
 
-        seller_comments = raw.get("seller_comment") or []
-        comment_parts = [str(first_value(raw, "current_seller_comment", "comment")).strip()]
-        if isinstance(seller_comments, list):
-            comment_parts.extend(
-                str(entry.get("comment", "")).strip()
-                for entry in seller_comments
-                if isinstance(entry, dict)
-            )
-        note = " | ".join(dict.fromkeys(part for part in comment_parts if part))
+        note = " | ".join(collect_note_text(raw))
         user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
         delivery = raw.get("delivery") if isinstance(raw.get("delivery"), dict) else {}
         locality = delivery.get("locality") if isinstance(delivery.get("locality"), dict) else {}
@@ -561,4 +582,5 @@ class RozetkaClient:
             completion_is_exact=bool(completion_value),
             source_status=source_status,
             items=items,
+            prepayment=parse_prepayment(note),
         )

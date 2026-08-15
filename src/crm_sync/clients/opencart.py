@@ -11,12 +11,14 @@ from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.models import Order, OrderItem
 from crm_sync.utils import (
     classify_payment,
+    collect_note_text,
     decimal_value,
     find_tracking_number,
     first_value,
     normalize_phone,
     parse_datetime,
     parse_optional_datetime,
+    parse_prepayment,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -152,14 +154,7 @@ class OpenCartClient:
                     line_total=line_total,
                 )
             )
-        histories = raw.get("history_comments") or []
-        note = " | ".join(
-            dict.fromkeys(
-                part.strip()
-                for part in [str(first_value(raw, "comment", "notes")), *(str(v) for v in histories)]
-                if part.strip()
-            )
-        )
+        note = " | ".join(collect_note_text(raw))
         payment_text = str(first_value(raw, "payment_method", "payment_code"))
         full_name = " ".join(
             part for part in (str(raw.get("lastname", "")), str(raw.get("firstname", ""))) if part
@@ -196,5 +191,6 @@ class OpenCartClient:
             channel=self._channel(raw),
             completion_is_exact=exact_completed_at is not None,
             items=items,
+            prepayment=parse_prepayment(note),
             updated_at=updated_at,
         )

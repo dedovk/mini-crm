@@ -11,6 +11,7 @@ from crm_sync.models import Order, OrderItem
 from crm_sync.utils import (
     city_from_address,
     classify_payment,
+    collect_note_text,
     decimal_value,
     display_text,
     find_tracking_number,
@@ -18,6 +19,7 @@ from crm_sync.utils import (
     normalize_phone,
     parse_datetime,
     parse_optional_datetime,
+    parse_prepayment,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -46,39 +48,6 @@ def _find_named_value(value: Any, names: set[str]) -> Any:
             if found not in (None, ""):
                 return found
     return None
-
-
-def _collect_note_text(value: Any) -> list[str]:
-    result: list[str] = []
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            key_name = str(key).casefold()
-            if any(marker in key_name for marker in ("note", "comment", "remark")):
-                if isinstance(nested, str) and nested.strip():
-                    result.append(nested.strip())
-                elif isinstance(nested, list):
-                    result.extend(
-                        str(item.get("comment", item)).strip()
-                        if isinstance(item, dict)
-                        else str(item).strip()
-                        for item in nested
-                        if str(item).strip()
-                    )
-            if isinstance(nested, str) and any(
-                marker in nested.casefold()
-                for marker in ("предоплат", "передоплат", "пред ", "перед ", "аванс", "задат")
-            ):
-                result.append(nested.strip())
-            result.extend(_collect_note_text(nested))
-    elif isinstance(value, list):
-        for nested in value:
-            result.extend(_collect_note_text(nested))
-    elif isinstance(value, str) and any(
-        marker in value.casefold()
-        for marker in ("предоплат", "передоплат", "пред ", "перед ", "аванс", "задат")
-    ):
-        result.append(value.strip())
-    return result
 
 
 def _installment_cost(raw: dict[str, Any], payment_text: str, total: Decimal) -> Decimal:
@@ -262,7 +231,7 @@ class PromClient:
                 )
             )
 
-        note_parts = _collect_note_text(raw)
+        note_parts = collect_note_text(raw)
         note = " | ".join(dict.fromkeys(note_parts))
         delivery = next(
             (
@@ -342,6 +311,7 @@ class PromClient:
                 else "Виконано"
             ),
             items=items,
+            prepayment=parse_prepayment(note),
             advertising_cost=advertising_cost,
             installment_commission=installment_commission,
         )

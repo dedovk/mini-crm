@@ -4,6 +4,7 @@ import pytest
 
 from crm_sync.utils import (
     classify_payment,
+    collect_note_text,
     customer_display,
     decimal_value,
     extract_ttn,
@@ -63,6 +64,22 @@ def test_mixed_payment_from_prepayment_and_cod() -> None:
 
 def test_prepayment_marker_without_amount_still_marks_mixed_payment() -> None:
     assert classify_payment("Наложенный платеж", "клієнту запитали пред") == "смешанная"
+
+
+def test_positive_prepayment_after_old_negative_note_is_still_detected() -> None:
+    note = "без предоплаты | Предоплата 1000 грн."
+
+    assert parse_prepayment(note) == Decimal(1000)
+    assert classify_payment("Наложенный платеж", note) == "смешанная"
+
+
+def test_collect_note_text_reads_nested_marketplace_comments() -> None:
+    payload = {
+        "seller_data": {"manager_comment": "Предоплата 1000 грн."},
+        "seller_comment": [{"comment": "пред 500"}],
+    }
+
+    assert collect_note_text(payload) == ["Предоплата 1000 грн.", "пред 500"]
 
 
 @pytest.mark.parametrize(

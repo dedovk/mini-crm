@@ -3,7 +3,13 @@ from decimal import Decimal
 
 import pytest
 
-from crm_sync.models import Order, OrderItem, ShipmentUpdateResult, SyncHealthState
+from crm_sync.models import (
+    Order,
+    OrderItem,
+    ShipmentStatus,
+    ShipmentUpdateResult,
+    SyncHealthState,
+)
 from crm_sync.services import SourceSyncError, SyncService
 
 
@@ -93,7 +99,6 @@ class RepairableFormulaErrorSheetsStub(ProductionSheetsStub):
 
 class NovaPoshtaStub:
     def get_statuses(self, tracking_numbers: list[str]) -> dict[str, str]:
-        assert tracking_numbers == []
         return {}
 
 
@@ -311,6 +316,38 @@ def test_stale_unseen_completed_rozetka_order_is_not_inserted() -> None:
 
     assert selection.orders == ()
     assert selection.stale_count == 1
+
+
+def test_prepayment_is_inferred_from_nova_poshta_cod_amount() -> None:
+    order = Order(
+        source="prom",
+        external_id="421221060",
+        created_at=datetime(2026, 8, 13, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 13, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451510462545",
+        total=Decimal(4449),
+        payment_method="наложка",
+        note="",
+        sender="наш",
+        items=[OrderItem("Product", "KR65-GR-5P", Decimal(1), Decimal(4449), Decimal(4449))],
+    )
+    statuses = {
+        "20451510462545": ShipmentStatus(
+            tracking_number="20451510462545",
+            status="Прямує до покупця",
+            status_code="5",
+            redelivery_sum=Decimal(3449),
+        )
+    }
+
+    inferred = SyncService._apply_tracking_prepayments([order], statuses)
+
+    assert inferred == 1
+    assert order.prepayment == Decimal("1000.00")
+    assert order.payment_method == "смешанная"
 
 
 def test_recently_modified_opencart_order_is_selected_despite_old_completion() -> None:
