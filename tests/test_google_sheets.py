@@ -506,9 +506,12 @@ def test_end_navigation_link_is_refreshed_without_rebuilding_sheet() -> None:
 
     gateway._refresh_end_navigation_link()
 
-    assert worksheet.written_range == "D1"
-    assert worksheet.written_raw is False
-    assert 'HYPERLINK("#gid=123&range=A467"' in worksheet.written_values[0][0]
+    request = spreadsheet.requests[-1]["updateCells"]
+    assert request["range"]["startColumnIndex"] == 3
+    assert request["range"]["endColumnIndex"] == 4
+    cell = request["rows"][0]["values"][0]
+    assert cell["userEnteredValue"]["stringValue"] == "↓ До кінця"
+    assert cell["textFormatRuns"][0]["format"]["link"]["uri"] == "#gid=123&range=A467"
 
 
 def test_structural_backup_is_hidden_and_retains_only_three_latest_copies() -> None:

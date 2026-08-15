@@ -147,17 +147,46 @@ class GoogleSheetsGateway:
             ensure_sheet_audit_worksheet(self.spreadsheet)
             self._refresh_end_navigation_link()
 
-    def _refresh_end_navigation_link(self) -> None:
+    def _refresh_end_navigation_link(self, last_used_row: int | None = None) -> None:
         spreadsheet_id = str(getattr(self.spreadsheet, "id", "")).strip()
         if not spreadsheet_id:
             return
-        values = self.worksheet.get_all_values(value_render_option="FORMULA")
-        last_used_row = max(1, len(values))
+        if last_used_row is None:
+            values = self.worksheet.get_all_values(value_render_option="FORMULA")
+            last_used_row = max(1, len(values))
         url = f"#gid={self.worksheet.id}&range=A{last_used_row}"
-        self.worksheet.update(
-            values=[[f'=HYPERLINK("{url}";"↓ До кінця")']],
-            range_name="D1",
-            raw=False,
+        self.spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "updateCells": {
+                            "range": {
+                                "sheetId": self.worksheet.id,
+                                "startRowIndex": 0,
+                                "endRowIndex": 1,
+                                "startColumnIndex": 3,
+                                "endColumnIndex": 4,
+                            },
+                            "rows": [
+                                {
+                                    "values": [
+                                        {
+                                            "userEnteredValue": {"stringValue": "↓ До кінця"},
+                                            "textFormatRuns": [
+                                                {
+                                                    "startIndex": 0,
+                                                    "format": {"link": {"uri": url}},
+                                                }
+                                            ],
+                                        }
+                                    ]
+                                }
+                            ],
+                            "fields": "userEnteredValue,textFormatRuns",
+                        }
+                    }
+                ]
+            }
         )
 
     def validate_integrity(self) -> IntegrityReport:
@@ -1310,4 +1339,5 @@ class GoogleSheetsGateway:
         if snapshot.merge_requests:
             self.spreadsheet.batch_update({"requests": snapshot.merge_requests})
         self._apply_professional_formatting(last_used_row)
+        self._refresh_end_navigation_link(last_used_row)
         return order_groups.added_rows
