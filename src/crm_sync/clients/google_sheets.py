@@ -145,6 +145,23 @@ class GoogleSheetsGateway:
             )
             self._configure_validations_and_hidden_key()
             ensure_sheet_audit_worksheet(self.spreadsheet)
+            self._refresh_end_navigation_link()
+
+    def _refresh_end_navigation_link(self) -> None:
+        spreadsheet_id = str(getattr(self.spreadsheet, "id", "")).strip()
+        if not spreadsheet_id:
+            return
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        last_used_row = max(1, len(values))
+        url = (
+            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+            f"?gid={self.worksheet.id}#gid={self.worksheet.id}&range=A{last_used_row}"
+        )
+        self.worksheet.update(
+            values=[[f'=HYPERLINK("{url}";"↓ До кінця")']],
+            range_name="D1",
+            raw=False,
+        )
 
     def validate_integrity(self) -> IntegrityReport:
         values = self.worksheet.get_all_values(value_render_option="FORMATTED_VALUE")

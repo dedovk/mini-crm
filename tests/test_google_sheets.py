@@ -496,6 +496,21 @@ def test_professional_formatting_keeps_top_navigation_row_compact() -> None:
     assert row_heights[-1]["properties"]["pixelSize"] == 24
 
 
+def test_end_navigation_link_is_refreshed_without_rebuilding_sheet() -> None:
+    worksheet = LayoutWorksheet([["row"] for _ in range(467)])
+    spreadsheet = StubSpreadsheet()
+    spreadsheet.id = "spreadsheet-test"
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.spreadsheet = spreadsheet
+
+    gateway._refresh_end_navigation_link()
+
+    assert worksheet.written_range == "D1"
+    assert worksheet.written_raw is False
+    assert "edit?gid=123#gid=123&range=A467" in worksheet.written_values[0][0]
+
+
 def test_structural_backup_is_hidden_and_retains_only_three_latest_copies() -> None:
     gateway = object.__new__(GoogleSheetsGateway)
     gateway.worksheet = BackupWorksheet("БСК", 123)
