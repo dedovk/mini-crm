@@ -74,6 +74,16 @@ class StubSpreadsheet:
     def batch_update(self, payload) -> None:
         self.requests.extend(payload["requests"])
 
+    def fetch_sheet_metadata(self, fields):
+        return {
+            "sheets": [
+                {
+                    "properties": {"sheetId": LayoutWorksheet.id},
+                    "conditionalFormats": [],
+                }
+            ]
+        }
+
 
 class BackupWorksheet:
     def __init__(self, title: str, sheet_id: int) -> None:
@@ -426,7 +436,8 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     day_rows = [row for row in written if row[COLUMNS.row_type - 1] == "DAY"]
     assert all("Виділити місяць" in row[2] for row in month_rows)
     assert all("Виділити день" in row[2] for row in day_rows)
-    assert "⬇ До кінця таблиці" in written[0][3]
+    assert "↓ До кінця" in written[0][3]
+    assert f"range=A{len(written)}" in written[0][3]
     report_indexes = [
         index
         for index, row in enumerate(written)
@@ -449,6 +460,39 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
         f"A{len(written) + 1}:{LAST_COLUMN_LETTER}{worksheet.row_count}"
     ]
     assert added == 1
+
+
+def test_professional_formatting_keeps_top_navigation_row_compact() -> None:
+    rows = [[""] * LAST_COLUMN]
+    rows[0][COLUMNS.row_type - 1] = "MONTH"
+    worksheet = LayoutWorksheet(rows)
+    spreadsheet = StubSpreadsheet()
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.spreadsheet = spreadsheet
+    gateway.header_row = 4
+
+    gateway._apply_professional_formatting(1)
+
+    top_row_formats = [
+        request["repeatCell"]
+        for request in spreadsheet.requests
+        if "repeatCell" in request
+        and request["repeatCell"]["range"].get("startRowIndex") == 0
+        and request["repeatCell"]["range"].get("endRowIndex") == 1
+        and request["repeatCell"]["range"].get("startColumnIndex") == 0
+        and request["repeatCell"]["range"].get("endColumnIndex") == 4
+    ]
+    assert top_row_formats[-1]["cell"]["userEnteredFormat"]["textFormat"]["fontSize"] == 8
+    row_heights = [
+        request["updateDimensionProperties"]
+        for request in spreadsheet.requests
+        if "updateDimensionProperties" in request
+        and request["updateDimensionProperties"]["range"].get("dimension") == "ROWS"
+        and request["updateDimensionProperties"]["range"].get("startIndex") == 0
+        and request["updateDimensionProperties"]["range"].get("endIndex") == 1
+    ]
+    assert row_heights[-1]["properties"]["pixelSize"] == 24
 
 
 def test_structural_backup_is_hidden_and_retains_only_three_latest_copies() -> None:

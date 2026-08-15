@@ -169,6 +169,13 @@ def _add_selection_links(
         )
         return f'=HYPERLINK("{url}";"{label}")'
 
+    def cell_link(row_number: int, label: str) -> str:
+        url = (
+            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+            f"#gid={sheet_id}&range=A{row_number}"
+        )
+        return f'=HYPERLINK("{url}";"{label}")'
+
     for index, row_number in enumerate(month_rows):
         end = month_rows[index + 1] - 1 if index + 1 < len(month_rows) else len(rows)
         rows[row_number - 1][2] = link(row_number, end, "Виділити місяць")
@@ -177,7 +184,7 @@ def _add_selection_links(
         next_start = next((start for start in section_starts if start > row_number), len(rows) + 1)
         rows[row_number - 1][2] = link(row_number, next_start - 1, "Виділити день")
     if rows and day_rows:
-        rows[0][3] = link(day_rows[-1], len(rows), "⬇ До кінця таблиці")
+        rows[0][3] = cell_link(len(rows), "↓ До кінця")
 
 
 def _merge_request(

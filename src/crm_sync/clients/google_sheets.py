@@ -622,6 +622,46 @@ class GoogleSheetsGateway:
             for index in reversed(range(conditional_count))
         )
         requests.extend(self._conditional_format_requests(row_count))
+        # The month-row style is applied after the base font and would otherwise
+        # enlarge A1:D1 back to 11 pt. Keep the compact navigation row last so it
+        # always wins regardless of the month formatting above.
+        requests.extend(
+            [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 0,
+                            "endRowIndex": 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 4,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "textFormat": {"fontSize": 8},
+                                "wrapStrategy": "WRAP",
+                            }
+                        },
+                        "fields": (
+                            "userEnteredFormat.textFormat.fontSize,"
+                            "userEnteredFormat.wrapStrategy"
+                        ),
+                    }
+                },
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": 0,
+                            "endIndex": 1,
+                        },
+                        "properties": {"pixelSize": 24},
+                        "fields": "pixelSize",
+                    }
+                },
+            ]
+        )
         self.spreadsheet.batch_update({"requests": requests})
 
     def _conditional_format_requests(self, row_count: int) -> list[dict[str, Any]]:
