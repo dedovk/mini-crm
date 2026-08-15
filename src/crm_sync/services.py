@@ -374,10 +374,6 @@ class SyncService:
             key = order.sync_key.casefold()
             if key in existing_keys or key in run_keys:
                 continue
-            if order.source.casefold() == "rozetka" and order.is_completed:
-                # New Rozetka orders enter the CRM on "Відправлено". Completed
-                # orders remain in the fetch set only to refresh existing rows.
-                continue
             effective_day = (
                 order.updated_at.date()
                 if order.source.casefold() == "opencart" and order.updated_at
