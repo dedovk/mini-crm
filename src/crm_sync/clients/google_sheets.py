@@ -154,7 +154,10 @@ class GoogleSheetsGateway:
         if last_used_row is None:
             values = self.worksheet.get_all_values(value_render_option="FORMULA")
             last_used_row = max(1, len(values))
-        url = f"#gid={self.worksheet.id}&range=A{last_used_row}"
+        url = (
+            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+            f"?gid={self.worksheet.id}#gid={self.worksheet.id}&range=A{last_used_row}"
+        )
         self.spreadsheet.batch_update(
             {
                 "requests": [
@@ -175,7 +178,18 @@ class GoogleSheetsGateway:
                                             "textFormatRuns": [
                                                 {
                                                     "startIndex": 0,
-                                                    "format": {"link": {"uri": url}},
+                                                    "format": {
+                                                        "link": {"uri": url},
+                                                        "bold": True,
+                                                        "fontSize": 8,
+                                                        "foregroundColorStyle": {
+                                                            "rgbColor": {
+                                                                "red": 1,
+                                                                "green": 1,
+                                                                "blue": 1,
+                                                            }
+                                                        },
+                                                    },
                                                 }
                                             ],
                                         }

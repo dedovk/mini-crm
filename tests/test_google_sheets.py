@@ -511,7 +511,16 @@ def test_end_navigation_link_is_refreshed_without_rebuilding_sheet() -> None:
     assert request["range"]["endColumnIndex"] == 4
     cell = request["rows"][0]["values"][0]
     assert cell["userEnteredValue"]["stringValue"] == "↓ До кінця"
-    assert cell["textFormatRuns"][0]["format"]["link"]["uri"] == "#gid=123&range=A467"
+    link_format = cell["textFormatRuns"][0]["format"]
+    assert link_format["link"]["uri"] == (
+        "https://docs.google.com/spreadsheets/d/spreadsheet-test/edit"
+        "?gid=123#gid=123&range=A467"
+    )
+    assert link_format["foregroundColorStyle"]["rgbColor"] == {
+        "red": 1,
+        "green": 1,
+        "blue": 1,
+    }
 
 
 def test_structural_backup_is_hidden_and_retains_only_three_latest_copies() -> None:
