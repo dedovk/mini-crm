@@ -210,8 +210,20 @@ class SyncService:
         all_ttns = list(
             dict.fromkeys([*pending_ttns, *(order.tracking_number for order in fetched)])
         )
-        statuses = self.nova_poshta.get_statuses(all_ttns)
-        LOGGER.info("Nova Poshta returned %s shipment status(es)", len(statuses))
+        nova_poshta_failed = False
+        try:
+            statuses = self.nova_poshta.get_statuses(all_ttns)
+        except Exception as exc:  # noqa: BLE001 - optional integration boundary
+            nova_poshta_failed = True
+            statuses = {}
+            warning = (
+                "nova-poshta tracking is unavailable; existing shipment statuses "
+                f"were preserved: {exc}"
+            )
+            warnings.append(warning)
+            LOGGER.warning(warning)
+        else:
+            LOGGER.info("Nova Poshta returned %s shipment status(es)", len(statuses))
         inferred_prepayments = self._apply_tracking_prepayments(fetched, statuses)
         if inferred_prepayments:
             LOGGER.info(
@@ -252,7 +264,14 @@ class SyncService:
         latest_layout_day = self.sheets.latest_layout_day()
         layout_advanced = latest_layout_day is None or latest_layout_day < now.date()
         backup_created = ""
-        if unique_orders or layout_advanced or refused_orders_present or cancelled_existing:
+        details_changed = refreshed > 0
+        if (
+            unique_orders
+            or layout_advanced
+            or refused_orders_present
+            or cancelled_existing
+            or details_changed
+        ):
             backup_created = self.sheets.create_backup(created_at=now)
             LOGGER.info("Created Google Sheets backup before structural rebuild: %s", backup_created)
         appended_rows = self.sheets.append_orders(
@@ -261,7 +280,12 @@ class SyncService:
             sender_default=self.sender_default,
             operational_day=now.date(),
             observed_at=now,
-            force_rebuild=layout_advanced or refused_orders_present or bool(cancelled_existing),
+            force_rebuild=(
+                layout_advanced
+                or refused_orders_present
+                or bool(cancelled_existing)
+                or details_changed
+            ),
             excluded_sync_keys=cancelled_existing,
         )
         expense_updates = 0
@@ -297,6 +321,8 @@ class SyncService:
             if warning not in warnings
         )
         failed_components = list(source_batch.failed_sources)
+        if nova_poshta_failed:
+            failed_components.append("nova-poshta")
         failed_components.extend(
             "rozetka-finance"
             for warning in warnings

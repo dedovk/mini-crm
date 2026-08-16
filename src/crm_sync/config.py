@@ -31,10 +31,18 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable or reject ambiguous values."""
     raw = _env(name)
     if not raw:
         return default
-    return raw.casefold() in {"1", "true", "yes", "on"}
+    normalized = raw.casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(
+        f"{name} must be one of: 1, true, yes, on, 0, false, no, off"
+    )
 
 
 @dataclass(frozen=True, slots=True)

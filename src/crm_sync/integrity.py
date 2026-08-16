@@ -27,6 +27,10 @@ def validate_incoming_orders(orders: list[Order]) -> IntegrityReport:
     warnings: list[str] = []
     seen: set[str] = set()
     for order in orders:
+        if not order.source.strip():
+            errors.append("order source is empty")
+        if not order.external_id.strip():
+            errors.append(f"{order.source or 'unknown'}: external order ID is empty")
         key = order.sync_key.casefold()
         if key in seen:
             warnings.append(f"API returned duplicate order {order.sync_key}; duplicate will be ignored")
@@ -37,6 +41,14 @@ def validate_incoming_orders(orders: list[Order]) -> IntegrityReport:
             continue
         if order.total < Decimal(0):
             errors.append(f"{order.sync_key}: order total is negative")
+        if order.prepayment < Decimal(0):
+            errors.append(f"{order.sync_key}: prepayment is negative")
+        if order.prepayment > order.total:
+            errors.append(f"{order.sync_key}: prepayment exceeds order total")
+        if order.advertising_cost < Decimal(0):
+            errors.append(f"{order.sync_key}: advertising cost is negative")
+        if order.installment_commission < Decimal(0):
+            errors.append(f"{order.sync_key}: installment commission is negative")
         if not order.tracking_number.strip():
             errors.append(f"{order.sync_key}: tracking number is empty")
         for index, item in enumerate(order.items, start=1):

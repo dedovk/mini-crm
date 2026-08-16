@@ -45,3 +45,21 @@ def test_incoming_integrity_warns_about_inconsistent_line_total() -> None:
 
     assert report.ok
     assert "price × quantity" in report.warnings[0]
+
+
+def test_incoming_integrity_rejects_invalid_financial_fields_and_identity() -> None:
+    order = make_order()
+    order.source = ""
+    order.external_id = ""
+    order.prepayment = Decimal(101)
+    order.advertising_cost = Decimal(-1)
+    order.installment_commission = Decimal(-2)
+
+    report = validate_incoming_orders([order])
+
+    assert not report.ok
+    assert any("source is empty" in error for error in report.errors)
+    assert any("external order ID is empty" in error for error in report.errors)
+    assert any("prepayment exceeds" in error for error in report.errors)
+    assert any("advertising cost is negative" in error for error in report.errors)
+    assert any("installment commission is negative" in error for error in report.errors)

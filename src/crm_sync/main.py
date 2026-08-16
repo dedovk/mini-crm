@@ -32,6 +32,7 @@ def build_service(settings: Settings) -> SyncService:
         worksheet_name=settings.google_worksheet_name,
         header_row=settings.google_header_row,
         sender_options=settings.sender_options,
+        timeout=settings.http_timeout,
     )
     rozetka = RozetkaClient(
         http,

@@ -39,3 +39,27 @@ def test_settings_reject_unknown_timezone(monkeypatch: pytest.MonkeyPatch) -> No
 
     with pytest.raises(ConfigurationError, match="APP_TIMEZONE is unknown"):
         Settings.from_env()
+
+
+@pytest.mark.parametrize("value", ["treu", "enabled", "2"])
+def test_settings_reject_ambiguous_dry_run_values(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    configure_required_environment(monkeypatch)
+    monkeypatch.setenv("DRY_RUN", value)
+
+    with pytest.raises(ConfigurationError, match="DRY_RUN must be one of"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("true", True), ("ON", True), ("0", False), ("No", False)],
+)
+def test_settings_parses_explicit_dry_run_values(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    configure_required_environment(monkeypatch)
+    monkeypatch.setenv("DRY_RUN", value)
+
+    assert Settings.from_env().dry_run is expected

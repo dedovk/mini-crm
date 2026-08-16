@@ -128,12 +128,23 @@ class RozetkaClient:
         token = self._authorization_token()
         if not token:
             raise ApiError("Rozetka authorization is not configured")
-        payload = self.http.request_json(
-            "GET",
-            f"{self.base_url}{path}",
-            headers={"Authorization": f"Bearer {token}"},
-            params=params,
-        )
+        try:
+            payload = self.http.request_json(
+                "GET",
+                f"{self.base_url}{path}",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+            )
+        except ApiError as exc:
+            if exc.status_code not in {401, 403} or not (self.username and self.password):
+                raise
+            self._active_token = self._login_token()
+            payload = self.http.request_json(
+                "GET",
+                f"{self.base_url}{path}",
+                headers={"Authorization": f"Bearer {self._active_token}"},
+                params=params,
+            )
         if isinstance(payload, dict) and payload.get("success"):
             return payload
         if self.username and self.password:
@@ -174,8 +185,12 @@ class RozetkaClient:
                         ),
                     },
                 )
-                content = payload.get("content") or {}
-                raw_orders = content.get("orders") or [] if isinstance(content, dict) else []
+                content = payload.get("content")
+                if not isinstance(content, dict):
+                    raise ApiError("Rozetka order search content must be an object")
+                raw_orders = content.get("orders")
+                if not isinstance(raw_orders, list):
+                    raise ApiError("Rozetka order search orders must be a list")
                 for raw in raw_orders:
                     if not isinstance(raw, dict):
                         continue
@@ -220,8 +235,15 @@ class RozetkaClient:
                         continue
                     if order.tracking_number and order.items:
                         orders_by_key[order.sync_key.casefold()] = order
-                meta = content.get("_meta") or {} if isinstance(content, dict) else {}
-                page_count = int(meta.get("pageCount") or page_number)
+                meta = content.get("_meta") or {}
+                if not isinstance(meta, dict):
+                    raise ApiError("Rozetka order search metadata must be an object")
+                try:
+                    page_count = int(meta.get("pageCount") or page_number)
+                except (TypeError, ValueError) as exc:
+                    raise ApiError("Rozetka order search pageCount must be an integer") from exc
+                if page_count < page_number or page_count > 10_000:
+                    raise ApiError(f"Rozetka order search returned invalid pageCount={page_count}")
                 if page_number >= page_count:
                     break
                 page_number += 1

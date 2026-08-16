@@ -1,3 +1,6 @@
+import pytest
+
+from crm_sync.clients.http import ApiError
 from crm_sync.clients.nova_poshta import NovaPoshtaClient
 
 
@@ -53,3 +56,44 @@ def test_nova_poshta_uses_fallback_for_blank_status() -> None:
     statuses = client.get_statuses(["20451234567890"])
 
     assert statuses["20451234567890"].status == "Невідомо"
+
+
+def test_nova_poshta_rejects_malformed_tracking_collection() -> None:
+    http = StubHttpClient()
+    http.request_json = lambda *args, **kwargs: {"success": True, "data": {}}
+    client = NovaPoshtaClient(
+        http,  # type: ignore[arg-type]
+        api_key="test",
+        url="https://example.test/v2.0/json/",
+    )
+
+    with pytest.raises(ApiError, match="all batches"):
+        client.get_statuses(["20451234567890"])
+
+
+def test_nova_poshta_keeps_successful_batches_when_later_batch_fails() -> None:
+    class PartialHttpClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def request_json(self, method, url, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                raise ApiError("temporary outage")
+            document = kwargs["json"]["methodProperties"]["Documents"][0]
+            return {
+                "success": True,
+                "data": [{"Number": document["DocumentNumber"], "Status": "Отримано"}],
+            }
+
+    client = NovaPoshtaClient(
+        PartialHttpClient(),  # type: ignore[arg-type]
+        api_key="test",
+        url="https://example.test/v2.0/json/",
+    )
+    numbers = [f"2045{index:010d}" for index in range(101)]
+
+    statuses = client.get_statuses(numbers)
+
+    assert len(statuses) == 1
+    assert statuses[numbers[0]].status == "Отримано"

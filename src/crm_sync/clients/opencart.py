@@ -69,7 +69,9 @@ class OpenCartClient:
             )
             if not isinstance(payload, dict) or not payload.get("success"):
                 raise ApiError(f"OpenCart CRM endpoint failed: {payload}")
-            raw_orders = payload.get("orders") or []
+            raw_orders = payload.get("orders")
+            if not isinstance(raw_orders, list):
+                raise ApiError("OpenCart orders payload must be a list")
             raw_count += len(raw_orders)
             for raw in raw_orders:
                 if not isinstance(raw, dict):

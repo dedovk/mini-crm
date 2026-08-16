@@ -102,6 +102,11 @@ class NovaPoshtaStub:
         return {}
 
 
+class FailingNovaPoshtaStub:
+    def get_statuses(self, tracking_numbers: list[str]):
+        raise RuntimeError("tracking timeout")
+
+
 class FailingSource:
     source = "prom"
 
@@ -222,6 +227,28 @@ def test_optional_finance_failure_does_not_fail_order_sync() -> None:
     assert result.source_orders == {"rozetka": 0}
     assert result.warnings == (
         "rozetka finance is unavailable; existing sheet values were preserved: finance access denied",
+    )
+
+
+def test_nova_poshta_failure_preserves_order_sync_and_updates_health() -> None:
+    sheets = ProductionSheetsStub()
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=FailingNovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[SuccessfulSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    result = service.run()
+
+    assert sheets.health_calls == [["nova-poshta"]]
+    assert result.shipment_statuses == 0
+    assert result.warnings == (
+        "nova-poshta tracking is unavailable; existing shipment statuses were preserved: "
+        "tracking timeout",
     )
 
 

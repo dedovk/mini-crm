@@ -7,6 +7,7 @@ from typing import Any
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread import BackOffHTTPClient
 from gspread.utils import rowcol_to_a1
 
 from crm_sync.integrity import IntegrityReport
@@ -59,6 +60,11 @@ from crm_sync.utils import (
 
 LOGGER = logging.getLogger(__name__)
 
+
+class ConcurrentSheetEditError(RuntimeError):
+    """The sheet changed while a structural rebuild was being prepared."""
+
+
 class GoogleSheetsGateway:
     def __init__(
         self,
@@ -68,6 +74,7 @@ class GoogleSheetsGateway:
         worksheet_name: str,
         header_row: int,
         sender_options: tuple[str, ...],
+        timeout: int = 60,
     ) -> None:
         credentials = Credentials.from_service_account_info(
             credentials_info,
@@ -76,7 +83,8 @@ class GoogleSheetsGateway:
                 "https://www.googleapis.com/auth/drive",
             ],
         )
-        client = gspread.authorize(credentials)
+        client = gspread.authorize(credentials, http_client=BackOffHTTPClient)
+        client.http_client.timeout = (10, max(timeout, 10))
         self.spreadsheet = client.open_by_key(spreadsheet_id)
         self.worksheet = self.spreadsheet.worksheet(worksheet_name)
         self.header_row = header_row
@@ -918,7 +926,12 @@ class GoogleSheetsGateway:
                         else ""
                     )
                     if current_source != desired_source:
-                        updates.append({"range": f"A{row_number}", "values": [[desired_source]]})
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.source),
+                                "values": [[desired_source]],
+                            }
+                        )
                 if order and order.tracking_number:
                     current = (
                         str(row[COLUMNS.tracking_number - 1]).strip()
@@ -926,7 +939,12 @@ class GoogleSheetsGateway:
                         else ""
                     )
                     if current != order.tracking_number:
-                        updates.append({"range": f"B{row_number}", "values": [[order.tracking_number]]})
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.tracking_number),
+                                "values": [[order.tracking_number]],
+                            }
+                        )
                 if order and order.completion_is_exact:
                     completion_date = order.completed_at.date()
                     current_completion_date = parse_sheet_date(
@@ -934,24 +952,32 @@ class GoogleSheetsGateway:
                     )
                     if current_completion_date != completion_date:
                         updates.append(
-                            {"range": f"D{row_number}", "values": [[sheet_serial(completion_date)]]}
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.order_date),
+                                "values": [[sheet_serial(completion_date)]],
+                            }
                         )
                     current_day = parse_sheet_date(
                         row[COLUMNS.operational_date - 1]
                         if len(row) >= COLUMNS.operational_date
                         else ""
                     )
-                    if current_day is None:
+                    if current_day != completion_date:
                         updates.append(
                             {
-                                "range": f"W{row_number}",
-                                "values": [[sheet_serial(order.completed_at.date())]],
+                                "range": rowcol_to_a1(row_number, COLUMNS.operational_date),
+                                "values": [[sheet_serial(completion_date)]],
                             }
                         )
                 if customer:
                     current = str(row[COLUMNS.customer - 1]).strip() if len(row) >= COLUMNS.customer else ""
                     if current != customer:
-                        updates.append({"range": f"F{row_number}", "values": [[customer]]})
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.customer),
+                                "values": [[customer]],
+                            }
+                        )
                 if order and item_index < len(order.items):
                     item = order.items[item_index]
                     if item.product_code:
@@ -962,7 +988,12 @@ class GoogleSheetsGateway:
                             else ""
                         )
                         if current != product_code:
-                            updates.append({"range": f"I{row_number}", "values": [[product_code]]})
+                            updates.append(
+                                {
+                                    "range": rowcol_to_a1(row_number, COLUMNS.product_code),
+                                    "values": [[product_code]],
+                                }
+                            )
                     numeric_updates = {
                         COLUMNS.quantity: item.quantity,
                         COLUMNS.unit_price: item.unit_price,
@@ -995,7 +1026,12 @@ class GoogleSheetsGateway:
                 if order and item_index == 0:
                     current_total = row[COLUMNS.order_total - 1] if len(row) >= COLUMNS.order_total else ""
                     if decimal_value(current_total) != order.total:
-                        updates.append({"range": f"N{row_number}", "values": [[decimal_for_sheet(order.total)]]})
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.order_total),
+                                "values": [[decimal_for_sheet(order.total)]],
+                            }
+                        )
                     current_base = (
                         row[COLUMNS.advertising_base - 1]
                         if len(row) >= COLUMNS.advertising_base
@@ -1006,7 +1042,7 @@ class GoogleSheetsGateway:
                         if len(row) >= COLUMNS.installment_commission
                         else ""
                     )
-                    if order.advertising_cost > 0 and decimal_value(current_base) != order.advertising_cost:
+                    if decimal_value(current_base) != order.advertising_cost:
                         updates.append(
                             {
                                 "range": rowcol_to_a1(row_number, COLUMNS.advertising_base),
@@ -1014,8 +1050,7 @@ class GoogleSheetsGateway:
                             }
                         )
                     if (
-                        order.installment_commission > 0
-                        and decimal_value(current_installment) != order.installment_commission
+                        decimal_value(current_installment) != order.installment_commission
                     ):
                         updates.append(
                             {
@@ -1031,9 +1066,12 @@ class GoogleSheetsGateway:
                         if len(row) >= COLUMNS.advertising
                         else ""
                     )
-                    if expected_advertising and str(current_advertising) != str(expected_advertising):
+                    if str(current_advertising) != str(expected_advertising):
                         updates.append(
-                            {"range": f"S{row_number}", "values": [[expected_advertising]]}
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.advertising),
+                                "values": [[expected_advertising]],
+                            }
                         )
                     prepayment = order.prepayment or parse_prepayment(order.note)
                     current_prepayment = (
@@ -1044,7 +1082,7 @@ class GoogleSheetsGateway:
                     if prepayment > 0 and decimal_value(current_prepayment) == 0:
                         updates.append(
                             {
-                                "range": f"P{row_number}",
+                                "range": rowcol_to_a1(row_number, COLUMNS.prepayment),
                                 "values": [[decimal_for_sheet(prepayment)]],
                             }
                         )
@@ -1055,13 +1093,26 @@ class GoogleSheetsGateway:
                         else ""
                     )
                     if current != order.payment_method:
-                        updates.append({"range": f"O{row_number}", "values": [[order.payment_method]]})
-                formula = f"=(L{row_number}-Q{row_number})*K{row_number}"
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.payment_method),
+                                "values": [[order.payment_method]],
+                            }
+                        )
+                unit_price_cell = rowcol_to_a1(row_number, COLUMNS.unit_price)
+                cost_cell = rowcol_to_a1(row_number, COLUMNS.cost)
+                quantity_cell = rowcol_to_a1(row_number, COLUMNS.quantity)
+                formula = f"=({unit_price_cell}-{cost_cell})*{quantity_cell}"
                 current_formula = (
                     str(row[COLUMNS.markup - 1]).strip() if len(row) >= COLUMNS.markup else ""
                 )
                 if current_formula != formula:
-                    updates.append({"range": f"R{row_number}", "values": [[formula]]})
+                    updates.append(
+                        {
+                            "range": rowcol_to_a1(row_number, COLUMNS.markup),
+                            "values": [[formula]],
+                        }
+                    )
 
         if updates:
             self.worksheet.batch_update(updates, raw=False)
@@ -1275,7 +1326,12 @@ class GoogleSheetsGateway:
                     display = advertising_display(expected, Decimal(0))
                     shown = row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
                     if str(shown) != str(display):
-                        updates.append({"range": f"S{row_number}", "values": [[display]]})
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.advertising),
+                                "values": [[display]],
+                            }
+                        )
                 else:
                     if str(current).strip():
                         updates.append(
@@ -1285,7 +1341,12 @@ class GoogleSheetsGateway:
                             }
                         )
                     if len(row) >= COLUMNS.advertising and str(row[COLUMNS.advertising - 1]).strip():
-                        updates.append({"range": f"S{row_number}", "values": [[""]]})
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(row_number, COLUMNS.advertising),
+                                "values": [[""]],
+                            }
+                        )
         if updates:
             self.worksheet.batch_update(updates, raw=False)
         return len(updates)
@@ -1321,6 +1382,13 @@ class GoogleSheetsGateway:
         )
         rows = snapshot.rows
         last_used_row = snapshot.last_used_row
+
+        latest_values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        if latest_values != existing_values:
+            raise ConcurrentSheetEditError(
+                "Google Sheet changed during synchronization; rebuild was cancelled "
+                "to preserve the newer manual edits"
+            )
 
         if last_used_row > self.worksheet.row_count:
             self.worksheet.add_rows(last_used_row - self.worksheet.row_count)

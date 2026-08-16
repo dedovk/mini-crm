@@ -4,7 +4,9 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from crm_sync.clients.google_sheets import GoogleSheetsGateway
+import pytest
+
+from crm_sync.clients.google_sheets import ConcurrentSheetEditError, GoogleSheetsGateway
 from crm_sync.models import Order, OrderAuditEvent, OrderItem, ShipmentStatus
 from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN, LAST_COLUMN_LETTER
@@ -118,6 +120,7 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     rows[4][COLUMNS.row_type - 1] = ROW_ORDER
     rows[4][COLUMNS.sync_key - 1] = "prom:1"
     rows[4][COLUMNS.tracking_number - 1] = 20451501572223
+    rows[4][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 2))
     worksheet = StubWorksheet(rows)
     gateway = object.__new__(GoogleSheetsGateway)
     gateway.worksheet = worksheet
@@ -581,6 +584,38 @@ def test_append_orders_advances_layout_when_rebuild_is_forced() -> None:
     assert any(row[COLUMNS.row_type - 1] == "REPORT_DAY" for row in worksheet.written_values)
 
 
+def test_append_orders_aborts_when_sheet_changes_during_rebuild() -> None:
+    class ConcurrentEditWorksheet(LayoutWorksheet):
+        def __init__(self, values: list[list[Any]]) -> None:
+            super().__init__(values)
+            self.reads = 0
+
+        def get_all_values(self, **kwargs):
+            self.reads += 1
+            if self.reads == 1:
+                return self.values
+            changed = [list(row) for row in self.values]
+            changed[0][0] = "manual edit"
+            return changed
+
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    worksheet = ConcurrentEditWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.spreadsheet = StubSpreadsheet()
+
+    with pytest.raises(ConcurrentSheetEditError, match="manual edits"):
+        gateway.append_orders(
+            [],
+            {},
+            sender_default="наш",
+            operational_day=date(2026, 8, 6),
+            force_rebuild=True,
+        )
+
+    assert worksheet.operations == []
+
+
 def test_append_orders_does_not_invent_completion_date_for_inexact_source() -> None:
     rows = [[""] * LAST_COLUMN for _ in range(4)]
     worksheet = LayoutWorksheet(rows)
@@ -767,7 +802,7 @@ def test_audit_log_creates_technical_sheet_and_appends_event() -> None:
     ]
 
 
-def test_health_state_triggers_once_on_third_failure_and_recovers() -> None:
+def test_health_state_retries_alert_after_threshold_and_recovers() -> None:
     gateway = object.__new__(GoogleSheetsGateway)
     health = HealthWorksheetStub(
         [["consecutive_failures", "2"], ["alert_open", "false"]]
@@ -787,8 +822,16 @@ def test_health_state_triggers_once_on_third_failure_and_recovers() -> None:
     assert failed.alert_due
     health.values = [["consecutive_failures", "3"], ["alert_open", "true"]]
 
+    repeated = gateway.record_sync_health(
+        ["prom"], occurred_at=datetime(2026, 8, 5, 12, 15, tzinfo=UTC)
+    )
+
+    assert repeated.consecutive_failures == 4
+    assert repeated.alert_due
+    health.values = [["consecutive_failures", "4"], ["alert_open", "true"]]
+
     recovered = gateway.record_sync_health(
-        [], occurred_at=datetime(2026, 8, 5, 12, 15, tzinfo=UTC)
+        [], occurred_at=datetime(2026, 8, 5, 12, 30, tzinfo=UTC)
     )
 
     assert recovered.consecutive_failures == 0

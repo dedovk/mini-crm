@@ -2,10 +2,81 @@ from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from crm_sync.clients.http import HttpClient
+import pytest
+
+from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.clients.opencart import OpenCartClient
 from crm_sync.clients.prom import PromClient
 from crm_sync.clients.rozetka import RozetkaClient
+
+
+def test_rozetka_refreshes_expired_bearer_token() -> None:
+    class ExpiredTokenHttp:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def request_json(self, method: str, url: str, **kwargs):
+            self.calls.append((method, url))
+            if method == "POST":
+                return {"success": True, "content": {"access_token": "fresh-token"}}
+            authorization = kwargs["headers"]["Authorization"]
+            if authorization == "Bearer stale-token":
+                raise ApiError("expired", status_code=401)
+            return {"success": True, "content": {"orders": [], "_meta": {"pageCount": 1}}}
+
+    http = ExpiredTokenHttp()
+    client = RozetkaClient(
+        http,  # type: ignore[arg-type]
+        token="stale-token",
+        username="seller@example.test",
+        password="secret",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    payload = client._request_authorized("/orders/search", params={})
+
+    assert payload["success"] is True
+    assert client._active_token == "fresh-token"
+    assert [method for method, _ in http.calls] == ["GET", "POST", "GET"]
+
+
+def test_opencart_rejects_non_list_orders_collection() -> None:
+    class MalformedOpenCartHttp:
+        def request_json(self, method: str, url: str, **kwargs):
+            return {"success": True, "orders": {"unexpected": "object"}}
+
+    client = OpenCartClient(
+        MalformedOpenCartHttp(),  # type: ignore[arg-type]
+        base_url="https://example.test",
+        api_key="test",
+        endpoint="/api/orders",
+        timezone="Europe/Kyiv",
+    )
+
+    with pytest.raises(ApiError, match="must be a list"):
+        client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+
+def test_rozetka_rejects_non_list_orders_collection() -> None:
+    class MalformedRozetkaHttp:
+        def request_json(self, method: str, url: str, **kwargs):
+            return {
+                "success": True,
+                "content": {"orders": {"unexpected": "object"}, "_meta": {"pageCount": 1}},
+            }
+
+    client = RozetkaClient(
+        MalformedRozetkaHttp(),  # type: ignore[arg-type]
+        token="test-token",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    with pytest.raises(ApiError, match="orders must be a list"):
+        client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
 
 
 def test_rozetka_normalizer_creates_item_rows() -> None:

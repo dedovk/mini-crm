@@ -14,6 +14,10 @@ LOGGER = logging.getLogger(__name__)
 class ApiError(RuntimeError):
     """External API returned an unusable response."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class HttpClient:
     def __init__(self, *, timeout: int = 30, max_retries: int = 4) -> None:
@@ -34,9 +38,16 @@ class HttpClient:
                 if not isinstance(payload, (dict, list)):
                     raise ApiError(f"Unexpected JSON type from {url}")
                 return payload
-            except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+            except (
+                requests.Timeout,
+                requests.ConnectionError,
+                requests.HTTPError,
+                requests.JSONDecodeError,
+            ) as exc:
                 last_error = exc
-                retryable = not isinstance(exc, requests.HTTPError) or (
+                retryable = isinstance(exc, requests.JSONDecodeError) or not isinstance(
+                    exc, requests.HTTPError
+                ) or (
                     exc.response is not None
                     and (exc.response.status_code == 429 or exc.response.status_code >= 500)
                 )
@@ -45,13 +56,23 @@ class HttpClient:
                 delay = self._retry_delay(exc, attempt)
                 status = exc.response.status_code if isinstance(exc, requests.HTTPError) and exc.response else None
                 LOGGER.warning(
-                    "API request failed%s; retrying in %s second(s): %s",
+                    "API request %s %s failed%s; retrying in %s second(s): %s",
+                    method,
+                    url,
                     f" with HTTP {status}" if status else "",
                     delay,
                     type(exc).__name__,
                 )
                 time.sleep(delay)
-        raise ApiError(f"API request failed: {method} {url}: {last_error}") from last_error
+        status_code = (
+            last_error.response.status_code
+            if isinstance(last_error, requests.HTTPError) and last_error.response is not None
+            else None
+        )
+        raise ApiError(
+            f"API request failed: {method} {url}: {last_error}",
+            status_code=status_code,
+        ) from last_error
 
     @staticmethod
     def _retry_delay(exc: Exception, attempt: int) -> int:

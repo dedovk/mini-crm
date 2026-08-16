@@ -129,7 +129,10 @@ def record_sheet_sync_health(
 
     if components:
         consecutive = previous_failures + 1
-        alert_due = consecutive == HEALTH_ALERT_THRESHOLD and not previous_alert_open
+        # Keep requesting notification after the threshold. The notifier first
+        # looks for an existing open issue, so retries are idempotent and a
+        # temporary GitHub API failure cannot permanently suppress the alert.
+        alert_due = consecutive >= HEALTH_ALERT_THRESHOLD
         recovered = False
         alert_open = previous_alert_open or consecutive >= HEALTH_ALERT_THRESHOLD
         outcome = "failed"
