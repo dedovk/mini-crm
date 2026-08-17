@@ -1,238 +1,86 @@
-# Marketplace CRM Sync MVP
+# Mini-CRM для замовлень
 
-Python 3 service that synchronizes operational orders with created TTNs from Prom.ua,
-Rozetka Seller and ocStore 2.1 into an existing Google Sheet. It runs every 15 minutes
-through GitHub Actions.
+Mini-CRM автоматично збирає замовлення з Prom.ua, Rozetka та магазину на ocStore,
+оновлює статуси доставки Нової пошти й веде спільний облік у Google Sheets. Проєкт
+прибирає ручне копіювання замовлень, захищає таблицю від дублікатів і допомагає бачити
+продажі, комісії та підсумки в одному місці.
 
-## Implemented behavior
+## Функціональність
 
-- One product is written per row. A multi-product order occupies consecutive rows.
-- The marketplace order number (column E) and order total (column N) are merged across
-  the product rows of one order.
-- Prom.ua and ocStore orders are imported after completion. Rozetka orders are imported as
-  soon as they reach `Відправлено`, then updated in place when they become `Виконано`.
-  A previously unseen Rozetka order that is already completed is not backfilled.
-- Column D contains the completion date when the source exposes an exact status-change
-  timestamp; unknown completion dates are left blank instead of being invented.
-- Phones are written as text in `+380...` format.
-- Tracking numbers preserve the marketplace value and support Nova Poshta numbers with
-  spaces, Rozetka Delivery `RMP-...`, Ukrposhta and hyphenated Meest identifiers. Only
-  14-digit Nova Poshta numbers are sent to the Nova Poshta tracking API.
-- Column I contains the marketplace product code. For Prom.ua this is the exact
-  `products[].sku` value shown as `Артикул` in the seller cabinet.
-- Monetary fields are numeric and do not contain `грн`.
-- Duplicate key is `source:order_id`; it is stored in hidden column U (`Sync Key`).
-- Nova Poshta statuses are refreshed for every non-final TTN already present in the sheet.
-  In-transit states are normalized to one sortable value, `Прямує до покупця`.
-- `Отримано` is treated as final. `Відмова від отримання` removes the complete order block
-  from the operational sheet (after creating a structural backup), so its sale and markup
-  no longer participate in daily or monthly totals.
-- Prom notes and Rozetka seller comments recognize `предоплата`, `предо`, `пред` and
-  `перед`; a nearby amount such as `пред - 500` is written as numeric prepayment `500`.
-- Existing manual cost and manager-note cells are never overwritten. Marketplace expenses
-  are reconciled from their APIs.
-- Markup in column R is created as `(unit price - cost) * quantity`.
-- Prom.ua advertising expense is written to column S from `prosale_commission.value`
-  (with `cpa_commission.amount` as a compatibility fallback). Installment-payment commission
-  is shown on a second line and stored separately in hidden numeric column AA. Report rows split it into
-  ProSale and exact fixed `10.00` Prom charges; Rozetka expenses are reported separately.
-  Advertising values are shown in daily and month-to-date rows without a monthly forecast.
-- Existing order rows are refreshed from their source for tracking number, combined
-  `city, surname first name`, product code, payment method and the markup formula without
-  overwriting manual costs.
-- Dropdown validation is configured for Nova Poshta status, sender and payment method.
-- Individual source failures are logged and do not stop the other marketplaces.
-- Orders are grouped by the operational status date (shipping date for Rozetka, completion
-  date for the other sources). At local midnight the previous
-  day receives formula-driven daily, month-to-date and month forecast rows. Summary rows
-  are consecutive and place all KPI labels and values together in columns A:P.
-- Daily sections advance even when no new orders arrive; the rollover closes prior days and
-  creates the current day section during the first production run after local midnight.
-- Multi-item orders receive a black outer border across the complete order block.
-- Month and day title rows contain styled `Виділити місяць` / `Виділити день` links that
-  select the corresponding A:T range.
-- The month header contains a `⬇ До кінця таблиці` link to the latest day. Google Sheets
-  does not expose an API for remotely scrolling a browser tab that is already open, so this
-  one-click link is the reliable navigation mechanism.
-- The sheet uses compact Ukrainian headers, 8-point body text, fixed narrow widths,
-  status colors and hidden technical columns U:W so all business columns fit horizontally.
-- Sheet rebuilds write the new snapshot before clearing only obsolete trailing rows, so a
-  failed write cannot erase the existing worksheet contents.
-- Every GitHub Actions run publishes a structured step summary with source counts, skipped
-  stale orders, shipment updates, appended rows and non-fatal integration warnings.
-- A separate `Журнал змін` worksheet records newly appended orders and Nova Poshta status
-  transitions with timestamps, sync keys, TTNs and old/new values. Audit failures are
-  non-fatal and are surfaced in the GitHub Actions summary.
-- Every run performs a read-only integrity preflight before any mutation and a second
-  validation after production writes. Formula errors, negative unit costs, split duplicate
-  order blocks and conflicting totals stop the sync before more data is written.
-- Hidden columns X:Y persist the first observed completion date and the last marketplace
-  order status. For sources without status history, the first real observation of `Виконано`
-  is used instead of inventing a date from order creation.
-- No structural worksheet rebuild is performed when there are no new orders and the current
-  day section already exists. A hidden timestamped backup is created before a new-order rebuild
-  or daily rollover, and the three newest copies are kept.
-- Production integration failures are aggregated. One GitHub Issue is opened on the third
-  consecutive degraded run and automatically closed after recovery, avoiding an email for
-  every 15-minute attempt.
+- імпорт замовлень із Prom.ua, Rozetka Seller API та ocStore 2.1;
+- одне замовлення з кількома товарами записується окремим блоком рядків;
+- захист від дублікатів за ключем `джерело + ID замовлення`;
+- нормалізація телефонів, дат, сум, способів оплати, передоплати й номерів ТТН;
+- оновлення статусів Нової пошти для наявних замовлень;
+- видалення з розрахунків замовлень із відмовою від отримання;
+- облік ProSale, комісій Rozetka, логістики та оплати частинами; фінанси Rozetka
+  звіряються у вікні 45 днів для частих запусків і 90 днів для щоденного запуску,
+  а не зберігаються як повна історія всіх транзакцій;
+- збереження ручної собівартості й приміток менеджера;
+- заповнення порожньої собівартості за ТТН із таблиці постачальника IMAXI;
+- автоматичні денні та місячні підсумки в Google Sheets;
+- журнал змін, резервні копії перед структурною перебудовою вкладки та перевірка
+  цілісності даних;
+- збій окремого джерела замовлень або Нової пошти не блокує інші джерела;
+  Google Sheets залишається обов’язковим сховищем для запуску;
+- `dry-run` для безпечної перевірки без запису в таблицю;
+- GitHub Issue після трьох послідовних production-запусків із деградацією джерел, фінансів або
+  Нової пошти; критична помилка конфігурації чи Google Sheets позначає Actions run як failed.
 
-## Architecture
+## Стек
 
-The code is split by responsibility so marketplace changes do not require editing Google
-Sheets formatting code:
+- Python 3.11+;
+- `requests` для marketplace та Nova Poshta API;
+- `gspread` і `google-auth` для Google Sheets;
+- `pytest` для тестів, Ruff для перевірки коду;
+- GitHub Actions для запусків і CI;
+- PHP-контролер для read-only доступу до замовлень ocStore.
 
-- `clients/` contains external API and Google Sheets I/O adapters.
-- `services.py` orchestrates a run through protocols, so it is tested without network calls.
-- `sheet_schema.py` is the single source of truth for columns, dropdowns and technical sheets.
-- `sheet_orders.py` converts marketplace orders and legacy rows into normalized order groups.
-- `sheet_snapshot.py` deterministically builds day/month/report rows, formulas, merges and links.
-- `sheet_meta.py` owns the audit log, structural backups and persistent integration health.
-- `sheet_layout.py` contains reusable dates, source labels and report formulas.
-- `integrity.py` validates incoming API data and the worksheet before and after writes.
+Код розділений на API-клієнти, сервіс синхронізації, моделі, перевірки даних і модулі
+побудови Google Sheets. Розширення для ocStore описане в
+[opencart_extension/README.md](opencart_extension/README.md).
 
-The production workflow installs only runtime dependencies. A separate quality workflow runs
-Ruff and the complete pytest suite on every push and pull request.
+## Налаштування
 
-## Google Sheet contract
-
-The target spreadsheet is selected only through the `GOOGLE_SPREADSHEET_ID` GitHub Secret.
-Worksheet `БСК` contains the CRM data, with the first headers near the top. Columns A:T are business fields.
-Columns U:Y are hidden technical fields for duplicate protection, row type, the
-operational date used by daily reports, first completion observation and source status.
-
-The service account email must have **Editor** access to the spreadsheet.
-
-## Required GitHub Secrets
-
-Already used by the workflow:
+Секрети зберігаються тільки у GitHub Secrets або локальних змінних оточення:
 
 ```text
 GOOGLE_SERVICE_ACCOUNT_JSON_B64
 GOOGLE_SPREADSHEET_ID
 GOOGLE_WORKSHEET_NAME
-APP_TIMEZONE
+SUPPLIER_IMAXI_SPREADSHEET_ID
 PROM_API_TOKEN
 ROZETKA_API_TOKEN
-NP_API_TOKEN
-OPENCART_BASE_URL
-OPENCART_API_KEY
-```
-
-Optional sender dropdown configuration:
-
-```text
-SENDER_DEFAULT=наш
-SENDER_OPTIONS=imaxi-com,Melad,Melad дроп,наш
-```
-
-Strongly recommended for Rozetka JWT renewal:
-
-```text
 ROZETKA_USERNAME
 ROZETKA_PASSWORD
+OPENCART_BASE_URL
+OPENCART_API_KEY
+NP_API_TOKEN
+APP_TIMEZONE
 ```
 
-`ROZETKA_API_TOKEN` can be used directly, but a JWT can expire. When username/password
-are configured, the client obtains a new token through `POST /sites`; Rozetka requires
-the password field to be Base64-encoded in this request.
+Service Account повинен мати права редактора потрібної Google-таблиці. Часті запуски
+надсилає DirectAdmin, а GitHub Actions виконує синхронізацію, ручний `dry-run` і щоденну
+поглиблену перевірку старіших замовлень. Concurrency-група не дозволяє двом запускам
+одночасно записувати дані в таблицю.
 
-Non-secret runtime defaults are documented in the workflow and in `Settings.from_env()`.
-
-## Local setup
+## Локальний запуск
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.txt
-```
-
-Populate environment variables without committing them. Run tests:
-
-```powershell
-python -m pytest -q
-```
-
-Run a read-only integration check:
-
-```powershell
-$env:DRY_RUN = "true"
 $env:PYTHONPATH = "src"
+$env:DRY_RUN = "true"
 python -m crm_sync.main
 ```
 
-Dry-run does not add the technical column, validations, rows or status updates.
+Перевірка проєкту:
 
-## GitHub Actions
+```powershell
+python -m pytest -q
+python -m ruff check src tests
+```
 
-DirectAdmin is the primary scheduler and dispatches the GitHub workflow every 15 minutes
-through `workflow_dispatch`. Frequent runs read the latest seven days. GitHub keeps only
-one timezone-aware daily run at 02:13 `Europe/Kyiv` to reconcile the full 30-day history,
-including TTNs added to older orders. The workflow also supports manual dispatch with a
-`dry_run` checkbox. A concurrency group prevents overlapping writes.
-
-## Prom.ua
-
-The client uses `GET /orders/list` with `Authorization: Bearer ...`, filters by `last_modified`
-and requests both `delivered` and `canceled` statuses. Canceled orders already present in the
-sheet are removed from the operational data and totals after a backup. The client handles
-pagination, normalizes product rows and retains only completed orders containing a supported TTN. Prom prices
-such as `1 149 грн` are converted to numeric values, the product code comes from `sku`,
-and the ProSale commission is recorded as advertising expense. For installment payments,
-the separate commission is read from the order payload or calculated from the documented
-number-of-payments tariff when only the installment count is supplied. Frequent automation scans
-seven days to stay within API limits, while the daily deep reconciliation scans 30 days.
-The HTTP client honors Prom's `Retry-After` response and uses a longer fallback pause for
-rate limits. Duplicate filtering makes both overlaps safe. Prom's public Order model does
-not expose order-status history, so a newly completed Prom order uses the first polling time
-at which the script sees `delivered`; later runs keep that recorded time stable.
-
-## Rozetka
-
-The client uses `GET /orders/search` for active (`types=2`) and completed (`types=3`) groups
-with expanded user, delivery, product, payment and credit fields, handles pagination and retains shipped or
-successfully completed orders with a TTN. The API `changed` value supplies the current status time, while an
-available `order_status_history` timestamp takes precedence. It accepts an existing token and
-supports the current `POST /sites` login flow when login/password secrets are configured.
-The current official base URL is `https://api-seller.rozetka.com.ua`; the former
-`api.seller.rozetka.com.ua` hostname serves an expired certificate and is not used.
-
-Rozetka finance synchronization reads sale commissions from `/balances/search` and
-shipment delivery charges from `/balance-logistic/search`. Transactions are deduplicated
-by their API identifiers and grouped by Rozetka order ID. A credited logistics adjustment
-reduces the original delivery expense without removing the order from the worksheet. The
-resulting non-negative total is written once, on the first item row, in the advertising
-expense column. Frequent runs reconcile 45 days and the daily run reconciles 90 days;
-configure this with `ROZETKA_FINANCE_LOOKBACK_DAYS` when a longer backfill is required.
-Finance access is optional: if the Rozetka account does not expose logistics history,
-the order sync succeeds and preserves the existing advertising-expense cells.
-
-Daily deep reconciliation reads older orders to refresh TTNs and statuses, but does not
-insert previously unseen stale orders. `NEW_ORDER_MAX_AGE_DAYS` controls this independent
-new-order window and defaults to seven days.
-
-## ocStore 2.1.0.2.1
-
-The stock API token does not expose historical order listing. Install the read-only
-controller from [opencart_extension](opencart_extension/README.md) on
-`https://ibox-shop.co.ua/`. The endpoint validates the active ocStore API key from the
-`api` table and only reads orders/products/comments.
-
-The read-only endpoint returns only completed orders and derives `completed_at` from the
-latest history entry for the current completed status. The installed Nova Poshta module
-stores TTNs in the `novaposhta_cn_number` order field; the normalizer reads this field directly.
-`Сделка завершена` is displayed as `🔴 IBOX-SHOP`; `Сделка завершена(Заказ по тел)` (and equivalent
-phone wording) is displayed as `🔵 Телефон`. Both retain the stable `opencart:order_id` sync key.
-The stale-order safety window uses OpenCart's last-modified date, so an older completed order
-becomes eligible when a TTN is added later, while its reporting day remains the completion date.
-Rejected completion statuses are logged as aggregate status names without customer data,
-which makes a zero-result OpenCart run diagnosable from GitHub Actions.
-
-## Production rollout
-
-1. Add `ROZETKA_USERNAME` and `ROZETKA_PASSWORD` if the current token is a JWT.
-2. Install and test the ocStore endpoint.
-3. Run GitHub Actions manually with `dry_run=true` and inspect logs.
-   Set `lookback_days=30` when diagnosing older OpenCart or marketplace orders; the
-   independent seven-day new-order cutoff prevents accidental stale backfill.
-4. Run once with `dry_run=false` on a small known set of orders.
-5. Leave the scheduled workflow enabled after confirming row formatting and merging.
+Не додавайте `.env`, JSON-ключ Service Account, токени або реальні ідентифікатори таблиць
+до Git. Репозиторій містить лише назви потрібних змінних оточення.
