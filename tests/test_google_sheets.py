@@ -16,7 +16,12 @@ from crm_sync.models import (
     ShipmentStatus,
     SupplierCostRecord,
 )
-from crm_sync.sheet_layout import ALL_HEADERS, ROW_ORDER, sheet_serial
+from crm_sync.sheet_layout import (
+    ALL_HEADERS,
+    REPORTING_EXCLUDED_REFUSAL,
+    ROW_ORDER,
+    sheet_serial,
+)
 from crm_sync.sheet_orders import markup_formula
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN, LAST_COLUMN_LETTER
 
@@ -111,6 +116,40 @@ class StubSpreadsheet:
                 }
             ]
         }
+
+
+def test_refused_prepaid_order_needs_one_exclusion_rebuild_only() -> None:
+    row = [""] * LAST_COLUMN
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:prepaid-refusal"
+    row[COLUMNS.shipment_status - 1] = "Відмова від отримання"
+    row[COLUMNS.prepayment - 1] = 300
+    worksheet = StubWorksheet([row])
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    assert gateway.needs_refusal_reconciliation()
+
+    row[COLUMNS.reporting_state - 1] = REPORTING_EXCLUDED_REFUSAL
+    assert not gateway.needs_refusal_reconciliation()
+
+
+def test_non_prepaid_source_cancellation_still_requires_removal() -> None:
+    row = [""] * LAST_COLUMN
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:cancelled"
+    row[COLUMNS.order_status - 1] = "Скасовано"
+    worksheet = StubWorksheet([row])
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    assert gateway.needs_refusal_reconciliation()
+
+    row[COLUMNS.reporting_state - 1] = REPORTING_EXCLUDED_REFUSAL
+    assert not gateway.needs_refusal_reconciliation(
+        quarantine_unverified_refusals=True
+    )
+    assert gateway.needs_refusal_reconciliation()
 
 
 def test_legacy_installment_column_is_atomically_moved_before_receipt_use() -> None:
@@ -437,8 +476,10 @@ def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> No
     assert 'LOWER(Q5&"")' in updates["Q5:R5"][1]
     assert updates["Q6:R6"][0] == "предоплата"
     assert 'LOWER(Q6&"")' in updates["Q6:R6"][1]
+    assert updates["J5"] == ["imaxi-com"]
+    assert updates["J6"] == ["imaxi-com"]
     assert "Q7:R7" not in updates
-    assert len(changed.audit_events) == 2
+    assert len(changed.audit_events) == 4
 
 
 def test_supplier_costs_ignore_non_order_rows_and_unknown_tracking_numbers() -> None:

@@ -24,6 +24,7 @@ from crm_sync.models import (
 from crm_sync.sheet_layout import (
     ALL_HEADERS,
     BUSINESS_HEADERS,
+    REPORTING_EXCLUDED_REFUSAL,
     ROW_DAY,
     ROW_HEADER,
     ROW_MONTH,
@@ -42,7 +43,13 @@ from crm_sync.sheet_meta import (
     ensure_sheet_audit_worksheet,
     record_sheet_sync_health,
 )
-from crm_sync.sheet_orders import advertising_display, collect_order_groups, markup_formula
+from crm_sync.sheet_orders import (
+    advertising_display,
+    collect_order_groups,
+    markup_formula,
+    row_has_prepayment,
+    row_is_refused,
+)
 from crm_sync.sheet_schema import (
     COLUMNS,
     LAST_COLUMN,
@@ -56,7 +63,6 @@ from crm_sync.utils import (
     decimal_for_sheet,
     decimal_value,
     extract_ttn,
-    is_refused_shipment_status,
     normalize_tracking_number,
     parse_prepayment,
     tracking_match_key,
@@ -64,6 +70,8 @@ from crm_sync.utils import (
 
 LOGGER = logging.getLogger(__name__)
 LEGACY_INSTALLMENT_HEADER = "Комісія оплати частинами, грн"
+IMAXI_SUPPLIER_SOURCE = "supplier-imaxi"
+IMAXI_SENDER = "imaxi-com"
 
 
 class ConcurrentSheetEditError(RuntimeError):
@@ -391,7 +399,7 @@ class GoogleSheetsGateway:
                         "sheetId": self.worksheet.id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.installment_commission - 1,
-                        "endIndex": COLUMNS.installment_commission_source,
+                        "endIndex": COLUMNS.reporting_state,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -520,7 +528,7 @@ class GoogleSheetsGateway:
                         "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.installment_commission - 1,
-                        "endIndex": COLUMNS.installment_commission_source,
+                        "endIndex": COLUMNS.reporting_state,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -874,6 +882,37 @@ class GoogleSheetsGateway:
                 }
             }
 
+        reporting_column = "".join(
+            character
+            for character in rowcol_to_a1(1, COLUMNS.reporting_state)
+            if character.isalpha()
+        )
+        refusal_block_rule = {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [data_range],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "CUSTOM_FORMULA",
+                            "values": [
+                                {
+                                    "userEnteredValue": (
+                                        f'=${reporting_column}{self.header_row + 1}='
+                                        f'"{REPORTING_EXCLUDED_REFUSAL}"'
+                                    )
+                                }
+                            ],
+                        },
+                        "format": {
+                            "backgroundColorStyle": {
+                                "rgbColor": self._hex_color("#F4CCCC")
+                            }
+                        },
+                    },
+                },
+                "index": 0,
+            }
+        }
         return [
             rule("Відмова", "#F4CCCC"),
             rule("Повернуто", "#F4CCCC"),
@@ -881,6 +920,7 @@ class GoogleSheetsGateway:
             rule("Отримано", "#D9EAD3"),
             rule("дорозі", "#FFF2CC"),
             rule("Прибуло", "#FFF2CC"),
+            refusal_block_rule,
         ]
 
     @staticmethod
@@ -924,10 +964,55 @@ class GoogleSheetsGateway:
         ]
         return max(days, default=None)
 
-    def has_refused_orders(self) -> bool:
-        """Return whether a refused order block still needs to be removed."""
-        statuses = self.worksheet.col_values(COLUMNS.shipment_status)
-        return any(is_refused_shipment_status(status) for status in statuses)
+    def needs_refusal_reconciliation(
+        self,
+        *,
+        supplier_prepayment_tracking_keys: set[str] | None = None,
+        quarantine_unverified_refusals: bool = False,
+    ) -> bool:
+        """Return whether a refused block still needs removal or exclusion marking."""
+        groups: dict[str, list[list[Any]]] = {}
+        for row in self.worksheet.get_all_values(value_render_option="FORMULA"):
+            if len(row) < COLUMNS.sync_key:
+                continue
+            if str(row[COLUMNS.row_type - 1]).strip() != ROW_ORDER:
+                continue
+            key = str(row[COLUMNS.sync_key - 1]).strip().casefold()
+            if key:
+                groups.setdefault(key, []).append(row)
+        supplier_prepayments = supplier_prepayment_tracking_keys or set()
+        for rows in groups.values():
+            if not any(row_is_refused(row) for row in rows):
+                continue
+            has_supplier_prepayment = any(
+                tracking_match_key(
+                    row[COLUMNS.tracking_number - 1]
+                    if len(row) >= COLUMNS.tracking_number
+                    else ""
+                )
+                in supplier_prepayments
+                for row in rows
+            )
+            has_prepayment = has_supplier_prepayment or any(
+                row_has_prepayment(row) for row in rows
+            )
+            if not has_prepayment and not quarantine_unverified_refusals:
+                return True
+            if not has_prepayment and all(
+                len(row) >= COLUMNS.reporting_state
+                and str(row[COLUMNS.reporting_state - 1]).strip()
+                == REPORTING_EXCLUDED_REFUSAL
+                for row in rows
+            ):
+                continue
+            if any(
+                len(row) < COLUMNS.reporting_state
+                or str(row[COLUMNS.reporting_state - 1]).strip()
+                != REPORTING_EXCLUDED_REFUSAL
+                for row in rows
+            ):
+                return True
+        return False
 
     def pending_tracking_numbers(self) -> list[str]:
         values = self.worksheet.get_all_values()
@@ -1551,15 +1636,18 @@ class GoogleSheetsGateway:
             for row_number, _, _, _ in candidates
             for range_name in (
                 rowcol_to_a1(row_number, COLUMNS.tracking_number),
+                rowcol_to_a1(row_number, COLUMNS.sender),
                 rowcol_to_a1(row_number, COLUMNS.cost),
             )
         ]
         latest = self.worksheet.batch_get(ranges, value_render_option="FORMULA")
         updates: list[dict[str, Any]] = []
         events: list[OrderAuditEvent] = []
+        changed_costs = 0
         for index, (row_number, row, tracking, expected) in enumerate(candidates):
-            latest_tracking = latest[index * 2][0][0] if latest[index * 2] else ""
-            latest_cost = latest[index * 2 + 1][0][0] if latest[index * 2 + 1] else ""
+            latest_tracking = latest[index * 3][0][0] if latest[index * 3] else ""
+            latest_sender = latest[index * 3 + 1][0][0] if latest[index * 3 + 1] else ""
+            latest_cost = latest[index * 3 + 2][0][0] if latest[index * 3 + 2] else ""
             if tracking_match_key(latest_tracking) != tracking or str(latest_cost).strip():
                 continue
             sheet_value: str | int | float = (
@@ -1576,6 +1664,18 @@ class GoogleSheetsGateway:
                     "values": [[sheet_value, markup_formula(row_number)]],
                 }
             )
+            changed_costs += 1
+            assign_imaxi_sender = (
+                expected.source == IMAXI_SUPPLIER_SOURCE
+                and str(latest_sender).strip() != IMAXI_SENDER
+            )
+            if assign_imaxi_sender:
+                updates.append(
+                    {
+                        "range": rowcol_to_a1(row_number, COLUMNS.sender),
+                        "values": [[IMAXI_SENDER]],
+                    }
+                )
             sync_key = str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
             source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
             order_id = (
@@ -1597,10 +1697,24 @@ class GoogleSheetsGateway:
                     details=expected.source,
                 )
             )
+            if assign_imaxi_sender:
+                events.append(
+                    OrderAuditEvent(
+                        occurred_at=observed_at,
+                        event_type="supplier_sender_assigned",
+                        source=source,
+                        order_id=order_id,
+                        sync_key=sync_key,
+                        tracking_number=normalize_tracking_number(latest_tracking),
+                        field="sender",
+                        old_value=str(latest_sender),
+                        new_value=IMAXI_SENDER,
+                        details=expected.source,
+                    )
+                )
 
         if updates:
             self.worksheet.batch_update(updates, raw=False)
-        changed_costs = len(updates)
         LOGGER.info("Filled %s blank supplier cost cell(s)", changed_costs)
         return SupplierCostUpdateResult(
             cell_updates=changed_costs,
@@ -1617,6 +1731,8 @@ class GoogleSheetsGateway:
         observed_at: datetime | None = None,
         force_rebuild: bool = False,
         excluded_sync_keys: set[str] | None = None,
+        supplier_prepayment_tracking_keys: set[str] | None = None,
+        quarantine_unverified_refusals: bool = False,
     ) -> int:
         if not orders and not force_rebuild:
             return 0
@@ -1629,6 +1745,8 @@ class GoogleSheetsGateway:
             sender_default=sender_default,
             observation_day=observation_day,
             excluded_sync_keys=excluded_sync_keys,
+            supplier_prepayment_tracking_keys=supplier_prepayment_tracking_keys,
+            quarantine_unverified_refusals=quarantine_unverified_refusals,
         )
         snapshot = build_sheet_snapshot(
             order_groups,
@@ -1701,8 +1819,15 @@ class GoogleSheetsGateway:
         )
         legacy = LEGACY_INSTALLMENT_HEADER.casefold()
         expected_source = ALL_HEADERS[COLUMNS.installment_commission_source - 1].casefold()
+        reporting_header = (
+            str(headers[COLUMNS.reporting_state - 1]).strip().casefold()
+            if len(headers) >= COLUMNS.reporting_state
+            else ""
+        )
+        expected_reporting = ALL_HEADERS[COLUMNS.reporting_state - 1].casefold()
         return (
             current == legacy
             or (not current and migrated_header == legacy)
             or source_header != expected_source
+            or reporting_header != expected_reporting
         )

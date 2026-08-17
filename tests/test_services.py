@@ -42,6 +42,7 @@ class ProductionSheetsStub(SheetsStub):
         self.health_calls: list[list[str]] = []
         self.backups = 0
         self.force_rebuild = False
+        self.supplier_prepayment_tracking_keys: set[str] = set()
         self.refused_orders = False
         self.supplier_cost_calls: list[dict[str, ResolvedSupplierCost]] = []
         self.schema_migration_required = False
@@ -67,7 +68,13 @@ class ProductionSheetsStub(SheetsStub):
     def latest_layout_day(self):
         return datetime.now(UTC).date()
 
-    def has_refused_orders(self) -> bool:
+    def needs_refusal_reconciliation(
+        self,
+        *,
+        supplier_prepayment_tracking_keys=None,
+        quarantine_unverified_refusals=False,
+    ) -> bool:
+        self.supplier_prepayment_tracking_keys = supplier_prepayment_tracking_keys or set()
         return self.refused_orders
 
     def create_backup(self, *, created_at) -> str:
@@ -160,6 +167,39 @@ class CancelledPromSource:
                 note="",
                 sender="",
                 source_status="Скасовано",
+            )
+        ]
+
+
+class CancelledPrepaidPromSource:
+    source = "prom"
+
+    def fetch_orders(self, since: datetime):
+        return [
+            Order(
+                source="prom",
+                external_id="cancelled-prepaid",
+                created_at=datetime(2026, 8, 11, tzinfo=UTC),
+                completed_at=datetime(2026, 8, 11, tzinfo=UTC),
+                customer_name="Покупець",
+                city="Київ",
+                phone="+380501234567",
+                tracking_number="20451234567890",
+                total=Decimal(100),
+                payment_method="смешанная",
+                note="Предоплата 50 грн",
+                sender="наш",
+                source_status="Скасовано",
+                prepayment=Decimal(50),
+                items=[
+                    OrderItem(
+                        name="Товар",
+                        product_code="SKU",
+                        quantity=Decimal(1),
+                        unit_price=Decimal(100),
+                        line_total=Decimal(100),
+                    )
+                ],
             )
         ]
 
@@ -642,6 +682,7 @@ def test_production_run_rebuilds_and_backs_up_when_refused_order_exists() -> Non
 def test_production_run_removes_existing_cancelled_prom_order() -> None:
     sheets = ProductionSheetsStub()
     sheets.read_existing_sync_keys = lambda: {"prom:417709650"}
+    sheets.refused_orders = True
     captured: dict = {}
 
     def append_orders(orders, statuses, **kwargs):
@@ -667,3 +708,22 @@ def test_production_run_removes_existing_cancelled_prom_order() -> None:
     assert captured["force_rebuild"] is True
     assert captured["excluded_sync_keys"] == {"prom:417709650"}
     assert sheets.backups == 1
+
+
+def test_first_sync_keeps_new_cancelled_order_with_prepayment() -> None:
+    now = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+    service = SyncService(
+        sheets=SheetsStub(),  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[CancelledPrepaidPromSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=30,
+        sender_default="наш",
+        dry_run=True,
+        clock=lambda: now,
+    )
+
+    result = service.run()
+
+    assert result.fetched_orders == 1
+    assert result.new_orders == 1

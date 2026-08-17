@@ -44,6 +44,7 @@ TECHNICAL_HEADERS = (
     "Чек",
     "Комісія оплати частинами, грн",
     "Джерело комісії оплати частинами",
+    "Стан звітності",
 )
 ALL_HEADERS = BUSINESS_HEADERS + TECHNICAL_HEADERS
 
@@ -54,6 +55,7 @@ ROW_MONTH = "MONTH"
 ROW_REPORT_DAY = "REPORT_DAY"
 ROW_REPORT_MTD = "REPORT_MTD"
 ROW_REPORT_FORECAST = "REPORT_FORECAST"
+REPORTING_EXCLUDED_REFUSAL = "EXCLUDED_REFUSAL"
 
 EXCEL_EPOCH = date(1899, 12, 30)
 
@@ -145,7 +147,10 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
     def range_for(column: int) -> str:
         letter = column_letter(column)
         return f"${letter}${start}:${letter}${end}"
-    order_filter = f'{range_for(COLUMNS.row_type)};"{ROW_ORDER}"'
+    order_filter = (
+        f'{range_for(COLUMNS.row_type)};"{ROW_ORDER}";'
+        f'{range_for(COLUMNS.reporting_state)};"<>{REPORTING_EXCLUDED_REFUSAL}"'
+    )
     day_filter = f"{range_for(COLUMNS.operational_date)};{day_expr}"
     mtd_filter = (
         f'{range_for(COLUMNS.operational_date)};">="&{month_start};'

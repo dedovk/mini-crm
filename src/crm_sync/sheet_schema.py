@@ -34,11 +34,12 @@ class SheetColumns:
     receipt: int = 27
     installment_commission: int = 28
     installment_commission_source: int = 29
+    reporting_state: int = 30
 
 
 COLUMNS = SheetColumns()
-LAST_COLUMN = COLUMNS.installment_commission_source
-LAST_COLUMN_LETTER = "AC"
+LAST_COLUMN = COLUMNS.reporting_state
+LAST_COLUMN_LETTER = "AD"
 
 PAYMENT_OPTIONS = (
     "пром оплата(оплата картой)",

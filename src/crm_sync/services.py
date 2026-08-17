@@ -20,7 +20,12 @@ from crm_sync.models import (
     SupplierCostUpdateResult,
     SyncHealthState,
 )
-from crm_sync.utils import extract_ttn, parse_prepayment, tracking_match_key
+from crm_sync.utils import (
+    extract_ttn,
+    has_prepayment_request,
+    parse_prepayment,
+    tracking_match_key,
+)
 
 LOGGER = logging.getLogger(__name__)
 REPAIRABLE_PREFLIGHT_ERROR_PREFIXES = ("repairable formula error at ",)
@@ -104,7 +109,12 @@ class SheetGateway(Protocol):
 
     def latest_layout_day(self) -> date | None: ...
 
-    def has_refused_orders(self) -> bool: ...
+    def needs_refusal_reconciliation(
+        self,
+        *,
+        supplier_prepayment_tracking_keys: set[str] | None = None,
+        quarantine_unverified_refusals: bool = False,
+    ) -> bool: ...
 
     def create_backup(self, *, created_at: datetime) -> str: ...
 
@@ -118,6 +128,8 @@ class SheetGateway(Protocol):
         observed_at: datetime,
         force_rebuild: bool,
         excluded_sync_keys: set[str] | None = None,
+        supplier_prepayment_tracking_keys: set[str] | None = None,
+        quarantine_unverified_refusals: bool = False,
     ) -> int: ...
 
     def update_order_expenses(self, expenses: dict[str, Decimal], *, source: str) -> int: ...
@@ -219,7 +231,14 @@ class SyncService:
         cancelled_orders = [order for order in fetched_all if order.is_cancelled]
         cancelled_keys = {order.sync_key.casefold() for order in cancelled_orders}
         cancelled_existing = cancelled_keys & {key.casefold() for key in existing_keys}
-        fetched = [order for order in fetched_all if not order.is_cancelled]
+        fetched = [
+            order
+            for order in fetched_all
+            if not order.is_cancelled
+            or order.prepayment > 0
+            or has_prepayment_request(order.note)
+            or order.payment_method.strip().casefold() == "смешанная"
+        ]
         warnings: list[str] = []
 
         incoming_integrity = validate_incoming_orders(fetched)
@@ -287,10 +306,10 @@ class SyncService:
 
         if not self.dry_run:
             completion_events = self.sheets.record_completion_observations(
-                fetched,
+                fetched_all,
                 observed_at=now,
             )
-            refreshed += self.sheets.refresh_order_details(fetched)
+            refreshed += self.sheets.refresh_order_details(fetched_all)
 
         if self.dry_run:
             LOGGER.info(
@@ -314,7 +333,21 @@ class SyncService:
             return result
 
         shipment_update = self.sheets.update_shipment_statuses(statuses)
-        refused_orders_present = self.sheets.has_refused_orders()
+        supplier_cost_update = SupplierCostUpdateResult()
+        supplier_cost_write_failed = False
+        supplier_audit_count = 0
+        supplier_prepayment_tracking_keys = {
+            tracking_match_key(tracking)
+            for tracking, resolved in resolved_supplier_costs.values.items()
+            if resolved.record.kind == "prepayment" and tracking_match_key(tracking)
+        }
+        quarantine_unverified_refusals = bool(
+            self.supplier_cost_sources and supplier_costs.failed_sources
+        )
+        refused_orders_present = self.sheets.needs_refusal_reconciliation(
+            supplier_prepayment_tracking_keys=supplier_prepayment_tracking_keys,
+            quarantine_unverified_refusals=quarantine_unverified_refusals,
+        )
         latest_layout_day = self.sheets.latest_layout_day()
         layout_advanced = latest_layout_day is None or latest_layout_day < now.date()
         details_changed = refreshed > 0
@@ -322,7 +355,6 @@ class SyncService:
             unique_orders
             or layout_advanced
             or refused_orders_present
-            or cancelled_existing
             or details_changed
             or repairable_sheet_errors
         ) and not backup_created:
@@ -340,21 +372,14 @@ class SyncService:
             force_rebuild=(
                 layout_advanced
                 or refused_orders_present
-                or bool(cancelled_existing)
                 or details_changed
                 or schema_migration_required
                 or repairable_sheet_errors
             ),
             excluded_sync_keys=cancelled_existing,
+            supplier_prepayment_tracking_keys=supplier_prepayment_tracking_keys,
+            quarantine_unverified_refusals=quarantine_unverified_refusals,
         )
-        expense_updates = 0
-        if expenses is not None:
-            expense_updates = self.sheets.update_order_expenses(
-                expenses,
-                source=self.expense_source.source if self.expense_source else "rozetka",
-            )
-        supplier_cost_update = SupplierCostUpdateResult()
-        supplier_cost_write_failed = False
         if resolved_supplier_costs.values:
             try:
                 supplier_cost_update = self.sheets.update_supplier_costs(
@@ -369,19 +394,41 @@ class SyncService:
                 )
                 warnings.append(warning)
                 LOGGER.warning(warning)
+        if supplier_cost_update.audit_events:
+            try:
+                supplier_audit_count = self.sheets.append_audit_events(
+                    list(supplier_cost_update.audit_events)
+                )
+            except Exception as exc:  # noqa: BLE001 - audit must not abort order sync
+                warning = f"Google Sheets supplier audit log is unavailable: {exc}"
+                warnings.append(warning)
+                LOGGER.warning(warning)
+        expense_updates = 0
+        if expenses is not None:
+            expense_updates = self.sheets.update_order_expenses(
+                expenses,
+                source=self.expense_source.source if self.expense_source else "rozetka",
+            )
+        completion_status_keys = {
+            event.sync_key.casefold()
+            for event in completion_events
+            if event.field == "Статус замовлення"
+        }
         audit_events = self._build_audit_events(
             now=now,
             new_orders=unique_orders,
             completion_events=completion_events,
             shipment_changes=shipment_update.changes,
             cancelled_orders=[
-                order for order in cancelled_orders if order.sync_key.casefold() in cancelled_existing
+                order
+                for order in cancelled_orders
+                if order.sync_key.casefold() in cancelled_existing
+                and order.sync_key.casefold() in completion_status_keys
             ],
         )
-        audit_events.extend(supplier_cost_update.audit_events)
-        audit_count = 0
+        audit_count = supplier_audit_count
         try:
-            audit_count = self.sheets.append_audit_events(audit_events)
+            audit_count += self.sheets.append_audit_events(audit_events)
         except Exception as exc:  # noqa: BLE001 - audit must not abort order sync
             warning = f"Google Sheets audit log is unavailable: {exc}"
             warnings.append(warning)

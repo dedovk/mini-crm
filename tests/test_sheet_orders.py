@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from crm_sync.models import Order, OrderItem, ShipmentStatus
-from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
+from crm_sync.sheet_layout import REPORTING_EXCLUDED_REFUSAL, ROW_ORDER, sheet_serial
 from crm_sync.sheet_orders import collect_order_groups, markup_formula
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN
 
@@ -143,6 +143,7 @@ def test_refused_existing_order_is_removed_from_groups() -> None:
     refused_row[COLUMNS.sync_key - 1] = "prom:refused"
     refused_row[COLUMNS.row_type - 1] = ROW_ORDER
     refused_row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
+    refused_row[COLUMNS.reporting_state - 1] = REPORTING_EXCLUDED_REFUSAL
     second_item_row = refused_row.copy()
     second_item_row[COLUMNS.shipment_status - 1] = "Прямує до покупця"
 
@@ -185,3 +186,124 @@ def test_new_order_already_refused_is_not_added() -> None:
 
     assert groups.rows == {}
     assert groups.added_rows == 0
+
+
+def test_refused_existing_multi_item_order_with_prepayment_is_retained_and_excluded() -> None:
+    first = [""] * LAST_COLUMN
+    first[COLUMNS.source - 1] = "prom"
+    first[COLUMNS.tracking_number - 1] = "20451234567890"
+    first[COLUMNS.shipment_status - 1] = "Відмова від отримання"
+    first[COLUMNS.order_date - 1] = sheet_serial(date(2026, 8, 5))
+    first[COLUMNS.prepayment - 1] = 300
+    first[COLUMNS.sync_key - 1] = "prom:prepaid-refusal"
+    first[COLUMNS.row_type - 1] = ROW_ORDER
+    first[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
+    second = first.copy()
+    second[COLUMNS.prepayment - 1] = ""
+    second[COLUMNS.shipment_status - 1] = "Прямує до покупця"
+
+    groups = collect_order_groups(
+        [first, second], [], {}, sender_default="наш", observation_day=date(2026, 8, 11)
+    )
+
+    rows = groups.rows["prom:prepaid-refusal"]
+    assert len(rows) == 2
+    assert all(
+        row[COLUMNS.reporting_state - 1] == REPORTING_EXCLUDED_REFUSAL for row in rows
+    )
+
+
+def test_supplier_prepayment_marker_preserves_refused_order() -> None:
+    row = [""] * LAST_COLUMN
+    row[COLUMNS.source - 1] = "prom"
+    row[COLUMNS.tracking_number - 1] = "20451234567890"
+    row[COLUMNS.shipment_status - 1] = "Відмова від отримання"
+    row[COLUMNS.order_date - 1] = sheet_serial(date(2026, 8, 5))
+    row[COLUMNS.cost - 1] = "Предоплата"
+    row[COLUMNS.sync_key - 1] = "prom:supplier-prepaid"
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
+
+    groups = collect_order_groups(
+        [row], [], {}, sender_default="наш", observation_day=date(2026, 8, 11)
+    )
+
+    retained = groups.rows["prom:supplier-prepaid"][0]
+    assert retained[COLUMNS.reporting_state - 1] == REPORTING_EXCLUDED_REFUSAL
+
+
+def test_resolved_supplier_prepayment_preserves_matching_refusal() -> None:
+    row = [""] * LAST_COLUMN
+    row[COLUMNS.source - 1] = "prom"
+    row[COLUMNS.tracking_number - 1] = "20451234567890"
+    row[COLUMNS.shipment_status - 1] = "Відмова від отримання"
+    row[COLUMNS.order_date - 1] = sheet_serial(date(2026, 8, 5))
+    row[COLUMNS.sync_key - 1] = "prom:unverified-refusal"
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
+
+    groups = collect_order_groups(
+        [row],
+        [],
+        {},
+        sender_default="наш",
+        observation_day=date(2026, 8, 11),
+        supplier_prepayment_tracking_keys={"20451234567890"},
+    )
+
+    retained = groups.rows["prom:unverified-refusal"][0]
+    assert retained[COLUMNS.reporting_state - 1] == REPORTING_EXCLUDED_REFUSAL
+
+
+def test_supplier_outage_quarantines_refusal_until_it_can_be_verified() -> None:
+    row = [""] * LAST_COLUMN
+    row[COLUMNS.source - 1] = "prom"
+    row[COLUMNS.tracking_number - 1] = "20451234567890"
+    row[COLUMNS.shipment_status - 1] = "Відмова від отримання"
+    row[COLUMNS.order_date - 1] = sheet_serial(date(2026, 8, 5))
+    row[COLUMNS.sync_key - 1] = "prom:unverified-refusal"
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
+
+    groups = collect_order_groups(
+        [row],
+        [],
+        {},
+        sender_default="наш",
+        observation_day=date(2026, 8, 11),
+        quarantine_unverified_refusals=True,
+    )
+
+    retained = groups.rows["prom:unverified-refusal"][0]
+    assert retained[COLUMNS.reporting_state - 1] == REPORTING_EXCLUDED_REFUSAL
+
+
+def test_new_refused_order_with_note_prepayment_is_retained_and_excluded() -> None:
+    order = Order(
+        source="prom",
+        external_id="refused-prepaid",
+        created_at=datetime(2026, 8, 10, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 11, tzinfo=UTC),
+        customer_name="Покупець",
+        city="Київ",
+        phone="+380501234567",
+        tracking_number="20451234567890",
+        total=Decimal(100),
+        payment_method="смешанная",
+        note="Предоплата 50 грн",
+        sender="",
+        items=[OrderItem("Товар", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+    statuses = {
+        "20451234567890": ShipmentStatus(
+            "20451234567890", "Відмова від отримання", "102"
+        )
+    }
+
+    groups = collect_order_groups(
+        [], [order], statuses, sender_default="наш", observation_day=date(2026, 8, 11)
+    )
+
+    row = groups.rows["prom:refused-prepaid"][0]
+    assert row[COLUMNS.prepayment - 1] == 50
+    assert row[COLUMNS.reporting_state - 1] == REPORTING_EXCLUDED_REFUSAL

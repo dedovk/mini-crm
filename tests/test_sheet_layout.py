@@ -41,6 +41,7 @@ def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
     assert '$A$5:$A$30;"*Prom*";$Z$5:$Z$30;10' in formulas[ROW_REPORT_DAY][16]
     assert formulas[ROW_REPORT_DAY][18] == (
         '=SUMIFS($AB$5:$AB$30;$V$5:$V$30;"ORDER";'
+        '$AD$5:$AD$30;"<>EXCLUDED_REFUSAL";'
         '$W$5:$W$30;DATE(2026;8;2))'
     )
     assert 12 not in formulas[ROW_REPORT_FORECAST]

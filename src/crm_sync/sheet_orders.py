@@ -9,6 +9,7 @@ from gspread.utils import rowcol_to_a1
 
 from crm_sync.models import Order, ShipmentStatus
 from crm_sync.sheet_layout import (
+    REPORTING_EXCLUDED_REFUSAL,
     ROW_ORDER,
     clean_customer_display,
     parse_order_day,
@@ -23,11 +24,51 @@ from crm_sync.utils import (
     decimal_for_sheet,
     decimal_value,
     extract_ttn,
+    has_prepayment_request,
     is_refused_shipment_status,
     normalize_shipment_status,
     normalize_tracking_number,
     parse_prepayment,
+    tracking_match_key,
 )
+
+_REFUSED_ORDER_STATUS_MARKERS = (
+    "відмова",
+    "отказ",
+    "скас",
+    "отмен",
+    "cancel",
+    "refus",
+)
+
+
+def is_refused_order_status(value: Any) -> bool:
+    """Return whether a marketplace status represents cancellation or refusal."""
+    normalized = str(value or "").strip().casefold()
+    if normalized.startswith(("не скас", "не отмен", "not cancel", "not refus")):
+        return False
+    return any(marker in normalized for marker in _REFUSED_ORDER_STATUS_MARKERS)
+
+
+def row_has_prepayment(row: list[Any]) -> bool:
+    """Detect every persisted prepayment signal used by the CRM."""
+    prepayment = row[COLUMNS.prepayment - 1] if len(row) >= COLUMNS.prepayment else ""
+    cost = row[COLUMNS.cost - 1] if len(row) >= COLUMNS.cost else ""
+    note = row[COLUMNS.manager_note - 1] if len(row) >= COLUMNS.manager_note else ""
+    payment = row[COLUMNS.payment_method - 1] if len(row) >= COLUMNS.payment_method else ""
+    return (
+        decimal_value(prepayment) > 0
+        or has_prepayment_request(str(cost or ""))
+        or has_prepayment_request(str(note or ""))
+        or str(payment).strip().casefold() == "смешанная"
+    )
+
+
+def row_is_refused(row: list[Any]) -> bool:
+    """Detect refusal from either Nova Poshta or the source order status."""
+    shipment = row[COLUMNS.shipment_status - 1] if len(row) >= COLUMNS.shipment_status else ""
+    order_status = row[COLUMNS.order_status - 1] if len(row) >= COLUMNS.order_status else ""
+    return is_refused_shipment_status(shipment) or is_refused_order_status(order_status)
 
 
 def markup_formula(row_number: int) -> str:
@@ -68,29 +109,49 @@ def collect_order_groups(
     sender_default: str,
     observation_day: date,
     excluded_sync_keys: set[str] | None = None,
+    supplier_prepayment_tracking_keys: set[str] | None = None,
+    quarantine_unverified_refusals: bool = False,
 ) -> OrderGroups:
     result = OrderGroups(rows={}, days={}, sort_values={})
     excluded = {key.strip().casefold() for key in (excluded_sync_keys or set())}
-    refused_keys = {
-        str(row[COLUMNS.sync_key - 1]).strip().casefold()
+    supplier_prepayments = supplier_prepayment_tracking_keys or set()
+    order_rows = [
+        row
         for row in existing_values
         if len(row) >= COLUMNS.sync_key
         and str(row[COLUMNS.row_type - 1]).strip() == ROW_ORDER
-        and is_refused_shipment_status(
-            row[COLUMNS.shipment_status - 1]
-            if len(row) >= COLUMNS.shipment_status
-            else ""
-        )
+    ]
+    refused_keys = {
+        str(row[COLUMNS.sync_key - 1]).strip().casefold()
+        for row in order_rows
+        if row_is_refused(row)
+    } | excluded
+    prepaid_keys = {
+        str(row[COLUMNS.sync_key - 1]).strip().casefold()
+        for row in order_rows
+        if row_has_prepayment(row)
     }
+    prepaid_keys.update(
+        str(row[COLUMNS.sync_key - 1]).strip().casefold()
+        for row in order_rows
+        if tracking_match_key(row[COLUMNS.tracking_number - 1]) in supplier_prepayments
+    )
     for source_row in existing_values:
         key = (
             str(source_row[COLUMNS.sync_key - 1]).strip().casefold()
             if len(source_row) >= COLUMNS.sync_key
             else ""
         )
-        if key in refused_keys or key in excluded:
+        retained_refusal = key in refused_keys and (
+            key in prepaid_keys or quarantine_unverified_refusals
+        )
+        if key in refused_keys and not retained_refusal:
             continue
-        normalized = _normalize_existing_row(source_row, sender_default=sender_default)
+        normalized = _normalize_existing_row(
+            source_row,
+            sender_default=sender_default,
+            retain_refusal=retained_refusal,
+        )
         if normalized is None:
             continue
         key, order_day, sort_value, row = normalized
@@ -121,7 +182,7 @@ def collect_order_groups(
 
 
 def _normalize_existing_row(
-    source_row: list[Any], *, sender_default: str
+    source_row: list[Any], *, sender_default: str, retain_refusal: bool = False
 ) -> tuple[str, date, str, list[Any]] | None:
     row = list(source_row[:LAST_COLUMN]) + [""] * max(0, LAST_COLUMN - len(source_row))
     if str(row[COLUMNS.row_type - 1]).strip() != ROW_ORDER:
@@ -139,8 +200,11 @@ def _normalize_existing_row(
     row[COLUMNS.shipment_status - 1] = normalize_shipment_status(
         row[COLUMNS.shipment_status - 1]
     )
-    if is_refused_shipment_status(row[COLUMNS.shipment_status - 1]):
+    if row_is_refused(row) and not retain_refusal:
         return None
+    row[COLUMNS.reporting_state - 1] = (
+        REPORTING_EXCLUDED_REFUSAL if retain_refusal else ""
+    )
     row[COLUMNS.customer - 1] = clean_customer_display(row[COLUMNS.customer - 1])
     completion_day = parse_order_day(row[COLUMNS.order_date - 1])
     row[COLUMNS.order_date - 1] = sheet_serial(completion_day) if completion_day else ""
@@ -183,9 +247,18 @@ def _new_order_rows(
     shipment_status = shipment_statuses.get(extract_ttn(order.tracking_number)) or shipment_statuses.get(
         order.tracking_number
     )
-    if shipment_status and is_refused_shipment_status(shipment_status.status):
-        return []
     prepayment = order.prepayment or parse_prepayment(order.note)
+    refused = bool(
+        (shipment_status and is_refused_shipment_status(shipment_status.status))
+        or is_refused_order_status(order.source_status)
+    )
+    has_prepayment = (
+        prepayment > 0
+        or has_prepayment_request(order.note)
+        or order.payment_method.strip().casefold() == "смешанная"
+    )
+    if refused and not has_prepayment:
+        return []
     sender = order.sender.strip() or sender_default
     effective_day = order.completed_at.date() if order.completion_is_exact else observation_day
     rows: list[list[Any]] = []
@@ -238,5 +311,7 @@ def _new_order_rows(
             sheet_serial(observation_day) if order.is_completed else ""
         )
         row[COLUMNS.order_status - 1] = order.source_status
+        if refused:
+            row[COLUMNS.reporting_state - 1] = REPORTING_EXCLUDED_REFUSAL
         rows.append(row)
     return rows
