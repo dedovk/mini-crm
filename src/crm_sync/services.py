@@ -23,7 +23,7 @@ from crm_sync.models import (
 from crm_sync.utils import extract_ttn, parse_prepayment, tracking_match_key
 
 LOGGER = logging.getLogger(__name__)
-REPAIRABLE_PREFLIGHT_ERROR_PREFIXES = ("formula error at ",)
+REPAIRABLE_PREFLIGHT_ERROR_PREFIXES = ("repairable formula error at ",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,8 +206,11 @@ class SyncService:
         else:
             self.sheets.ensure_schema(apply_changes=False)
         sheet_integrity = self.sheets.validate_integrity()
+        repairable_sheet_errors = bool(sheet_integrity.errors) and _only_repairable_preflight_errors(
+            sheet_integrity.errors
+        )
         if not sheet_integrity.ok and (
-            self.dry_run or not _only_repairable_preflight_errors(sheet_integrity.errors)
+            self.dry_run or not repairable_sheet_errors
         ):
             raise IntegrityError(sheet_integrity)
         existing_keys = self.sheets.read_existing_sync_keys()
@@ -321,6 +324,7 @@ class SyncService:
             or refused_orders_present
             or cancelled_existing
             or details_changed
+            or repairable_sheet_errors
         ) and not backup_created:
             backup_created = self.sheets.create_backup(created_at=now)
             LOGGER.info(
@@ -339,6 +343,7 @@ class SyncService:
                 or bool(cancelled_existing)
                 or details_changed
                 or schema_migration_required
+                or repairable_sheet_errors
             ),
             excluded_sync_keys=cancelled_existing,
         )

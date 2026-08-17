@@ -6,6 +6,8 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Literal, Mapping
 
+InstallmentCommissionSource = Literal["", "reported", "tariff", "fallback", "legacy"]
+
 
 @dataclass(slots=True)
 class OrderItem:
@@ -37,6 +39,7 @@ class Order:
     prepayment: Decimal = Decimal(0)
     advertising_cost: Decimal = Decimal(0)
     installment_commission: Decimal = Decimal(0)
+    installment_commission_source: InstallmentCommissionSource = ""
     updated_at: datetime | None = None
 
     @property

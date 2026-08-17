@@ -43,6 +43,9 @@ jobs:
       GOOGLE_HEADER_ROW: "4"
       PROM_API_TOKEN: ${{ secrets.PROM_API_TOKEN }}
       PROM_API_BASE_URL: "https://my.prom.ua/api/v1"
+      # Prom's orders API can omit the fee amount for generic installment
+      # payments. Production uses the currently observed three-part rate.
+      PROM_INSTALLMENT_FALLBACK_RATE: "0.037"
       ROZETKA_API_TOKEN: ${{ secrets.ROZETKA_API_TOKEN }}
       ROZETKA_USERNAME: ${{ secrets.ROZETKA_USERNAME }}
       ROZETKA_PASSWORD: ${{ secrets.ROZETKA_PASSWORD }}

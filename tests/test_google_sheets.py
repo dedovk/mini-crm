@@ -17,6 +17,7 @@ from crm_sync.models import (
     SupplierCostRecord,
 )
 from crm_sync.sheet_layout import ALL_HEADERS, ROW_ORDER, sheet_serial
+from crm_sync.sheet_orders import markup_formula
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN, LAST_COLUMN_LETTER
 
 
@@ -148,6 +149,15 @@ def test_interrupted_receipt_migration_is_detected_from_ab_header() -> None:
     assert gateway.requires_schema_migration()
 
 
+def test_missing_installment_provenance_column_requires_schema_migration() -> None:
+    worksheet = LayoutWorksheet([list(ALL_HEADERS[:-1])])
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 1
+
+    assert gateway.requires_schema_migration()
+
+
 class BackupWorksheet:
     def __init__(self, title: str, sheet_id: int) -> None:
         self.title = title
@@ -223,10 +233,7 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     assert updates["L5"] == 100
     assert updates["M5"] == 100
     assert updates["N5"] == 100
-    assert updates["R5"] == (
-        '=IF(OR(Q5="",LOWER(Q5)="предоплата"),L5*K5,'
-        'IF(ISNUMBER(Q5),(L5-Q5)*K5,""))'
-    )
+    assert updates["R5"] == markup_formula(5)
     assert updates["S5"] == 10
     assert updates["Z5"] == 10
     assert updates["W5"] > 0
@@ -273,10 +280,7 @@ def test_refresh_order_details_repairs_text_unit_price_without_product_code() ->
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
     assert updates["L5"] == 4449
-    assert updates["R5"] == (
-        '=IF(OR(Q5="",LOWER(Q5)="предоплата"),L5*K5,'
-        'IF(ISNUMBER(Q5),(L5-Q5)*K5,""))'
-    )
+    assert updates["R5"] == markup_formula(5)
 
 
 def test_refresh_preserves_known_installment_when_prom_payload_is_incomplete() -> None:
@@ -316,6 +320,89 @@ def test_refresh_preserves_known_installment_when_prom_payload_is_incomplete() -
     assert "S5" not in updated_ranges
 
 
+@pytest.mark.parametrize("incoming_source", ["fallback", "tariff"])
+def test_refresh_does_not_replace_known_commission_with_calculation(
+    incoming_source: str,
+) -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:421660654"
+    row[COLUMNS.installment_commission - 1] = 55
+    row[COLUMNS.installment_commission_source - 1] = "reported"
+    row[COLUMNS.advertising_base - 1] = 90.11
+    row[COLUMNS.advertising - 1] = "90.11\n55.00"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 4
+    order = Order(
+        source="prom",
+        external_id="421660654",
+        created_at=datetime(2026, 8, 15, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 15, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451500000000",
+        total=Decimal(1329),
+        payment_method="оплата частями",
+        note="",
+        sender="",
+        advertising_cost=Decimal("90.11"),
+        installment_commission=Decimal("49.17"),
+        installment_commission_source=incoming_source,
+        items=[OrderItem("Товар", "SKU", Decimal(1), Decimal(1329), Decimal(1329))],
+    )
+
+    gateway.refresh_order_details([order])
+
+    updated_ranges = {update["range"] for update in worksheet.updates}
+    assert "AB5" not in updated_ranges
+    assert "S5" not in updated_ranges
+    assert "AC5" not in updated_ranges
+
+
+def test_refresh_replaces_old_fallback_with_new_configured_estimate() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:421660654"
+    row[COLUMNS.installment_commission - 1] = 40
+    row[COLUMNS.installment_commission_source - 1] = "fallback"
+    row[COLUMNS.advertising_base - 1] = 90.11
+    row[COLUMNS.advertising - 1] = "90.11\n40.00"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 4
+    order = Order(
+        source="prom",
+        external_id="421660654",
+        created_at=datetime(2026, 8, 15, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 15, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451500000000",
+        total=Decimal(1329),
+        payment_method="оплата частями",
+        note="",
+        sender="",
+        advertising_cost=Decimal("90.11"),
+        installment_commission=Decimal("49.17"),
+        installment_commission_source="fallback",
+        items=[OrderItem("Товар", "SKU", Decimal(1), Decimal(1329), Decimal(1329))],
+    )
+
+    gateway.refresh_order_details([order])
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert updates["AB5"] == 49.17
+    assert updates["S5"] == "90.11\n49.17"
+    assert "AC5" not in updates
+
+
 def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> None:
     rows = [[""] * LAST_COLUMN for _ in range(7)]
     for index, tracking in enumerate(
@@ -347,9 +434,9 @@ def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> No
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert changed.cell_updates == 2
     assert updates["Q5:R5"][0] == 1079
-    assert "LOWER(Q5)" in updates["Q5:R5"][1]
+    assert 'LOWER(Q5&"")' in updates["Q5:R5"][1]
     assert updates["Q6:R6"][0] == "предоплата"
-    assert "LOWER(Q6)" in updates["Q6:R6"][1]
+    assert 'LOWER(Q6&"")' in updates["Q6:R6"][1]
     assert "Q7:R7" not in updates
     assert len(changed.audit_events) == 2
 
@@ -583,7 +670,7 @@ def test_completion_backfill_migrates_historical_rows_and_repeated_headers() -> 
 
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert changed == 3
-    assert updates["U4:AB4"][3:5] == [
+    assert updates[f"U4:{LAST_COLUMN_LETTER}4"][3:5] == [
         "Перше спостереження виконання",
         "Статус замовлення джерела",
     ]
@@ -897,7 +984,7 @@ def test_sheet_integrity_rejects_formula_errors_negative_cost_and_split_order() 
         rows[index][COLUMNS.sync_key - 1] = "prom:501"
         rows[index][COLUMNS.order_date - 1] = "05.08.2026"
     rows[4][COLUMNS.cost - 1] = "-10"
-    rows[6][COLUMNS.markup - 1] = "#REF!"
+    rows[6][COLUMNS.markup - 1] = "#ERROR!"
     worksheet = StubWorksheet(rows)
     gateway = object.__new__(GoogleSheetsGateway)
     gateway.worksheet = worksheet

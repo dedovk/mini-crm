@@ -33,11 +33,12 @@ class SheetColumns:
     advertising_base: int = 26
     receipt: int = 27
     installment_commission: int = 28
+    installment_commission_source: int = 29
 
 
 COLUMNS = SheetColumns()
-LAST_COLUMN = COLUMNS.installment_commission
-LAST_COLUMN_LETTER = "AB"
+LAST_COLUMN = COLUMNS.installment_commission_source
+LAST_COLUMN_LETTER = "AC"
 
 PAYMENT_OPTIONS = (
     "пром оплата(оплата картой)",

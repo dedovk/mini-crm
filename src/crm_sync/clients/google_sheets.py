@@ -268,17 +268,36 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values(value_render_option="FORMATTED_VALUE")
         errors: list[str] = []
         warnings: list[str] = []
-        formula_errors = ("#REF!", "#VALUE!", "#DIV/0!", "#NAME?", "#N/A")
+        formula_errors = (
+            "#ERROR!",
+            "#REF!",
+            "#VALUE!",
+            "#DIV/0!",
+            "#NAME?",
+            "#N/A",
+        )
         rows_by_key: dict[str, list[int]] = {}
         totals_by_key: dict[str, set[Decimal]] = {}
         missing_completion_keys: set[str] = set()
+        managed_report_rows = {ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST}
 
         for row_number, row in enumerate(values, start=1):
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip()
+                if len(row) >= COLUMNS.row_type
+                else ""
+            )
             for column, value in enumerate(row, start=1):
                 rendered = str(value).strip()
-                if any(error in rendered for error in formula_errors):
-                    errors.append(f"formula error at {rowcol_to_a1(row_number, column)}: {rendered}")
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+                if rendered in formula_errors:
+                    repairable = (
+                        row_type == ROW_ORDER and column == COLUMNS.markup
+                    ) or row_type in managed_report_rows
+                    prefix = "repairable " if repairable else ""
+                    errors.append(
+                        f"{prefix}formula error at "
+                        f"{rowcol_to_a1(row_number, column)}: {rendered}"
+                    )
             if row_type != ROW_ORDER:
                 continue
             sync_key = (
@@ -372,7 +391,7 @@ class GoogleSheetsGateway:
                         "sheetId": self.worksheet.id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.installment_commission - 1,
-                        "endIndex": COLUMNS.installment_commission,
+                        "endIndex": COLUMNS.installment_commission_source,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -501,7 +520,7 @@ class GoogleSheetsGateway:
                         "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.installment_commission - 1,
-                        "endIndex": COLUMNS.installment_commission,
+                        "endIndex": COLUMNS.installment_commission_source,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -1143,6 +1162,11 @@ class GoogleSheetsGateway:
                         if len(row) >= COLUMNS.installment_commission
                         else ""
                     )
+                    current_installment_source = (
+                        str(row[COLUMNS.installment_commission_source - 1]).strip()
+                        if len(row) >= COLUMNS.installment_commission_source
+                        else ""
+                    )
                     existing_installment = decimal_value(current_installment)
                     effective_installment = order.installment_commission
                     if (
@@ -1151,6 +1175,20 @@ class GoogleSheetsGateway:
                         and existing_installment > 0
                     ):
                         effective_installment = existing_installment
+                    incoming_source = order.installment_commission_source or (
+                        "reported" if effective_installment > 0 else ""
+                    )
+                    source_rank = {"fallback": 1, "tariff": 2, "reported": 3}
+                    current_rank = source_rank.get(
+                        current_installment_source,
+                        3 if existing_installment > 0 else 0,
+                    )
+                    incoming_rank = source_rank.get(incoming_source, 0)
+                    if existing_installment > 0 and incoming_rank < current_rank:
+                        effective_installment = existing_installment
+                    effective_source = current_installment_source
+                    if effective_installment == order.installment_commission:
+                        effective_source = incoming_source
                     if decimal_value(current_base) != order.advertising_cost:
                         updates.append(
                             {
@@ -1163,6 +1201,16 @@ class GoogleSheetsGateway:
                             {
                                 "range": rowcol_to_a1(row_number, COLUMNS.installment_commission),
                                 "values": [[decimal_for_sheet(effective_installment)]],
+                            }
+                        )
+                    if current_installment_source != effective_source:
+                        updates.append(
+                            {
+                                "range": rowcol_to_a1(
+                                    row_number,
+                                    COLUMNS.installment_commission_source,
+                                ),
+                                "values": [[effective_source]],
                             }
                         )
                     expected_advertising = advertising_display(
@@ -1210,7 +1258,11 @@ class GoogleSheetsGateway:
                 current_formula = (
                     str(row[COLUMNS.markup - 1]).strip() if len(row) >= COLUMNS.markup else ""
                 )
-                if current_formula != formula:
+                # A structural rebuild repairs every historical formula. Limit
+                # pre-rebuild cell updates to orders present in this API batch
+                # so a formula syntax migration does not create thousands of
+                # redundant ranges before rewriting the sheet once.
+                if order and current_formula != formula:
                     updates.append(
                         {
                             "range": rowcol_to_a1(row_number, COLUMNS.markup),
@@ -1629,7 +1681,7 @@ class GoogleSheetsGateway:
         return order_groups.added_rows
 
     def requires_schema_migration(self) -> bool:
-        """Return whether AA still contains the legacy installment column."""
+        """Return whether receipt or commission-provenance schema is outdated."""
         self._locate_header_row()
         headers = self.worksheet.row_values(self.header_row)
         current = (
@@ -1642,5 +1694,15 @@ class GoogleSheetsGateway:
             if len(headers) >= COLUMNS.installment_commission
             else ""
         )
+        source_header = (
+            str(headers[COLUMNS.installment_commission_source - 1]).strip().casefold()
+            if len(headers) >= COLUMNS.installment_commission_source
+            else ""
+        )
         legacy = LEGACY_INSTALLMENT_HEADER.casefold()
-        return current == legacy or (not current and migrated_header == legacy)
+        expected_source = ALL_HEADERS[COLUMNS.installment_commission_source - 1].casefold()
+        return (
+            current == legacy
+            or (not current and migrated_header == legacy)
+            or source_header != expected_source
+        )

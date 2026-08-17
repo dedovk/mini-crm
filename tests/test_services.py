@@ -105,7 +105,7 @@ class RepairableFormulaErrorSheetsStub(ProductionSheetsStub):
 
         self.validate_calls += 1
         if self.validate_calls == 1:
-            return IntegrityReport(errors=("formula error at R5: #VALUE!",))
+            return IntegrityReport(errors=("repairable formula error at R5: #VALUE!",))
         return IntegrityReport()
 
     def refresh_order_details(self, orders) -> int:
@@ -571,6 +571,8 @@ def test_production_run_repairs_formula_errors_before_fatal_postflight() -> None
 
     assert sheets.validate_calls == 2
     assert sheets.refresh_calls == 1
+    assert sheets.force_rebuild
+    assert sheets.backups == 1
     assert result.refreshed_cells == 2
     assert result.warnings == (
         "Sheet contains formula errors before repair; production sync will try to refresh formulas and values.",

@@ -7,7 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from crm_sync.clients.http import ApiError, HttpClient
-from crm_sync.models import Order, OrderItem
+from crm_sync.models import InstallmentCommissionSource, Order, OrderItem
 from crm_sync.utils import (
     city_from_address,
     classify_payment,
@@ -96,7 +96,19 @@ def _find_installment_commission_by_label(value: Any) -> Any:
     return None
 
 
-def _installment_cost(raw: dict[str, Any], payment_text: str, total: Decimal) -> Decimal:
+def _installment_cost(
+    raw: dict[str, Any],
+    payment_text: str,
+    total: Decimal,
+    *,
+    fallback_rate: Decimal,
+) -> tuple[Decimal, InstallmentCommissionSource]:
+    """Return fee and provenance used to obtain it.
+
+    The lookup order is an explicit API field, a labeled nested charge, a
+    supported payment-count tariff, and finally the configured fallback rate.
+    All results are positive and rounded to kopecks.
+    """
     explicit = _find_named_value(
         raw,
         {
@@ -107,10 +119,10 @@ def _installment_cost(raw: dict[str, Any], payment_text: str, total: Decimal) ->
     )
     explicit_amount = abs(decimal_value(explicit))
     if explicit_amount > 0:
-        return explicit_amount
+        return explicit_amount, "reported"
     labeled_amount = decimal_value(_find_installment_commission_by_label(raw))
     if labeled_amount > 0:
-        return labeled_amount
+        return labeled_amount, "reported"
 
     count_value = _find_named_value(
         raw,
@@ -119,7 +131,7 @@ def _installment_cost(raw: dict[str, Any], payment_text: str, total: Decimal) ->
             "payment_parts_count", "pay_parts_count", "credit_parts_count",
         },
     )
-    count_match = re.search(r"(?<!\d)(2|3|4|5|6|7|8|9|10|12|15|18|24)(?!\d)", payment_text)
+    count_match = re.search(r"(?<!\d)(\d{1,2})(?!\d)", payment_text)
     try:
         count = int(decimal_value(count_value)) if count_value not in (None, "") else 0
     except (TypeError, ValueError):
@@ -128,18 +140,37 @@ def _installment_cost(raw: dict[str, Any], payment_text: str, total: Decimal) ->
         count = int(count_match.group(1))
     rate = INSTALLMENT_RATES.get(count)
     if rate and total > 0:
-        return (total * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return Decimal(0)
+        return (
+            (total * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            "tariff",
+        )
+    if count == 0 and fallback_rate > 0 and total > 0:
+        return (
+            (total * fallback_rate).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            ),
+            "fallback",
+        )
+    return Decimal(0), ""
 
 
 class PromClient:
     source = "prom"
 
-    def __init__(self, http: HttpClient, *, token: str, base_url: str, timezone: str) -> None:
+    def __init__(
+        self,
+        http: HttpClient,
+        *,
+        token: str,
+        base_url: str,
+        timezone: str,
+        installment_fallback_rate: Decimal = Decimal(0),
+    ) -> None:
         self.http = http
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timezone = timezone
+        self.installment_fallback_rate = installment_fallback_rate
 
     def fetch_orders(self, since: datetime) -> list[Order]:
         if not self.token:
@@ -300,16 +331,28 @@ class PromClient:
         advertising_cost = decimal_value(prosale) or decimal_value(cpa_commission)
         total = decimal_value(first_value(raw, "full_price", "total_price", "price", "total"))
         payment_method = classify_payment(payment_text, note)
-        installment_commission = (
-            _installment_cost(raw, payment_text, total)
-            if payment_method == "оплата частями"
-            else Decimal(0)
-        )
-        if payment_method == "оплата частями" and installment_commission == 0:
-            LOGGER.warning(
-                "Prom installment order %s has no explicit commission or supported payment count",
-                first_value(raw, "id", "order_id"),
+        installment_commission = Decimal(0)
+        installment_source: InstallmentCommissionSource = ""
+        if payment_method == "оплата частями":
+            installment_commission, installment_source = _installment_cost(
+                raw,
+                payment_text,
+                total,
+                fallback_rate=self.installment_fallback_rate,
             )
+            if installment_source == "fallback":
+                LOGGER.warning(
+                    "Prom installment commission for order %s was estimated at "
+                    "configured rate %s because the API omitted fee details",
+                    first_value(raw, "id", "order_id"),
+                    self.installment_fallback_rate,
+                )
+            elif installment_commission == 0:
+                LOGGER.warning(
+                    "Prom installment order %s has no explicit commission or "
+                    "supported payment count",
+                    first_value(raw, "id", "order_id"),
+                )
         recipient_name = " ".join(
             str(first_value(recipient, key)).strip()
             for key in ("last_name", "first_name", "second_name")
@@ -363,4 +406,5 @@ class PromClient:
             prepayment=parse_prepayment(note),
             advertising_cost=advertising_cost,
             installment_commission=installment_commission,
+            installment_commission_source=installment_source,
         )

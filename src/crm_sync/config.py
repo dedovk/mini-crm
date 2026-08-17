@@ -5,6 +5,7 @@ import binascii
 import json
 import os
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -45,6 +46,31 @@ def _env_bool(name: str, default: bool = False) -> bool:
     )
 
 
+def _env_decimal(
+    name: str,
+    default: Decimal,
+    *,
+    minimum: Decimal = Decimal(0),
+    maximum: Decimal | None = None,
+) -> Decimal:
+    """Read a decimal environment variable and enforce configured bounds."""
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ConfigurationError(f"{name} must be a decimal number") from exc
+    if (
+        not value.is_finite()
+        or value < minimum
+        or (maximum is not None and value > maximum)
+    ):
+        upper = f" and at most {maximum}" if maximum is not None else ""
+        raise ConfigurationError(f"{name} must be at least {minimum}{upper}")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     google_service_account_info: dict[str, Any]
@@ -54,6 +80,7 @@ class Settings:
     supplier_imaxi_spreadsheet_id: str
     prom_token: str
     prom_base_url: str
+    prom_installment_fallback_rate: Decimal
     rozetka_token: str
     rozetka_username: str
     rozetka_password: str
@@ -117,6 +144,11 @@ class Settings:
             supplier_imaxi_spreadsheet_id=_env("SUPPLIER_IMAXI_SPREADSHEET_ID"),
             prom_token=_env("PROM_API_TOKEN"),
             prom_base_url=_env("PROM_API_BASE_URL", "https://my.prom.ua/api/v1"),
+            prom_installment_fallback_rate=_env_decimal(
+                "PROM_INSTALLMENT_FALLBACK_RATE",
+                Decimal(0),
+                maximum=Decimal(1),
+            ),
             rozetka_token=_env("ROZETKA_API_TOKEN"),
             rozetka_username=_env("ROZETKA_USERNAME"),
             rozetka_password=_env("ROZETKA_PASSWORD"),

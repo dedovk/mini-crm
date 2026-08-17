@@ -36,9 +36,9 @@ def markup_formula(row_number: int) -> str:
     cost = rowcol_to_a1(row_number, COLUMNS.cost)
     quantity = rowcol_to_a1(row_number, COLUMNS.quantity)
     return (
-        f'=IF(OR({cost}="",LOWER({cost})="предоплата"),'
-        f'{unit_price}*{quantity},IF(ISNUMBER({cost}),'
-        f'({unit_price}-{cost})*{quantity},""))'
+        f'=IF(OR({cost}="";LOWER({cost}&"")="предоплата");'
+        f'{unit_price}*{quantity};IF(ISNUMBER({cost});'
+        f'({unit_price}-{cost})*{quantity};""))'
     )
 
 
@@ -161,6 +161,10 @@ def _normalize_existing_row(
         row[COLUMNS.first_seen_completed - 1] = sheet_serial(completion_day or order_day)
     base = decimal_value(row[COLUMNS.advertising_base - 1])
     installment = decimal_value(row[COLUMNS.installment_commission - 1])
+    if installment > 0 and not str(
+        row[COLUMNS.installment_commission_source - 1]
+    ).strip():
+        row[COLUMNS.installment_commission_source - 1] = "legacy"
     if base == 0 and installment == 0:
         # One-time migration from the former numeric business column.
         base = decimal_value(row[COLUMNS.advertising - 1])
@@ -219,6 +223,10 @@ def _new_order_rows(
                 decimal_for_sheet(order.installment_commission)
                 if order.installment_commission > 0
                 else ""
+            )
+            row[COLUMNS.installment_commission_source - 1] = (
+                order.installment_commission_source
+                or ("reported" if order.installment_commission > 0 else "")
             )
             row[COLUMNS.advertising - 1] = advertising_display(
                 order.advertising_cost, order.installment_commission

@@ -309,6 +309,7 @@ def test_prom_normalizer_reads_installment_commission_separately() -> None:
     assert order.payment_method == "оплата частями"
     assert order.advertising_cost == Decimal("295.86")
     assert order.installment_commission == Decimal("164.61")
+    assert order.installment_commission_source == "reported"
 
 
 def test_prom_normalizer_calculates_installment_commission_from_parts_count() -> None:
@@ -327,6 +328,54 @@ def test_prom_normalizer_calculates_installment_commission_from_parts_count() ->
     )
 
     assert order.installment_commission == Decimal("164.61")
+    assert order.installment_commission_source == "tariff"
+
+
+def test_prom_normalizer_uses_configured_fallback_rate_when_api_omits_fee_details() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+        installment_fallback_rate=Decimal("0.037"),
+    )
+    order = client._normalize(
+        {
+            "id": 421660654,
+            "status": "delivered",
+            "date_created": "2026-08-15 18:13:00",
+            "full_price": 1329,
+            "payment_option": {"name": "Оплата частинами"},
+            "prosale_commission": 90.11,
+            "products": [{"name": "Товар", "quantity": 1, "price": 1329}],
+        }
+    )
+
+    assert order.advertising_cost == Decimal("90.11")
+    assert order.installment_commission == Decimal("49.17")
+    assert order.installment_commission_source == "fallback"
+
+
+def test_prom_normalizer_does_not_guess_unknown_installment_count() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+        installment_fallback_rate=Decimal("0.037"),
+    )
+    order = client._normalize(
+        {
+            "id": 421660658,
+            "status": "delivered",
+            "date_created": "2026-08-15 18:13:00",
+            "full_price": 1329,
+            "payment_option": {"name": "Оплата частинами 11"},
+            "products": [{"name": "Товар", "quantity": 1, "price": 1329}],
+        }
+    )
+
+    assert order.installment_commission == 0
 
 
 def test_prom_normalizer_reads_installment_commission_from_named_charge() -> None:

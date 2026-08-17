@@ -43,6 +43,7 @@ TECHNICAL_HEADERS = (
     "Базові витрати маркетплейсу, грн",
     "Чек",
     "Комісія оплати частинами, грн",
+    "Джерело комісії оплати частинами",
 )
 ALL_HEADERS = BUSINESS_HEADERS + TECHNICAL_HEADERS
 

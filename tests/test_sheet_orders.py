@@ -3,8 +3,15 @@ from decimal import Decimal
 
 from crm_sync.models import Order, OrderItem, ShipmentStatus
 from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
-from crm_sync.sheet_orders import collect_order_groups
+from crm_sync.sheet_orders import collect_order_groups, markup_formula
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN
+
+
+def test_markup_formula_uses_ukrainian_sheet_separator_and_numeric_safe_text() -> None:
+    assert markup_formula(5) == (
+        '=IF(OR(Q5="";LOWER(Q5&"")="предоплата");L5*K5;'
+        'IF(ISNUMBER(Q5);(L5-Q5)*K5;""))'
+    )
 
 
 def test_collect_order_groups_normalizes_legacy_rows_without_losing_manual_values() -> None:
@@ -16,6 +23,7 @@ def test_collect_order_groups_normalizes_legacy_rows_without_losing_manual_value
     row[COLUMNS.sender - 1] = "-"
     row[COLUMNS.cost - 1] = 700
     row[COLUMNS.receipt - 1] = "https://check.checkbox.ua/receipt/abc"
+    row[COLUMNS.installment_commission - 1] = 49.17
     row[COLUMNS.sync_key - 1] = "prom:1"
     row[COLUMNS.row_type - 1] = ROW_ORDER
     row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
@@ -30,6 +38,7 @@ def test_collect_order_groups_normalizes_legacy_rows_without_losing_manual_value
     assert normalized[COLUMNS.sender - 1] == "наш"
     assert normalized[COLUMNS.cost - 1] == 700
     assert normalized[COLUMNS.receipt - 1] == "https://check.checkbox.ua/receipt/abc"
+    assert normalized[COLUMNS.installment_commission_source - 1] == "legacy"
 
 
 def test_collect_order_groups_writes_advertising_once_for_multi_item_order() -> None:
@@ -64,6 +73,7 @@ def test_collect_order_groups_writes_advertising_once_for_multi_item_order() -> 
     assert rows[0][COLUMNS.advertising - 1] == "10.00\n3.70"
     assert rows[0][COLUMNS.advertising_base - 1] == 10
     assert rows[0][COLUMNS.installment_commission - 1] == 3.7
+    assert rows[0][COLUMNS.installment_commission_source - 1] == "reported"
     assert rows[1][COLUMNS.advertising - 1] == ""
     assert all(
         row[COLUMNS.operational_date - 1] == sheet_serial(date(2026, 8, 8)) for row in rows
