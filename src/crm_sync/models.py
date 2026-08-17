@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from types import MappingProxyType
+from typing import Literal, Mapping
 
 
 @dataclass(slots=True)
@@ -111,3 +112,44 @@ class SyncHealthState:
     alert_due: bool = False
     recovered: bool = False
     failed_components: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SupplierCostRecord:
+    """A typed supplier value independent from its sheet presentation."""
+
+    kind: Literal["unit_cost", "prepayment"]
+    unit_cost: Decimal | None = None
+
+    @classmethod
+    def cost(cls, value: Decimal) -> SupplierCostRecord:
+        return cls(kind="unit_cost", unit_cost=value)
+
+    @classmethod
+    def prepayment(cls) -> SupplierCostRecord:
+        return cls(kind="prepayment")
+
+
+@dataclass(frozen=True, slots=True)
+class SupplierCostBatch:
+    """Immutable normalized supplier values with their source identity."""
+
+    source: str
+    values: Mapping[str, SupplierCostRecord] = field(default_factory=dict)
+    warnings: tuple[str, ...] = ()
+    degraded: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSupplierCost:
+    source: str
+    record: SupplierCostRecord
+
+
+@dataclass(frozen=True, slots=True)
+class SupplierCostUpdateResult:
+    cell_updates: int = 0
+    audit_events: tuple[OrderAuditEvent, ...] = ()

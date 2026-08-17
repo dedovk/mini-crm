@@ -40,6 +40,7 @@ def render_github_summary(result: SyncResult) -> str:
             f"| Shipment statuses received | {result.shipment_statuses} |",
             f"| Detail/formula cells refreshed | {result.refreshed_cells} |",
             f"| Expense cells updated | {result.expense_updates} |",
+            f"| Supplier cost cells updated | {result.supplier_cost_updates} |",
             f"| Shipment status cells updated | {result.status_updates} |",
             f"| Item rows appended | {result.appended_rows} |",
             f"| Audit events written | {result.audit_events} |",

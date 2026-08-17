@@ -9,6 +9,7 @@ from crm_sync.clients.nova_poshta import NovaPoshtaClient
 from crm_sync.clients.opencart import OpenCartClient
 from crm_sync.clients.prom import PromClient
 from crm_sync.clients.rozetka import RozetkaClient
+from crm_sync.clients.supplier_imaxi import ImaxiSupplierSheetClient
 from crm_sync.config import ConfigurationError, Settings
 from crm_sync.github_notifier import notify_sync_health
 from crm_sync.reporting import write_github_summary
@@ -58,6 +59,16 @@ def build_service(settings: Settings) -> SyncService:
             timezone=settings.timezone,
         ),
     ]
+    supplier_cost_sources = []
+    if settings.supplier_imaxi_spreadsheet_id:
+        supplier_cost_sources.append(
+            ImaxiSupplierSheetClient(
+                credentials_info=settings.google_service_account_info,
+                spreadsheet_id=settings.supplier_imaxi_spreadsheet_id,
+                timeout=settings.http_timeout,
+                max_retries=settings.http_max_retries,
+            )
+        )
     return SyncService(
         sheets=sheets,
         nova_poshta=NovaPoshtaClient(
@@ -67,6 +78,7 @@ def build_service(settings: Settings) -> SyncService:
         ),
         sources=sources,
         expense_source=rozetka,
+        supplier_cost_sources=supplier_cost_sources,
         timezone=settings.timezone,
         lookback_days=settings.sync_lookback_days,
         new_order_max_age_days=settings.new_order_max_age_days,

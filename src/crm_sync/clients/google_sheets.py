@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -14,9 +14,11 @@ from crm_sync.integrity import IntegrityReport
 from crm_sync.models import (
     Order,
     OrderAuditEvent,
+    ResolvedSupplierCost,
     ShipmentStatus,
     ShipmentStatusChange,
     ShipmentUpdateResult,
+    SupplierCostUpdateResult,
     SyncHealthState,
 )
 from crm_sync.sheet_layout import (
@@ -40,7 +42,7 @@ from crm_sync.sheet_meta import (
     ensure_sheet_audit_worksheet,
     record_sheet_sync_health,
 )
-from crm_sync.sheet_orders import advertising_display, collect_order_groups
+from crm_sync.sheet_orders import advertising_display, collect_order_groups, markup_formula
 from crm_sync.sheet_schema import (
     COLUMNS,
     LAST_COLUMN,
@@ -55,7 +57,9 @@ from crm_sync.utils import (
     decimal_value,
     extract_ttn,
     is_refused_shipment_status,
+    normalize_tracking_number,
     parse_prepayment,
+    tracking_match_key,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -1099,10 +1103,7 @@ class GoogleSheetsGateway:
                                 "values": [[order.payment_method]],
                             }
                         )
-                unit_price_cell = rowcol_to_a1(row_number, COLUMNS.unit_price)
-                cost_cell = rowcol_to_a1(row_number, COLUMNS.cost)
-                quantity_cell = rowcol_to_a1(row_number, COLUMNS.quantity)
-                formula = f"=({unit_price_cell}-{cost_cell})*{quantity_cell}"
+                formula = markup_formula(row_number)
                 current_formula = (
                     str(row[COLUMNS.markup - 1]).strip() if len(row) >= COLUMNS.markup else ""
                 )
@@ -1350,6 +1351,106 @@ class GoogleSheetsGateway:
         if updates:
             self.worksheet.batch_update(updates, raw=False)
         return len(updates)
+
+    def update_supplier_costs(
+        self,
+        costs: Mapping[str, ResolvedSupplierCost],
+        *,
+        observed_at: datetime,
+    ) -> SupplierCostUpdateResult:
+        """Fill blank unit-cost cells by matching normalized tracking numbers."""
+        if not costs:
+            return SupplierCostUpdateResult()
+        normalized_costs = {
+            normalized: value
+            for tracking, value in costs.items()
+            if (normalized := tracking_match_key(tracking))
+        }
+        if not normalized_costs:
+            return SupplierCostUpdateResult()
+
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        candidates: list[tuple[int, list[Any], str, ResolvedSupplierCost]] = []
+        for row_number, row in enumerate(values, start=1):
+            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            if row_type != ROW_ORDER:
+                continue
+            current_cost = row[COLUMNS.cost - 1] if len(row) >= COLUMNS.cost else ""
+            if str(current_cost).strip():
+                continue
+            tracking = tracking_match_key(
+                row[COLUMNS.tracking_number - 1]
+                if len(row) >= COLUMNS.tracking_number
+                else ""
+            )
+            expected = normalized_costs.get(tracking)
+            if expected is None:
+                continue
+            candidates.append((row_number, row, tracking, expected))
+
+        if not candidates:
+            return SupplierCostUpdateResult()
+
+        ranges = [
+            range_name
+            for row_number, _, _, _ in candidates
+            for range_name in (
+                rowcol_to_a1(row_number, COLUMNS.tracking_number),
+                rowcol_to_a1(row_number, COLUMNS.cost),
+            )
+        ]
+        latest = self.worksheet.batch_get(ranges, value_render_option="FORMULA")
+        updates: list[dict[str, Any]] = []
+        events: list[OrderAuditEvent] = []
+        for index, (row_number, row, tracking, expected) in enumerate(candidates):
+            latest_tracking = latest[index * 2][0][0] if latest[index * 2] else ""
+            latest_cost = latest[index * 2 + 1][0][0] if latest[index * 2 + 1] else ""
+            if tracking_match_key(latest_tracking) != tracking or str(latest_cost).strip():
+                continue
+            sheet_value: str | int | float = (
+                "предоплата"
+                if expected.record.kind == "prepayment"
+                else decimal_for_sheet(expected.record.unit_cost or Decimal(0))
+            )
+            updates.append(
+                {
+                    "range": (
+                        f"{rowcol_to_a1(row_number, COLUMNS.cost)}:"
+                        f"{rowcol_to_a1(row_number, COLUMNS.markup)}"
+                    ),
+                    "values": [[sheet_value, markup_formula(row_number)]],
+                }
+            )
+            sync_key = str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
+            source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
+            order_id = (
+                str(row[COLUMNS.order_number - 1]).strip()
+                if len(row) >= COLUMNS.order_number
+                else ""
+            )
+            events.append(
+                OrderAuditEvent(
+                    occurred_at=observed_at,
+                    event_type="supplier_cost_filled",
+                    source=source,
+                    order_id=order_id,
+                    sync_key=sync_key,
+                    tracking_number=normalize_tracking_number(latest_tracking),
+                    field="unit_cost",
+                    old_value="",
+                    new_value=str(sheet_value),
+                    details=expected.source,
+                )
+            )
+
+        if updates:
+            self.worksheet.batch_update(updates, raw=False)
+        changed_costs = len(updates)
+        LOGGER.info("Filled %s blank supplier cost cell(s)", changed_costs)
+        return SupplierCostUpdateResult(
+            cell_updates=changed_costs,
+            audit_events=tuple(events),
+        )
 
     def append_orders(
         self,

@@ -5,9 +5,17 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from gspread.utils import a1_to_rowcol
 
 from crm_sync.clients.google_sheets import ConcurrentSheetEditError, GoogleSheetsGateway
-from crm_sync.models import Order, OrderAuditEvent, OrderItem, ShipmentStatus
+from crm_sync.models import (
+    Order,
+    OrderAuditEvent,
+    OrderItem,
+    ResolvedSupplierCost,
+    ShipmentStatus,
+    SupplierCostRecord,
+)
 from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN, LAST_COLUMN_LETTER
 
@@ -42,6 +50,20 @@ class StubWorksheet:
 
     def batch_update(self, updates, **kwargs) -> None:
         self.updates = updates
+
+    def batch_get(self, ranges, **kwargs):
+        result = []
+        for range_name in ranges:
+            row, column = a1_to_rowcol(range_name)
+            value = self.values[row - 1][column - 1]
+            result.append([[value]] if str(value).strip() else [])
+        return result
+
+
+class ConcurrentCostWorksheet(StubWorksheet):
+    def batch_get(self, ranges, **kwargs):
+        self.values[4][COLUMNS.cost - 1] = 999
+        return super().batch_get(ranges, **kwargs)
 
 
 class LayoutWorksheet(StubWorksheet):
@@ -162,7 +184,10 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     assert updates["L5"] == 100
     assert updates["M5"] == 100
     assert updates["N5"] == 100
-    assert updates["R5"] == "=(L5-Q5)*K5"
+    assert updates["R5"] == (
+        '=IF(OR(Q5="",LOWER(Q5)="предоплата"),L5*K5,'
+        'IF(ISNUMBER(Q5),(L5-Q5)*K5,""))'
+    )
     assert updates["S5"] == 10
     assert updates["Z5"] == 10
     assert updates["W5"] > 0
@@ -209,7 +234,115 @@ def test_refresh_order_details_repairs_text_unit_price_without_product_code() ->
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
     assert updates["L5"] == 4449
-    assert updates["R5"] == "=(L5-Q5)*K5"
+    assert updates["R5"] == (
+        '=IF(OR(Q5="",LOWER(Q5)="предоплата"),L5*K5,'
+        'IF(ISNUMBER(Q5),(L5-Q5)*K5,""))'
+    )
+
+
+def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(7)]
+    for index, tracking in enumerate(
+        ("20451510462545", "RMP-598674684", "20451509877182"),
+        start=4,
+    ):
+        rows[index][COLUMNS.row_type - 1] = ROW_ORDER
+        rows[index][COLUMNS.tracking_number - 1] = tracking
+    rows[6][COLUMNS.cost - 1] = 500
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    changed = gateway.update_supplier_costs(
+        {
+            "20451510462545": ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.cost(Decimal("1079"))
+            ),
+            "rmp-598674684": ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.prepayment()
+            ),
+            "20451509877182": ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.cost(Decimal("368"))
+            ),
+        },
+        observed_at=datetime(2026, 8, 17, tzinfo=UTC),
+    )
+
+    updates = {update["range"]: update["values"][0] for update in worksheet.updates}
+    assert changed.cell_updates == 2
+    assert updates["Q5:R5"][0] == 1079
+    assert "LOWER(Q5)" in updates["Q5:R5"][1]
+    assert updates["Q6:R6"][0] == "предоплата"
+    assert "LOWER(Q6)" in updates["Q6:R6"][1]
+    assert "Q7:R7" not in updates
+    assert len(changed.audit_events) == 2
+
+
+def test_supplier_costs_ignore_non_order_rows_and_unknown_tracking_numbers() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    rows[4][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[4][COLUMNS.tracking_number - 1] = "20451510462545"
+    rows[5][COLUMNS.tracking_number - 1] = "20451509877182"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    changed = gateway.update_supplier_costs(
+        {
+            "20451509877182": ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.cost(Decimal("368"))
+            ),
+            "RMP-UNKNOWN": ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.cost(Decimal("10"))
+            ),
+        },
+        observed_at=datetime(2026, 8, 17, tzinfo=UTC),
+    )
+
+    assert changed.cell_updates == 0
+    assert worksheet.updates == []
+
+
+def test_supplier_cost_matching_ignores_spaces_in_numeric_tracking_number() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    rows[4][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[4][COLUMNS.tracking_number - 1] = "20 4515 1046 2545"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_supplier_costs(
+        {
+            "20451510462545": ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.cost(Decimal("1079"))
+            )
+        },
+        observed_at=datetime(2026, 8, 17, tzinfo=UTC),
+    )
+
+    assert result.cell_updates == 1
+    assert worksheet.updates[0]["range"] == "Q5:R5"
+
+
+def test_supplier_cost_does_not_overwrite_concurrent_manual_edit() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    rows[4][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[4][COLUMNS.tracking_number - 1] = "20451510462545"
+    worksheet = ConcurrentCostWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_supplier_costs(
+        {
+            "20451510462545": ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.cost(Decimal("1079"))
+            )
+        },
+        observed_at=datetime(2026, 8, 17, tzinfo=UTC),
+    )
+
+    assert result.cell_updates == 0
+    assert worksheet.updates == []
 
 
 def test_completion_observation_backfills_first_seen_date_and_status() -> None:

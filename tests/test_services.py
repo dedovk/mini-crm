@@ -6,8 +6,12 @@ import pytest
 from crm_sync.models import (
     Order,
     OrderItem,
+    ResolvedSupplierCost,
     ShipmentStatus,
     ShipmentUpdateResult,
+    SupplierCostBatch,
+    SupplierCostRecord,
+    SupplierCostUpdateResult,
     SyncHealthState,
 )
 from crm_sync.services import SourceSyncError, SyncService
@@ -36,6 +40,7 @@ class ProductionSheetsStub(SheetsStub):
         self.backups = 0
         self.force_rebuild = False
         self.refused_orders = False
+        self.supplier_cost_calls: list[dict[str, ResolvedSupplierCost]] = []
 
     def ensure_schema(self, *, apply_changes: bool) -> None:
         self.schema_modes.append(apply_changes)
@@ -69,6 +74,10 @@ class ProductionSheetsStub(SheetsStub):
 
     def update_order_expenses(self, expenses, *, source: str) -> int:
         return 0
+
+    def update_supplier_costs(self, costs, *, observed_at) -> SupplierCostUpdateResult:
+        self.supplier_cost_calls.append(dict(costs))
+        return SupplierCostUpdateResult(cell_updates=len(costs))
 
     def append_audit_events(self, events) -> int:
         return 0
@@ -153,6 +162,29 @@ class FailingExpenseSource:
 
     def fetch_expenses(self, since: datetime):
         raise RuntimeError("finance access denied")
+
+
+class SupplierCostSourceStub:
+    source = "supplier-imaxi"
+
+    def fetch_costs(self):
+        return SupplierCostBatch(
+            source=self.source,
+            values={"20451510462545": SupplierCostRecord.cost(Decimal("1079"))},
+            warnings=("supplier duplicate was ignored",),
+        )
+
+
+class FailingSupplierCostSource:
+    source = "supplier-imaxi"
+
+    def fetch_costs(self):
+        raise RuntimeError("supplier sheet timeout")
+
+
+class SupplierCostWriteFailureSheets(ProductionSheetsStub):
+    def update_supplier_costs(self, costs, *, observed_at) -> SupplierCostUpdateResult:
+        raise RuntimeError("write quota exceeded")
 
 
 class StaleInexactSource:
@@ -249,6 +281,101 @@ def test_nova_poshta_failure_preserves_order_sync_and_updates_health() -> None:
     assert result.warnings == (
         "nova-poshta tracking is unavailable; existing shipment statuses were preserved: "
         "tracking timeout",
+    )
+
+
+def test_supplier_costs_are_imported_and_warnings_are_reported() -> None:
+    sheets = ProductionSheetsStub()
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[SuccessfulSource()],  # type: ignore[list-item]
+        supplier_cost_sources=[SupplierCostSourceStub()],
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    result = service.run()
+
+    assert sheets.supplier_cost_calls == [
+        {
+            "20451510462545": ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.cost(Decimal("1079"))
+            )
+        }
+    ]
+    assert result.supplier_cost_updates == 1
+    assert "supplier duplicate was ignored" in result.warnings
+
+
+def test_supplier_network_failure_preserves_existing_costs_and_marks_health() -> None:
+    sheets = ProductionSheetsStub()
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[SuccessfulSource()],  # type: ignore[list-item]
+        supplier_cost_sources=[FailingSupplierCostSource()],
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    result = service.run()
+
+    assert sheets.supplier_cost_calls == []
+    assert sheets.health_calls == [["supplier-imaxi"]]
+    assert result.supplier_cost_updates == 0
+    assert result.warnings == (
+        "supplier-imaxi costs are unavailable; existing sheet values were preserved: "
+        "supplier sheet timeout",
+    )
+
+
+def test_supplier_cost_write_failure_does_not_abort_completed_order_sync() -> None:
+    sheets = SupplierCostWriteFailureSheets()
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[SuccessfulSource()],  # type: ignore[list-item]
+        supplier_cost_sources=[SupplierCostSourceStub()],
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    result = service.run()
+
+    assert result.supplier_cost_updates == 0
+    assert sheets.health_calls == [["supplier-cost-write"]]
+    assert any("write quota exceeded" in warning for warning in result.warnings)
+
+
+def test_cross_supplier_conflict_is_quarantined_independently_of_order() -> None:
+    cost = SupplierCostRecord.cost(Decimal("100"))
+    other_cost = SupplierCostRecord.cost(Decimal("120"))
+    resolved = SyncService._resolve_supplier_costs(
+        (
+            SupplierCostBatch(
+                source="supplier-a",
+                values={"20451510462545": cost, "20451509877182": cost},
+            ),
+            SupplierCostBatch(
+                source="supplier-b",
+                values={"20 4515 1046 2545": other_cost, "20451509877182": cost},
+            ),
+        )
+    )
+
+    assert resolved.values == {
+        "20451509877182": ResolvedSupplierCost("supplier-b", cost)
+    }
+    assert resolved.warnings == (
+        "Supplier TTN 20451510462545 conflicts between supplier-a and supplier-b; "
+        "it was not imported",
     )
 
 

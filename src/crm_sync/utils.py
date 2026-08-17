@@ -169,6 +169,18 @@ def normalize_tracking_number(value: Any) -> str:
     return ""
 
 
+def tracking_match_key(value: Any) -> str:
+    """Return a canonical key used only for exact cross-system TTN matching."""
+    normalized = normalize_tracking_number(value)
+    if not normalized:
+        compact = re.sub(r"[\s\u00a0-]+", "", str(value or ""))
+        normalized = normalize_tracking_number(compact)
+    digits = re.sub(r"\D", "", normalized)
+    if len(digits) in {13, 14}:
+        return digits
+    return re.sub(r"\s+", "", normalized).casefold()
+
+
 def find_tracking_number(*values: Any) -> str:
     for value in values:
         normalized = normalize_tracking_number(value)

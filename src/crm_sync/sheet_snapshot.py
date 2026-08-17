@@ -15,7 +15,7 @@ from crm_sync.sheet_layout import (
     report_formulas,
     sheet_serial,
 )
-from crm_sync.sheet_orders import OrderGroups
+from crm_sync.sheet_orders import OrderGroups, markup_formula
 from crm_sync.sheet_schema import (
     ADVERTISING_REPORT_LABEL_COLUMNS,
     COLUMNS,
@@ -121,7 +121,7 @@ def _append_order_group(rows: list[list[Any]], group: list[list[Any]]) -> None:
     for item_index, source_row in enumerate(group):
         row = list(source_row)
         final_row = len(rows) + 1
-        row[COLUMNS.markup - 1] = f"=(L{final_row}-Q{final_row})*K{final_row}"
+        row[COLUMNS.markup - 1] = markup_formula(final_row)
         row[COLUMNS.order_number - 1] = first_order_number if item_index == 0 else ""
         row[COLUMNS.order_total - 1] = first_order_total if item_index == 0 else ""
         rows.append(row)

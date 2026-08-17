@@ -5,6 +5,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from gspread.utils import rowcol_to_a1
+
 from crm_sync.models import Order, ShipmentStatus
 from crm_sync.sheet_layout import (
     ROW_ORDER,
@@ -26,6 +28,18 @@ from crm_sync.utils import (
     normalize_tracking_number,
     parse_prepayment,
 )
+
+
+def markup_formula(row_number: int) -> str:
+    """Build a margin formula that tolerates supplier text markers."""
+    unit_price = rowcol_to_a1(row_number, COLUMNS.unit_price)
+    cost = rowcol_to_a1(row_number, COLUMNS.cost)
+    quantity = rowcol_to_a1(row_number, COLUMNS.quantity)
+    return (
+        f'=IF(OR({cost}="",LOWER({cost})="предоплата"),'
+        f'{unit_price}*{quantity},IF(ISNUMBER({cost}),'
+        f'({unit_price}-{cost})*{quantity},""))'
+    )
 
 
 def advertising_display(base: Decimal, installment: Decimal) -> Any:

@@ -51,6 +51,7 @@ class Settings:
     google_spreadsheet_id: str
     google_worksheet_name: str
     google_header_row: int
+    supplier_imaxi_spreadsheet_id: str
     prom_token: str
     prom_base_url: str
     rozetka_token: str
@@ -113,6 +114,7 @@ class Settings:
             google_spreadsheet_id=spreadsheet_id,
             google_worksheet_name=worksheet_name,
             google_header_row=_env_int("GOOGLE_HEADER_ROW", 4, minimum=1),
+            supplier_imaxi_spreadsheet_id=_env("SUPPLIER_IMAXI_SPREADSHEET_ID"),
             prom_token=_env("PROM_API_TOKEN"),
             prom_base_url=_env("PROM_API_BASE_URL", "https://my.prom.ua/api/v1"),
             rozetka_token=_env("ROZETKA_API_TOKEN"),

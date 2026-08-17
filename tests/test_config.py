@@ -63,3 +63,14 @@ def test_settings_parses_explicit_dry_run_values(
     monkeypatch.setenv("DRY_RUN", value)
 
     assert Settings.from_env().dry_run is expected
+
+
+def test_supplier_sheet_id_is_optional_and_read_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_required_environment(monkeypatch)
+
+    assert Settings.from_env().supplier_imaxi_spreadsheet_id == ""
+
+    monkeypatch.setenv("SUPPLIER_IMAXI_SPREADSHEET_ID", "supplier-sheet")
+    assert Settings.from_env().supplier_imaxi_spreadsheet_id == "supplier-sheet"

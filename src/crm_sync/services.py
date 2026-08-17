@@ -5,19 +5,22 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import Mapping, Protocol
 from zoneinfo import ZoneInfo
 
 from crm_sync.integrity import IntegrityError, IntegrityReport, validate_incoming_orders
 from crm_sync.models import (
     Order,
     OrderAuditEvent,
+    ResolvedSupplierCost,
     ShipmentStatus,
     ShipmentStatusChange,
     ShipmentUpdateResult,
+    SupplierCostBatch,
+    SupplierCostUpdateResult,
     SyncHealthState,
 )
-from crm_sync.utils import extract_ttn, parse_prepayment
+from crm_sync.utils import extract_ttn, parse_prepayment, tracking_match_key
 
 LOGGER = logging.getLogger(__name__)
 REPAIRABLE_PREFLIGHT_ERROR_PREFIXES = ("formula error at ",)
@@ -36,6 +39,7 @@ class SyncResult:
     shipment_statuses: int
     refreshed_cells: int = 0
     expense_updates: int = 0
+    supplier_cost_updates: int = 0
     status_updates: int = 0
     appended_rows: int = 0
     audit_events: int = 0
@@ -63,6 +67,12 @@ class OrderExpenseSource(Protocol):
     source: str
 
     def fetch_expenses(self, since: datetime) -> dict[str, Decimal]: ...
+
+
+class SupplierCostSource(Protocol):
+    source: str
+
+    def fetch_costs(self) -> SupplierCostBatch: ...
 
 
 class ShipmentTracker(Protocol):
@@ -110,6 +120,13 @@ class SheetGateway(Protocol):
 
     def update_order_expenses(self, expenses: dict[str, Decimal], *, source: str) -> int: ...
 
+    def update_supplier_costs(
+        self,
+        costs: Mapping[str, ResolvedSupplierCost],
+        *,
+        observed_at: datetime,
+    ) -> SupplierCostUpdateResult: ...
+
     def append_audit_events(self, events: list[OrderAuditEvent]) -> int: ...
 
     def record_sync_health(
@@ -130,6 +147,19 @@ class NewOrderSelection:
     stale_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class SupplierCostFetch:
+    batches: tuple[SupplierCostBatch, ...]
+    failed_sources: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSupplierCosts:
+    values: Mapping[str, ResolvedSupplierCost]
+    warnings: tuple[str, ...]
+
+
 class SyncService:
     def __init__(
         self,
@@ -138,6 +168,7 @@ class SyncService:
         nova_poshta: ShipmentTracker,
         sources: list[OrderSource],
         expense_source: OrderExpenseSource | None = None,
+        supplier_cost_sources: list[SupplierCostSource] | None = None,
         timezone: str,
         lookback_days: int,
         new_order_max_age_days: int = 7,
@@ -150,6 +181,7 @@ class SyncService:
         self.nova_poshta = nova_poshta
         self.sources = sources
         self.expense_source = expense_source
+        self.supplier_cost_sources = supplier_cost_sources or []
         self.timezone = timezone
         self.lookback_days = lookback_days
         self.new_order_max_age_days = new_order_max_age_days
@@ -188,6 +220,12 @@ class SyncService:
         expenses, expense_warning = self._fetch_expenses(now)
         if expense_warning:
             warnings.append(expense_warning)
+        supplier_costs = self._fetch_supplier_costs()
+        warnings.extend(supplier_costs.warnings)
+        for batch in supplier_costs.batches:
+            warnings.extend(batch.warnings)
+        resolved_supplier_costs = self._resolve_supplier_costs(supplier_costs.batches)
+        warnings.extend(resolved_supplier_costs.warnings)
 
         refreshed = 0
         completion_events: tuple[OrderAuditEvent, ...] = ()
@@ -294,6 +332,22 @@ class SyncService:
                 expenses,
                 source=self.expense_source.source if self.expense_source else "rozetka",
             )
+        supplier_cost_update = SupplierCostUpdateResult()
+        supplier_cost_write_failed = False
+        if resolved_supplier_costs.values:
+            try:
+                supplier_cost_update = self.sheets.update_supplier_costs(
+                    resolved_supplier_costs.values,
+                    observed_at=now,
+                )
+            except Exception as exc:  # noqa: BLE001 - optional integration boundary
+                supplier_cost_write_failed = True
+                warning = (
+                    "supplier cost write is unavailable; existing cost cells were preserved: "
+                    f"{exc}"
+                )
+                warnings.append(warning)
+                LOGGER.warning(warning)
         audit_events = self._build_audit_events(
             now=now,
             new_orders=unique_orders,
@@ -303,6 +357,7 @@ class SyncService:
                 order for order in cancelled_orders if order.sync_key.casefold() in cancelled_existing
             ],
         )
+        audit_events.extend(supplier_cost_update.audit_events)
         audit_count = 0
         try:
             audit_count = self.sheets.append_audit_events(audit_events)
@@ -328,11 +383,15 @@ class SyncService:
             for warning in warnings
             if warning.casefold().startswith("rozetka finance is unavailable")
         )
+        failed_components.extend(supplier_costs.failed_sources)
+        if supplier_cost_write_failed:
+            failed_components.append("supplier-cost-write")
         health = self.sheets.record_sync_health(failed_components, occurred_at=now)
         LOGGER.info(
-            "Sync completed: %s detail/formula cell(s) refreshed, %s expense cell(s) updated, %s status cell(s) updated, %s item row(s) appended, %s audit event(s) written",
+            "Sync completed: %s detail/formula cell(s) refreshed, %s expense cell(s) updated, %s supplier cost cell(s) updated, %s status cell(s) updated, %s item row(s) appended, %s audit event(s) written",
             refreshed,
             expense_updates,
+            supplier_cost_update.cell_updates,
             shipment_update.cell_updates,
             appended_rows,
             audit_count,
@@ -349,6 +408,7 @@ class SyncService:
             shipment_statuses=len(statuses),
             refreshed_cells=refreshed,
             expense_updates=expense_updates,
+            supplier_cost_updates=supplier_cost_update.cell_updates,
             status_updates=shipment_update.cell_updates,
             appended_rows=appended_rows,
             audit_events=audit_count,
@@ -399,6 +459,63 @@ class SyncService:
             len(expenses),
         )
         return expenses, ""
+
+    def _fetch_supplier_costs(self) -> SupplierCostFetch:
+        batches: list[SupplierCostBatch] = []
+        failed_sources: list[str] = []
+        warnings: list[str] = []
+        for source in self.supplier_cost_sources:
+            try:
+                batch = source.fetch_costs()
+            except Exception as exc:  # noqa: BLE001 - optional integration boundary
+                warning = (
+                    f"{source.source} costs are unavailable; existing sheet values were preserved: "
+                    f"{exc}"
+                )
+                LOGGER.warning(warning)
+                warnings.append(warning)
+                failed_sources.append(source.source)
+                continue
+            batches.append(batch)
+            if batch.degraded:
+                failed_sources.append(batch.source)
+        return SupplierCostFetch(
+            batches=tuple(batches),
+            failed_sources=tuple(dict.fromkeys(failed_sources)),
+            warnings=tuple(warnings),
+        )
+
+    @staticmethod
+    def _resolve_supplier_costs(
+        batches: tuple[SupplierCostBatch, ...],
+    ) -> ResolvedSupplierCosts:
+        values: dict[str, ResolvedSupplierCost] = {}
+        owners: dict[str, str] = {}
+        conflicted: set[str] = set()
+        warnings: list[str] = []
+        for batch in batches:
+            for raw_tracking, record in batch.values.items():
+                tracking = tracking_match_key(raw_tracking)
+                if not tracking:
+                    warnings.append(
+                        f"{batch.source} returned invalid TTN {raw_tracking!r}; it was not imported"
+                    )
+                    continue
+                if tracking in conflicted:
+                    continue
+                previous = values.get(tracking)
+                if previous is not None and previous.record != record:
+                    previous_source = owners.pop(tracking)
+                    values.pop(tracking)
+                    conflicted.add(tracking)
+                    warnings.append(
+                        f"Supplier TTN {tracking} conflicts between "
+                        f"{previous_source} and {batch.source}; it was not imported"
+                    )
+                    continue
+                values[tracking] = ResolvedSupplierCost(source=batch.source, record=record)
+                owners[tracking] = batch.source
+        return ResolvedSupplierCosts(values=values, warnings=tuple(warnings))
 
     @staticmethod
     def _select_new_orders(
