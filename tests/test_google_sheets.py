@@ -16,7 +16,7 @@ from crm_sync.models import (
     ShipmentStatus,
     SupplierCostRecord,
 )
-from crm_sync.sheet_layout import ROW_ORDER, sheet_serial
+from crm_sync.sheet_layout import ALL_HEADERS, ROW_ORDER, sheet_serial
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN, LAST_COLUMN_LETTER
 
 
@@ -83,6 +83,9 @@ class LayoutWorksheet(StubWorksheet):
     def add_rows(self, count) -> None:
         self.row_count += count
 
+    def row_values(self, row_number):
+        return self.values[row_number - 1]
+
     def get(self, range_name, **kwargs):
         return self.values
 
@@ -107,6 +110,42 @@ class StubSpreadsheet:
                 }
             ]
         }
+
+
+def test_legacy_installment_column_is_atomically_moved_before_receipt_use() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = LayoutWorksheet([])
+    gateway.spreadsheet = StubSpreadsheet()
+    legacy_headers = list(ALL_HEADERS)
+    legacy_headers[COLUMNS.receipt - 1] = "Комісія оплати частинами, грн"
+
+    gateway._migrate_legacy_installment_column(legacy_headers)
+
+    copy = gateway.spreadsheet.requests[0]["copyPaste"]
+    assert copy["source"]["startColumnIndex"] == COLUMNS.receipt - 1
+    assert copy["destination"]["startColumnIndex"] == COLUMNS.installment_commission - 1
+    assert gateway.worksheet.cleared_ranges == ["AA1:AA1000"]
+
+
+def test_receipt_schema_migration_is_idempotent() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = LayoutWorksheet([])
+    gateway.spreadsheet = StubSpreadsheet()
+
+    gateway._migrate_legacy_installment_column(list(ALL_HEADERS))
+
+    assert gateway.spreadsheet.requests == []
+
+
+def test_interrupted_receipt_migration_is_detected_from_ab_header() -> None:
+    headers = list(ALL_HEADERS)
+    headers[COLUMNS.receipt - 1] = ""
+    worksheet = LayoutWorksheet([headers])
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 1
+
+    assert gateway.requires_schema_migration()
 
 
 class BackupWorksheet:
@@ -238,6 +277,43 @@ def test_refresh_order_details_repairs_text_unit_price_without_product_code() ->
         '=IF(OR(Q5="",LOWER(Q5)="предоплата"),L5*K5,'
         'IF(ISNUMBER(Q5),(L5-Q5)*K5,""))'
     )
+
+
+def test_refresh_preserves_known_installment_when_prom_payload_is_incomplete() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:421660654"
+    row[COLUMNS.installment_commission - 1] = 49.17
+    row[COLUMNS.advertising_base - 1] = 90.11
+    row[COLUMNS.advertising - 1] = "90.11\n49.17"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 4
+    order = Order(
+        source="prom",
+        external_id="421660654",
+        created_at=datetime(2026, 8, 15, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 15, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451500000000",
+        total=Decimal(1329),
+        payment_method="оплата частями",
+        note="",
+        sender="",
+        advertising_cost=Decimal("90.11"),
+        installment_commission=Decimal(0),
+        items=[OrderItem("Товар", "SKU", Decimal(1), Decimal(1329), Decimal(1329))],
+    )
+
+    gateway.refresh_order_details([order])
+
+    updated_ranges = {update["range"] for update in worksheet.updates}
+    assert "AB5" not in updated_ranges
+    assert "S5" not in updated_ranges
 
 
 def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> None:
@@ -507,7 +583,7 @@ def test_completion_backfill_migrates_historical_rows_and_repeated_headers() -> 
 
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert changed == 3
-    assert updates["U4:AA4"][3:5] == [
+    assert updates["U4:AB4"][3:5] == [
         "Перше спостереження виконання",
         "Статус замовлення джерела",
     ]
@@ -586,12 +662,14 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     assert report_row[10] == "ProSale, грн"
     assert report_row[12] == "Rozetka, грн"
     assert report_row[14] == "Prom 10 грн"
+    assert report_row[16] == "Оплата част., грн"
     assert "<>10" in report_row[11]
     assert "*Rozetka*" in report_row[13]
     assert "*Prom*" in report_row[15]
     assert report_row[15].endswith(";10)")
+    assert "$AB$" in report_row[17]
     forecast_row = written[report_indexes[2]]
-    assert forecast_row[10:16] == ["", "", "", "", "", ""]
+    assert forecast_row[10:18] == ["", "", "", "", "", "", "", ""]
     assert worksheet.operations == ["update", "clear"]
     assert worksheet.cleared_ranges == [
         f"A{len(written) + 1}:{LAST_COLUMN_LETTER}{worksheet.row_count}"

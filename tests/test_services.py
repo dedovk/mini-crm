@@ -18,6 +18,9 @@ from crm_sync.services import SourceSyncError, SyncService
 
 
 class SheetsStub:
+    def requires_schema_migration(self) -> bool:
+        return False
+
     def ensure_schema(self, *, apply_changes: bool) -> None:
         assert not apply_changes
 
@@ -41,6 +44,10 @@ class ProductionSheetsStub(SheetsStub):
         self.force_rebuild = False
         self.refused_orders = False
         self.supplier_cost_calls: list[dict[str, ResolvedSupplierCost]] = []
+        self.schema_migration_required = False
+
+    def requires_schema_migration(self) -> bool:
+        return self.schema_migration_required
 
     def ensure_schema(self, *, apply_changes: bool) -> None:
         self.schema_modes.append(apply_changes)
@@ -588,6 +595,27 @@ def test_production_run_advances_daily_layout_without_new_orders() -> None:
     assert result.layout_advanced
     assert sheets.force_rebuild
     assert sheets.backups == 1
+
+
+def test_schema_migration_is_backed_up_before_apply_and_forces_rebuild() -> None:
+    sheets = ProductionSheetsStub()
+    sheets.schema_migration_required = True
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[SuccessfulSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    result = service.run()
+
+    assert sheets.schema_modes == [True]
+    assert sheets.backups == 1
+    assert sheets.force_rebuild
+    assert result.backup_created == "backup"
 
 
 def test_production_run_rebuilds_and_backs_up_when_refused_order_exists() -> None:

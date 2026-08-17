@@ -329,6 +329,89 @@ def test_prom_normalizer_calculates_installment_commission_from_parts_count() ->
     assert order.installment_commission == Decimal("164.61")
 
 
+def test_prom_normalizer_reads_installment_commission_from_named_charge() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+    )
+    order = client._normalize(
+        {
+            "id": 421660654,
+            "status": "delivered",
+            "date_created": "2026-08-15 18:13:00",
+            "full_price": 1329,
+            "payment_option": {"name": "Оплата частинами"},
+            "commissions": [
+                {"name": "Комиссия за заказ", "amount": 90.11},
+                {"name": "Комиссия по Оплатить частями", "amount": 49.17},
+            ],
+            "prosale_commission": 90.11,
+            "products": [{"name": "Товар", "quantity": 1, "price": 1329}],
+        }
+    )
+
+    assert order.advertising_cost == Decimal("90.11")
+    assert order.installment_commission == Decimal("49.17")
+
+
+def test_prom_normalizer_reads_installment_commission_from_labeled_key() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+    )
+    order = client._normalize(
+        {
+            "id": 421660655,
+            "status": "delivered",
+            "date_created": "2026-08-15 18:13:00",
+            "full_price": 1329,
+            "payment_option": {"name": "Оплата частинами"},
+            "fees": {
+                "Комиссия по Оплатить частями": {"amount": 49.17}
+            },
+            "products": [{"name": "Товар", "quantity": 1, "price": 1329}],
+        }
+    )
+
+    assert order.installment_commission == Decimal("49.17")
+
+
+def test_prom_normalizer_accepts_localized_negative_installment_fee() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+    )
+    order = client._normalize(
+        {
+            "id": 421660656,
+            "status": "delivered",
+            "date_created": "2026-08-15 18:13:00",
+            "full_price": 1329,
+            "payment_option": {"name": "Оплата частинами"},
+            "fees": {"installment_fee": -49.17},
+            "products": [{"name": "Товар", "quantity": 1, "price": 1329}],
+        }
+    )
+
+    assert order.installment_commission == Decimal("49.17")
+
+
+def test_prom_normalizer_accepts_ukrainian_installment_commission_label() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+    )
+    order = client._normalize(
+        {
+            "id": 421660657,
+            "status": "delivered",
+            "date_created": "2026-08-15 18:13:00",
+            "full_price": 1329,
+            "payment_option": {"name": "Оплата частинами"},
+            "fees": {"Комісія за оплату частинами": 49.17},
+            "products": [{"name": "Товар", "quantity": 1, "price": 1329}],
+        }
+    )
+
+    assert order.installment_commission == Decimal("49.17")
+
+
 def test_prom_normalizer_recovers_unit_price_and_nested_prepayment_note() -> None:
     client = PromClient(
         HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"

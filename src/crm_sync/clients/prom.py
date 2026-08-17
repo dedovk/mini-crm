@@ -31,6 +31,17 @@ INSTALLMENT_RATES = {
     12: Decimal("0.150"), 15: Decimal("0.183"), 18: Decimal("0.215"),
     24: Decimal("0.276"),
 }
+COMMISSION_LABEL_MARKERS = ("комис", "коміс", "commission", "fee")
+
+
+def _is_installment_commission_label(value: Any) -> bool:
+    normalized = re.sub(r"[_-]+", " ", display_text(value).casefold())
+    is_installment = (
+        ("част" in normalized and "оплат" in normalized)
+        or "installment" in normalized
+        or ("pay" in normalized and "part" in normalized)
+    )
+    return is_installment and any(marker in normalized for marker in COMMISSION_LABEL_MARKERS)
 
 
 def _find_named_value(value: Any, names: set[str]) -> Any:
@@ -50,6 +61,41 @@ def _find_named_value(value: Any, names: set[str]) -> Any:
     return None
 
 
+def _find_installment_commission_by_label(value: Any) -> Any:
+    """Find Prom's named 'pay by installments' commission in nested payloads."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if _is_installment_commission_label(key):
+                candidate = (
+                    first_value(nested, "amount", "value", "sum", "price", "cost")
+                    if isinstance(nested, dict)
+                    else nested
+                )
+                amount = abs(decimal_value(candidate))
+                if amount > 0:
+                    return amount
+        label = " ".join(
+            display_text(value.get(key))
+            for key in ("name", "title", "type", "description", "label")
+            if value.get(key) not in (None, "")
+        ).casefold()
+        if _is_installment_commission_label(label):
+            amount = first_value(value, "amount", "value", "sum", "price", "cost")
+            normalized_amount = abs(decimal_value(amount))
+            if normalized_amount > 0:
+                return normalized_amount
+        for nested in value.values():
+            found = _find_installment_commission_by_label(nested)
+            if found not in (None, ""):
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_installment_commission_by_label(nested)
+            if found not in (None, ""):
+                return found
+    return None
+
+
 def _installment_cost(raw: dict[str, Any], payment_text: str, total: Decimal) -> Decimal:
     explicit = _find_named_value(
         raw,
@@ -59,9 +105,12 @@ def _installment_cost(raw: dict[str, Any], payment_text: str, total: Decimal) ->
             "installment_fee", "payment_parts_fee", "pay_parts_fee",
         },
     )
-    explicit_amount = decimal_value(explicit)
+    explicit_amount = abs(decimal_value(explicit))
     if explicit_amount > 0:
         return explicit_amount
+    labeled_amount = decimal_value(_find_installment_commission_by_label(raw))
+    if labeled_amount > 0:
+        return labeled_amount
 
     count_value = _find_named_value(
         raw,

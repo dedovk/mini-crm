@@ -36,12 +36,17 @@ def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
     assert formulas[ROW_REPORT_DAY][8].startswith("=SUMIFS($M$5:$M$30;")
     assert "-SUMIFS($R$5:$R$30;" in formulas[ROW_REPORT_DAY][8]
     assert '$A$5:$A$30;"*Prom*";$Z$5:$Z$30;"<>10"' in formulas[ROW_REPORT_DAY][12]
-    assert 'SUMIFS($AA$5:$AA$30;' in formulas[ROW_REPORT_DAY][12]
+    assert '$AB$5:$AB$30' not in formulas[ROW_REPORT_DAY][12]
     assert '$A$5:$A$30;"*Rozetka*"' in formulas[ROW_REPORT_DAY][14]
     assert '$A$5:$A$30;"*Prom*";$Z$5:$Z$30;10' in formulas[ROW_REPORT_DAY][16]
+    assert formulas[ROW_REPORT_DAY][18] == (
+        '=SUMIFS($AB$5:$AB$30;$V$5:$V$30;"ORDER";'
+        '$W$5:$W$30;DATE(2026;8;2))'
+    )
     assert 12 not in formulas[ROW_REPORT_FORECAST]
     assert 14 not in formulas[ROW_REPORT_FORECAST]
     assert 16 not in formulas[ROW_REPORT_FORECAST]
+    assert 18 not in formulas[ROW_REPORT_FORECAST]
 
 
 def test_clean_customer_display_removes_serialized_rozetka_city() -> None:

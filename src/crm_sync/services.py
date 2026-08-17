@@ -80,6 +80,8 @@ class ShipmentTracker(Protocol):
 
 
 class SheetGateway(Protocol):
+    def requires_schema_migration(self) -> bool: ...
+
     def ensure_schema(self, *, apply_changes: bool) -> None: ...
 
     def validate_integrity(self) -> IntegrityReport: ...
@@ -192,7 +194,17 @@ class SyncService:
 
     def run(self) -> SyncResult:
         now = self.clock()
-        self.sheets.ensure_schema(apply_changes=False)
+        schema_migration_required = self.sheets.requires_schema_migration()
+        backup_created = ""
+        if schema_migration_required and not self.dry_run:
+            backup_created = self.sheets.create_backup(created_at=now)
+            LOGGER.info(
+                "Created Google Sheets backup before schema migration: %s",
+                backup_created,
+            )
+            self.sheets.ensure_schema(apply_changes=True)
+        else:
+            self.sheets.ensure_schema(apply_changes=False)
         sheet_integrity = self.sheets.validate_integrity()
         if not sheet_integrity.ok and (
             self.dry_run or not _only_repairable_preflight_errors(sheet_integrity.errors)
@@ -230,7 +242,8 @@ class SyncService:
         refreshed = 0
         completion_events: tuple[OrderAuditEvent, ...] = ()
         if not self.dry_run:
-            self.sheets.ensure_schema(apply_changes=True)
+            if not schema_migration_required:
+                self.sheets.ensure_schema(apply_changes=True)
             refreshed += self.sheets.backfill_completion_state(observed_at=now)
         pending_ttns = self.sheets.pending_tracking_numbers()
 
@@ -301,7 +314,6 @@ class SyncService:
         refused_orders_present = self.sheets.has_refused_orders()
         latest_layout_day = self.sheets.latest_layout_day()
         layout_advanced = latest_layout_day is None or latest_layout_day < now.date()
-        backup_created = ""
         details_changed = refreshed > 0
         if (
             unique_orders
@@ -309,9 +321,12 @@ class SyncService:
             or refused_orders_present
             or cancelled_existing
             or details_changed
-        ):
+        ) and not backup_created:
             backup_created = self.sheets.create_backup(created_at=now)
-            LOGGER.info("Created Google Sheets backup before structural rebuild: %s", backup_created)
+            LOGGER.info(
+                "Created Google Sheets backup before structural rebuild: %s",
+                backup_created,
+            )
         appended_rows = self.sheets.append_orders(
             unique_orders,
             statuses,
@@ -323,6 +338,7 @@ class SyncService:
                 or refused_orders_present
                 or bool(cancelled_existing)
                 or details_changed
+                or schema_migration_required
             ),
             excluded_sync_keys=cancelled_existing,
         )

@@ -31,12 +31,13 @@ class SheetColumns:
     first_seen_completed: int = 24
     order_status: int = 25
     advertising_base: int = 26
-    installment_commission: int = 27
+    receipt: int = 27
+    installment_commission: int = 28
 
 
 COLUMNS = SheetColumns()
 LAST_COLUMN = COLUMNS.installment_commission
-LAST_COLUMN_LETTER = "AA"
+LAST_COLUMN_LETTER = "AB"
 
 PAYMENT_OPTIONS = (
     "пром оплата(оплата картой)",
@@ -67,8 +68,9 @@ REPORT_METRIC_LABELS = {
     11: "ProSale, грн",
     13: "Rozetka, грн",
     15: "Prom 10 грн",
+    17: "Оплата част., грн",
 }
-ADVERTISING_REPORT_LABEL_COLUMNS = {11, 13, 15}
+ADVERTISING_REPORT_LABEL_COLUMNS = {11, 13, 15, 17}
 
 AUDIT_WORKSHEET_NAME = "Журнал змін"
 AUDIT_HEADERS = (

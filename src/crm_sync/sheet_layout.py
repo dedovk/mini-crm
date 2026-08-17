@@ -6,6 +6,9 @@ import re
 from datetime import date, timedelta
 from typing import Any
 
+from gspread.utils import rowcol_to_a1
+
+from crm_sync.sheet_schema import COLUMNS
 from crm_sync.utils import customer_display, short_person_name
 
 BUSINESS_HEADERS = (
@@ -38,6 +41,7 @@ TECHNICAL_HEADERS = (
     "Перше спостереження виконання",
     "Статус замовлення джерела",
     "Базові витрати маркетплейсу, грн",
+    "Чек",
     "Комісія оплати частинами, грн",
 )
 ALL_HEADERS = BUSINESS_HEADERS + TECHNICAL_HEADERS
@@ -134,14 +138,21 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
     end = max(start, last_data_row)
     day_expr = f"DATE({day.year};{day.month};{day.day})"
     month_start = f"DATE({day.year};{day.month};1)"
-    def range_for(column: str) -> str:
-        return f"${column}${start}:${column}${end}"
-    order_filter = f'{range_for("V")};"{ROW_ORDER}"'
-    day_filter = f"{range_for('W')};{day_expr}"
-    mtd_filter = f'{range_for("W")};">="&{month_start};{range_for("W")};"<="&{day_expr}'
-    source_range = range_for("A")
-    advertising_range = range_for("Z")
-    installment_range = range_for("AA")
+    def column_letter(column: int) -> str:
+        return re.sub(r"\d", "", rowcol_to_a1(1, column))
+
+    def range_for(column: int) -> str:
+        letter = column_letter(column)
+        return f"${letter}${start}:${letter}${end}"
+    order_filter = f'{range_for(COLUMNS.row_type)};"{ROW_ORDER}"'
+    day_filter = f"{range_for(COLUMNS.operational_date)};{day_expr}"
+    mtd_filter = (
+        f'{range_for(COLUMNS.operational_date)};">="&{month_start};'
+        f'{range_for(COLUMNS.operational_date)};"<="&{day_expr}'
+    )
+    source_range = range_for(COLUMNS.source)
+    advertising_range = range_for(COLUMNS.advertising_base)
+    installment_range = range_for(COLUMNS.installment_commission)
     elapsed = day.day
     days_in_month = calendar.monthrange(day.year, day.month)[1]
 
@@ -158,40 +169,37 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
             f"=SUMIFS({advertising_range};{order_filter};{period_filter};"
             f'{source_range};"{source_criterion}"{amount_filter})'
         )
-        if category == "prosale":
-            return (
-                f"={base[1:]}+SUMIFS({installment_range};{order_filter};{period_filter};"
-                f'{source_range};"*Prom*")'
-            )
         return base
 
     daily = {
-        4: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{day_filter})",
-        6: f"=SUMIFS({range_for('N')};{order_filter};{day_filter})",
+        4: f"=COUNTUNIQUEIFS({range_for(COLUMNS.sync_key)};{order_filter};{day_filter})",
+        6: f"=SUMIFS({range_for(COLUMNS.order_total)};{order_filter};{day_filter})",
         8: (
-            f"=SUMIFS({range_for('M')};{order_filter};{day_filter})-"
-            f"SUMIFS({range_for('R')};{order_filter};{day_filter})"
+            f"=SUMIFS({range_for(COLUMNS.line_total)};{order_filter};{day_filter})-"
+            f"SUMIFS({range_for(COLUMNS.markup)};{order_filter};{day_filter})"
         ),
-        10: f"=SUMIFS({range_for('R')};{order_filter};{day_filter})",
+        10: f"=SUMIFS({range_for(COLUMNS.markup)};{order_filter};{day_filter})",
         12: advertising_formula(day_filter, "prosale"),
         14: advertising_formula(day_filter, "rozetka"),
         16: advertising_formula(day_filter, "prom_fixed"),
+        18: f"=SUMIFS({installment_range};{order_filter};{day_filter})",
     }
     mtd = {
-        4: f"=COUNTUNIQUEIFS({range_for('U')};{order_filter};{mtd_filter})",
-        6: f"=SUMIFS({range_for('N')};{order_filter};{mtd_filter})",
+        4: f"=COUNTUNIQUEIFS({range_for(COLUMNS.sync_key)};{order_filter};{mtd_filter})",
+        6: f"=SUMIFS({range_for(COLUMNS.order_total)};{order_filter};{mtd_filter})",
         8: (
-            f"=SUMIFS({range_for('M')};{order_filter};{mtd_filter})-"
-            f"SUMIFS({range_for('R')};{order_filter};{mtd_filter})"
+            f"=SUMIFS({range_for(COLUMNS.line_total)};{order_filter};{mtd_filter})-"
+            f"SUMIFS({range_for(COLUMNS.markup)};{order_filter};{mtd_filter})"
         ),
-        10: f"=SUMIFS({range_for('R')};{order_filter};{mtd_filter})",
+        10: f"=SUMIFS({range_for(COLUMNS.markup)};{order_filter};{mtd_filter})",
         12: advertising_formula(mtd_filter, "prosale"),
         14: advertising_formula(mtd_filter, "rozetka"),
         16: advertising_formula(mtd_filter, "prom_fixed"),
+        18: f"=SUMIFS({installment_range};{order_filter};{mtd_filter})",
     }
     forecast = {}
     for column, formula in mtd.items():
-        if column in {12, 14, 16}:
+        if column in {12, 14, 16, 18}:
             continue
         projected = f"({formula[1:]})*{days_in_month}/{elapsed}"
         forecast[column] = f"=ROUNDUP({projected};0)" if column == 4 else f"={projected}"

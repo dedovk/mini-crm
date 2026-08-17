@@ -163,7 +163,7 @@ def _add_selection_links(
     sheet_id: int,
 ) -> None:
     def link(start_row: int, end_row: int, label: str) -> str:
-        url = f"#gid={sheet_id}&range=A{start_row}:T{end_row}"
+        url = f"#gid={sheet_id}&range=A{start_row}:AA{end_row}"
         return f'=HYPERLINK("{url}";"{label}")'
 
     def cell_link(row_number: int, label: str) -> str:

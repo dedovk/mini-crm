@@ -15,6 +15,7 @@ def test_collect_order_groups_normalizes_legacy_rows_without_losing_manual_value
     row[COLUMNS.customer - 1] = "Київ, Петренко Іван Іванович"
     row[COLUMNS.sender - 1] = "-"
     row[COLUMNS.cost - 1] = 700
+    row[COLUMNS.receipt - 1] = "https://check.checkbox.ua/receipt/abc"
     row[COLUMNS.sync_key - 1] = "prom:1"
     row[COLUMNS.row_type - 1] = ROW_ORDER
     row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
@@ -28,6 +29,7 @@ def test_collect_order_groups_normalizes_legacy_rows_without_losing_manual_value
     assert normalized[COLUMNS.customer - 1] == "Київ, Петренко Іван"
     assert normalized[COLUMNS.sender - 1] == "наш"
     assert normalized[COLUMNS.cost - 1] == 700
+    assert normalized[COLUMNS.receipt - 1] == "https://check.checkbox.ua/receipt/abc"
 
 
 def test_collect_order_groups_writes_advertising_once_for_multi_item_order() -> None:

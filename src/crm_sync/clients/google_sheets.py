@@ -63,6 +63,7 @@ from crm_sync.utils import (
 )
 
 LOGGER = logging.getLogger(__name__)
+LEGACY_INSTALLMENT_HEADER = "Комісія оплати частинами, грн"
 
 
 class ConcurrentSheetEditError(RuntimeError):
@@ -113,21 +114,7 @@ class GoogleSheetsGateway:
         )
 
     def ensure_schema(self, *, apply_changes: bool = True) -> None:
-        preview = self.worksheet.get(
-            f"A1:{LAST_COLUMN_LETTER}{min(self.worksheet.row_count, 100)}",
-            value_render_option="UNFORMATTED_VALUE",
-        )
-        located_header = next(
-            (
-                row_number
-                for row_number, row in enumerate(preview, start=1)
-                if len(row) >= 2
-                and str(row[0]).strip().casefold() == BUSINESS_HEADERS[0].casefold()
-                and str(row[1]).strip().casefold() == BUSINESS_HEADERS[1].casefold()
-            ),
-            self.header_row,
-        )
-        self.header_row = located_header
+        self._locate_header_row()
         headers = self.worksheet.row_values(self.header_row)
         required_signals = {
             COLUMNS.source: ("джерело",),
@@ -147,6 +134,7 @@ class GoogleSheetsGateway:
         if apply_changes:
             if self.worksheet.col_count < LAST_COLUMN:
                 self.worksheet.add_cols(LAST_COLUMN - self.worksheet.col_count)
+            self._migrate_legacy_installment_column(headers)
             self.worksheet.update(
                 values=[list(ALL_HEADERS[COLUMNS.sync_key - 1 :])],
                 range_name=(
@@ -158,6 +146,67 @@ class GoogleSheetsGateway:
             self._configure_validations_and_hidden_key()
             ensure_sheet_audit_worksheet(self.spreadsheet)
             self._refresh_end_navigation_link()
+
+    def _locate_header_row(self) -> None:
+        """Locate the first repeated business header in the active sheet."""
+        preview = self.worksheet.get(
+            f"A1:{LAST_COLUMN_LETTER}{min(self.worksheet.row_count, 100)}",
+            value_render_option="UNFORMATTED_VALUE",
+        )
+        located_header = next(
+            (
+                row_number
+                for row_number, row in enumerate(preview, start=1)
+                if len(row) >= 2
+                and str(row[0]).strip().casefold() == BUSINESS_HEADERS[0].casefold()
+                and str(row[1]).strip().casefold() == BUSINESS_HEADERS[1].casefold()
+            ),
+            self.header_row,
+        )
+        self.header_row = located_header
+
+    def _migrate_legacy_installment_column(self, headers: list[str]) -> None:
+        """Move legacy AA installment values to AB before AA becomes the receipt column."""
+        legacy_header = (
+            str(headers[COLUMNS.receipt - 1]).strip().casefold()
+            if len(headers) >= COLUMNS.receipt
+            else ""
+        )
+        expected = LEGACY_INSTALLMENT_HEADER.casefold()
+        if legacy_header != expected:
+            return
+        sheet_id = self.worksheet.id
+        self.spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "copyPaste": {
+                            "source": {
+                                "sheetId": sheet_id,
+                                "startColumnIndex": COLUMNS.receipt - 1,
+                                "endColumnIndex": COLUMNS.receipt,
+                            },
+                            "destination": {
+                                "sheetId": sheet_id,
+                                "startColumnIndex": COLUMNS.installment_commission - 1,
+                                "endColumnIndex": COLUMNS.installment_commission,
+                            },
+                            "pasteType": "PASTE_NORMAL",
+                            "pasteOrientation": "NORMAL",
+                        }
+                    }
+                ]
+            }
+        )
+        # Keep copy and clear as separate idempotent requests. If the HTTP client
+        # retries a request after a lost response, AB cannot be overwritten from
+        # an already-cleared AA column.
+        self.worksheet.batch_clear(
+            [
+                f"{rowcol_to_a1(1, COLUMNS.receipt)}:"
+                f"{rowcol_to_a1(self.worksheet.row_count, COLUMNS.receipt)}"
+            ]
+        )
 
     def _refresh_end_navigation_link(self, last_used_row: int | None = None) -> None:
         spreadsheet_id = str(getattr(self.spreadsheet, "id", "")).strip()
@@ -299,7 +348,31 @@ class GoogleSheetsGateway:
                         "sheetId": self.worksheet.id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.sync_key - 1,
-                        "endIndex": LAST_COLUMN,
+                        "endIndex": COLUMNS.receipt - 1,
+                    },
+                    "properties": {"hiddenByUser": True},
+                    "fields": "hiddenByUser",
+                }
+            },
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": self.worksheet.id,
+                        "dimension": "COLUMNS",
+                        "startIndex": COLUMNS.receipt - 1,
+                        "endIndex": COLUMNS.receipt,
+                    },
+                    "properties": {"hiddenByUser": False},
+                    "fields": "hiddenByUser",
+                }
+            },
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": self.worksheet.id,
+                        "dimension": "COLUMNS",
+                        "startIndex": COLUMNS.installment_commission - 1,
+                        "endIndex": COLUMNS.installment_commission,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -404,7 +477,31 @@ class GoogleSheetsGateway:
                         "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.sync_key - 1,
-                        "endIndex": LAST_COLUMN,
+                        "endIndex": COLUMNS.receipt - 1,
+                    },
+                    "properties": {"hiddenByUser": True},
+                    "fields": "hiddenByUser",
+                }
+            },
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "COLUMNS",
+                        "startIndex": COLUMNS.receipt - 1,
+                        "endIndex": COLUMNS.receipt,
+                    },
+                    "properties": {"hiddenByUser": False, "pixelSize": 115},
+                    "fields": "hiddenByUser,pixelSize",
+                }
+            },
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "COLUMNS",
+                        "startIndex": COLUMNS.installment_commission - 1,
+                        "endIndex": COLUMNS.installment_commission,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -1046,6 +1143,14 @@ class GoogleSheetsGateway:
                         if len(row) >= COLUMNS.installment_commission
                         else ""
                     )
+                    existing_installment = decimal_value(current_installment)
+                    effective_installment = order.installment_commission
+                    if (
+                        order.payment_method == "оплата частями"
+                        and effective_installment == 0
+                        and existing_installment > 0
+                    ):
+                        effective_installment = existing_installment
                     if decimal_value(current_base) != order.advertising_cost:
                         updates.append(
                             {
@@ -1053,17 +1158,15 @@ class GoogleSheetsGateway:
                                 "values": [[decimal_for_sheet(order.advertising_cost)]],
                             }
                         )
-                    if (
-                        decimal_value(current_installment) != order.installment_commission
-                    ):
+                    if existing_installment != effective_installment:
                         updates.append(
                             {
                                 "range": rowcol_to_a1(row_number, COLUMNS.installment_commission),
-                                "values": [[decimal_for_sheet(order.installment_commission)]],
+                                "values": [[decimal_for_sheet(effective_installment)]],
                             }
                         )
                     expected_advertising = advertising_display(
-                        order.advertising_cost, order.installment_commission
+                        order.advertising_cost, effective_installment
                     )
                     current_advertising = (
                         row[COLUMNS.advertising - 1]
@@ -1524,3 +1627,20 @@ class GoogleSheetsGateway:
         self._apply_professional_formatting(last_used_row)
         self._refresh_end_navigation_link(last_used_row)
         return order_groups.added_rows
+
+    def requires_schema_migration(self) -> bool:
+        """Return whether AA still contains the legacy installment column."""
+        self._locate_header_row()
+        headers = self.worksheet.row_values(self.header_row)
+        current = (
+            str(headers[COLUMNS.receipt - 1]).strip().casefold()
+            if len(headers) >= COLUMNS.receipt
+            else ""
+        )
+        migrated_header = (
+            str(headers[COLUMNS.installment_commission - 1]).strip().casefold()
+            if len(headers) >= COLUMNS.installment_commission
+            else ""
+        )
+        legacy = LEGACY_INSTALLMENT_HEADER.casefold()
+        return current == legacy or (not current and migrated_header == legacy)
