@@ -121,8 +121,29 @@ class SyncHealthState:
 class SupplierCostRecord:
     """A typed supplier value independent from its sheet presentation."""
 
-    kind: Literal["unit_cost", "prepayment"]
+    kind: Literal["unit_cost", "prepayment", "text"]
     unit_cost: Decimal | None = None
+    text_value: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == "unit_cost":
+            if (
+                self.unit_cost is None
+                or not self.unit_cost.is_finite()
+                or self.unit_cost < 0
+                or self.text_value is not None
+            ):
+                raise ValueError("unit cost record requires one non-negative finite value")
+            return
+        if self.kind == "prepayment":
+            if self.unit_cost is not None or self.text_value is not None:
+                raise ValueError("prepayment record must not carry a value")
+            return
+        if self.kind == "text":
+            if self.unit_cost is not None or not (self.text_value or "").strip():
+                raise ValueError("text record requires one non-empty text value")
+            return
+        raise ValueError(f"unsupported supplier cost kind: {self.kind!r}")
 
     @classmethod
     def cost(cls, value: Decimal) -> SupplierCostRecord:
@@ -131,6 +152,14 @@ class SupplierCostRecord:
     @classmethod
     def prepayment(cls) -> SupplierCostRecord:
         return cls(kind="prepayment")
+
+    @classmethod
+    def text(cls, value: str) -> SupplierCostRecord:
+        """Preserve a non-empty supplier marker after trimming outer whitespace."""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("supplier text value must not be empty")
+        return cls(kind="text", text_value=normalized)
 
 
 @dataclass(frozen=True, slots=True)

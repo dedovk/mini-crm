@@ -1640,8 +1640,17 @@ class GoogleSheetsGateway:
                 rowcol_to_a1(row_number, COLUMNS.cost),
             )
         ]
-        latest = self.worksheet.batch_get(ranges, value_render_option="FORMULA")
+        latest: list[list[list[Any]]] = []
+        ranges_per_request = 600
+        for offset in range(0, len(ranges), ranges_per_request):
+            latest.extend(
+                self.worksheet.batch_get(
+                    ranges[offset : offset + ranges_per_request],
+                    value_render_option="FORMULA",
+                )
+            )
         updates: list[dict[str, Any]] = []
+        raw_cost_updates: list[dict[str, Any]] = []
         events: list[OrderAuditEvent] = []
         changed_costs = 0
         for index, (row_number, row, tracking, expected) in enumerate(candidates):
@@ -1650,20 +1659,32 @@ class GoogleSheetsGateway:
             latest_cost = latest[index * 3 + 2][0][0] if latest[index * 3 + 2] else ""
             if tracking_match_key(latest_tracking) != tracking or str(latest_cost).strip():
                 continue
-            sheet_value: str | int | float = (
-                "предоплата"
-                if expected.record.kind == "prepayment"
-                else decimal_for_sheet(expected.record.unit_cost or Decimal(0))
-            )
-            updates.append(
-                {
-                    "range": (
-                        f"{rowcol_to_a1(row_number, COLUMNS.cost)}:"
-                        f"{rowcol_to_a1(row_number, COLUMNS.markup)}"
-                    ),
-                    "values": [[sheet_value, markup_formula(row_number)]],
-                }
-            )
+            if expected.record.kind == "unit_cost":
+                if expected.record.unit_cost is None:
+                    raise ValueError("unit cost record is missing its numeric value")
+                sheet_value: str | int | float = decimal_for_sheet(expected.record.unit_cost)
+            elif expected.record.kind == "prepayment":
+                sheet_value = "предоплата"
+            else:
+                if expected.record.text_value is None:
+                    raise ValueError("text cost record is missing its text value")
+                sheet_value = expected.record.text_value
+            cost_cell = rowcol_to_a1(row_number, COLUMNS.cost)
+            markup_cell = rowcol_to_a1(row_number, COLUMNS.markup)
+            if expected.record.kind == "text":
+                updates.append(
+                    {"range": markup_cell, "values": [[markup_formula(row_number)]]}
+                )
+                raw_cost_updates.append(
+                    {"range": cost_cell, "values": [[sheet_value]]}
+                )
+            else:
+                updates.append(
+                    {
+                        "range": f"{cost_cell}:{markup_cell}",
+                        "values": [[sheet_value, markup_formula(row_number)]],
+                    }
+                )
             changed_costs += 1
             assign_imaxi_sender = (
                 expected.source == IMAXI_SUPPLIER_SOURCE
@@ -1683,15 +1704,20 @@ class GoogleSheetsGateway:
                 if len(row) >= COLUMNS.order_number
                 else ""
             )
+            is_text_marker = expected.record.kind == "text"
             events.append(
                 OrderAuditEvent(
                     occurred_at=observed_at,
-                    event_type="supplier_cost_filled",
+                    event_type=(
+                        "supplier_cost_marker_filled"
+                        if is_text_marker
+                        else "supplier_cost_filled"
+                    ),
                     source=source,
                     order_id=order_id,
                     sync_key=sync_key,
                     tracking_number=normalize_tracking_number(latest_tracking),
-                    field="unit_cost",
+                    field="supplier_cost_marker" if is_text_marker else "unit_cost",
                     old_value="",
                     new_value=str(sheet_value),
                     details=expected.source,
@@ -1713,8 +1739,15 @@ class GoogleSheetsGateway:
                     )
                 )
 
-        if updates:
-            self.worksheet.batch_update(updates, raw=False)
+        updates_per_request = 400
+        for offset in range(0, len(updates), updates_per_request):
+            self.worksheet.batch_update(
+                updates[offset : offset + updates_per_request], raw=False
+            )
+        for offset in range(0, len(raw_cost_updates), updates_per_request):
+            self.worksheet.batch_update(
+                raw_cost_updates[offset : offset + updates_per_request], raw=True
+            )
         LOGGER.info("Filled %s blank supplier cost cell(s)", changed_costs)
         return SupplierCostUpdateResult(
             cell_updates=changed_costs,

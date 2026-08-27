@@ -47,6 +47,25 @@ def test_fetch_costs_reads_supplier_range_once_and_normalizes_values() -> None:
     assert client._test_worksheet.requests == [("L:R", "UNFORMATTED_VALUE")]
 
 
+def test_fetch_costs_preserves_supplier_text_markers_and_typos() -> None:
+    client = _client(
+        [
+            _row("20450420294443", "предопата"),
+            _row("20450453411783", "замена"),
+            _row("20450511605944", "  Інший текст  "),
+        ]
+    )
+
+    batch = client.fetch_costs()
+
+    assert batch.values == {
+        "20450420294443": SupplierCostRecord.text("предопата"),
+        "20450453411783": SupplierCostRecord.text("замена"),
+        "20450511605944": SupplierCostRecord.text("Інший текст"),
+    }
+    assert batch.warnings == ()
+
+
 def test_fetch_costs_handles_more_than_one_thousand_rows_in_one_request() -> None:
     rows = [_row(f"2045{index:010d}", index) for index in range(1, 1201)]
     client = _client(rows)
@@ -75,7 +94,7 @@ def test_fetch_costs_deduplicates_equal_values_and_skips_conflicts() -> None:
     )
 
 
-def test_fetch_costs_skips_empty_invalid_and_negative_values() -> None:
+def test_fetch_costs_skips_empty_values_but_preserves_invalid_and_negative_markers() -> None:
     client = _client(
         [
             _row("2045146814374", ""),
@@ -87,12 +106,12 @@ def test_fetch_costs_skips_empty_invalid_and_negative_values() -> None:
 
     batch = client.fetch_costs()
 
-    assert batch.values == {}
-    assert len(batch.warnings) == 3
-    assert "unsupported cost" in batch.warnings[0]
-    assert "non-negative" in batch.warnings[1]
-    assert "schema check failed" in batch.warnings[2]
-    assert batch.degraded
+    assert batch.values == {
+        "2045148691245": SupplierCostRecord.text("невідомо"),
+        "2045148692927": SupplierCostRecord.text("-10"),
+    }
+    assert batch.warnings == ()
+    assert not batch.degraded
 
 
 def test_fetch_costs_accepts_empty_google_response() -> None:
@@ -102,6 +121,16 @@ def test_fetch_costs_accepts_empty_google_response() -> None:
 
     assert batch.values == {}
     assert not batch.degraded
+
+
+def test_fetch_costs_quarantines_text_exceeding_sheet_cell_limit() -> None:
+    client = _client([_row("20450420294443", "x" * 50_001)])
+
+    batch = client.fetch_costs()
+
+    assert batch.values == {}
+    assert "50000-character" in batch.warnings[0]
+    assert batch.degraded
 
 
 def test_supplier_client_construction_does_not_open_optional_sheet() -> None:

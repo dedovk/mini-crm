@@ -50,14 +50,18 @@ class StubWorksheet:
     def __init__(self, values: list[list[Any]]) -> None:
         self.values = values
         self.updates: list[dict] = []
+        self.update_modes: list[bool | None] = []
+        self.batch_get_requests: list[list[str]] = []
 
     def get_all_values(self, **kwargs):
         return self.values
 
     def batch_update(self, updates, **kwargs) -> None:
-        self.updates = updates
+        self.updates.extend(updates)
+        self.update_modes.extend([kwargs.get("raw")] * len(updates))
 
     def batch_get(self, ranges, **kwargs):
+        self.batch_get_requests.append(list(ranges))
         result = []
         for range_name in ranges:
             row, column = a1_to_rowcol(range_name)
@@ -480,6 +484,105 @@ def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> No
     assert updates["J6"] == ["imaxi-com"]
     assert "Q7:R7" not in updates
     assert len(changed.audit_events) == 4
+
+
+def test_supplier_costs_write_arbitrary_text_marker_without_formula_error() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    rows[4][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[4][COLUMNS.tracking_number - 1] = "20450453411783"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    changed = gateway.update_supplier_costs(
+        {
+            "20450453411783": ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.text("замена")
+            )
+        },
+        observed_at=datetime(2026, 8, 27, tzinfo=UTC),
+    )
+
+    updates = {update["range"]: update["values"][0] for update in worksheet.updates}
+    assert changed.cell_updates == 1
+    assert updates["Q5"] == ["замена"]
+    assert 'IF(ISNUMBER(Q5)' in updates["R5"][0]
+    assert updates["J5"] == ["imaxi-com"]
+    mode_by_range = {
+        update["range"]: mode
+        for update, mode in zip(worksheet.updates, worksheet.update_modes, strict=True)
+    }
+    assert mode_by_range["Q5"] is True
+    assert mode_by_range["R5"] is False
+    marker_events = [
+        event
+        for event in changed.audit_events
+        if event.event_type == "supplier_cost_marker_filled"
+    ]
+    assert len(marker_events) == 1
+    assert marker_events[0].field == "supplier_cost_marker"
+
+
+def test_supplier_costs_write_formula_like_marker_as_raw_text() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    rows[4][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[4][COLUMNS.tracking_number - 1] = "20450420294443"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    gateway.update_supplier_costs(
+        {
+            "20450420294443": ResolvedSupplierCost(
+                "supplier-imaxi",
+                SupplierCostRecord.text('=IMPORTXML("https://example.com";"//x")'),
+            )
+        },
+        observed_at=datetime(2026, 8, 27, tzinfo=UTC),
+    )
+
+    raw_updates = [
+        update
+        for update, mode in zip(worksheet.updates, worksheet.update_modes, strict=True)
+        if mode is True
+    ]
+    assert raw_updates == [
+        {
+            "range": "Q5",
+            "values": [['=IMPORTXML("https://example.com";"//x")']],
+        }
+    ]
+
+
+def test_supplier_costs_chunk_large_concurrency_reads_and_writes() -> None:
+    candidate_count = 201
+    rows = [[""] * LAST_COLUMN for _ in range(candidate_count + 4)]
+    costs: dict[str, ResolvedSupplierCost] = {}
+    for offset in range(candidate_count):
+        row_index = offset + 4
+        tracking = f"2045{offset:010d}"
+        rows[row_index][COLUMNS.row_type - 1] = ROW_ORDER
+        rows[row_index][COLUMNS.tracking_number - 1] = tracking
+        costs[tracking] = ResolvedSupplierCost(
+            "supplier-imaxi", SupplierCostRecord.text("замена")
+        )
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    changed = gateway.update_supplier_costs(
+        costs,
+        observed_at=datetime(2026, 8, 27, tzinfo=UTC),
+    )
+
+    assert changed.cell_updates == candidate_count
+    assert [len(request) for request in worksheet.batch_get_requests] == [600, 3]
+    raw_batches = [
+        update
+        for update, mode in zip(worksheet.updates, worksheet.update_modes, strict=True)
+        if mode is True
+    ]
+    assert len(raw_batches) == candidate_count
 
 
 def test_supplier_costs_ignore_non_order_rows_and_unknown_tracking_numbers() -> None:

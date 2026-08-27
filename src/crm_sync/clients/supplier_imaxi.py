@@ -19,6 +19,7 @@ _COST_COLUMN_OFFSET = 6  # R is the seventh column in the requested L:R range.
 _PREPAYMENT = "предоплата"
 _NUMBER_RE = re.compile(r"^[+-]?\d[\d\s\u00a0]*(?:[.,]\d{1,2})?$")
 _MAX_DETAILED_WARNINGS = 50
+_MAX_CELL_TEXT_LENGTH = 50_000
 
 
 class ImaxiSupplierSheetClient:
@@ -135,15 +136,17 @@ def _tracking_key(value: Any) -> str:
 
 def _parse_cost(value: Any) -> tuple[SupplierCostRecord | None, str]:
     raw = str(value).strip()
+    if len(raw) > _MAX_CELL_TEXT_LENGTH:
+        return None, "text cost exceeds the Google Sheets 50000-character cell limit"
     if raw.casefold() == _PREPAYMENT:
         return SupplierCostRecord.prepayment(), ""
     if not _NUMBER_RE.fullmatch(raw):
-        return None, f"unsupported cost value {raw!r}"
+        return SupplierCostRecord.text(raw), ""
     normalized = raw.replace("\u00a0", "").replace(" ", "").replace(",", ".")
     try:
         cost = Decimal(normalized)
     except InvalidOperation:
-        return None, f"invalid cost value {raw!r}"
+        return SupplierCostRecord.text(raw), ""
     if not cost.is_finite() or cost < 0:
-        return None, f"unit cost must be a non-negative number, got {raw!r}"
+        return SupplierCostRecord.text(raw), ""
     return SupplierCostRecord.cost(cost), ""
