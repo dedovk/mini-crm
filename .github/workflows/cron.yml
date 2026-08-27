@@ -2,9 +2,9 @@ name: Marketplace CRM sync
 
 on:
   schedule:
-    # DirectAdmin dispatches hourly runs at 00:00 and 10:00-23:00 Kyiv time.
-    # Keep one deep reconciliation after the 01:00-09:00 quiet window.
-    - cron: "0 9 * * *"
+    # DirectAdmin dispatches ordinary hourly runs at 09:00-23:00 Kyiv time.
+    # Midnight is reserved for this daily deep reconciliation.
+    - cron: "0 0 * * *"
       timezone: "Europe/Kyiv"
   workflow_dispatch:
     inputs:
@@ -58,11 +58,11 @@ jobs:
       APP_TIMEZONE: ${{ secrets.APP_TIMEZONE }}
       # Frequent runs fetch seven days to reduce Prom API usage. The daily run
       # reconciles the full 30-day history.
-      SYNC_LOOKBACK_DAYS: ${{ github.event.schedule == '0 9 * * *' && '30' || inputs.lookback_days || '7' }}
+      SYNC_LOOKBACK_DAYS: ${{ github.event_name == 'schedule' && '30' || inputs.lookback_days || '7' }}
       # Deep runs may inspect older orders, but they must not backfill stale
       # missing orders into the current reporting day.
       NEW_ORDER_MAX_AGE_DAYS: "7"
-      ROZETKA_FINANCE_LOOKBACK_DAYS: ${{ github.event.schedule == '0 9 * * *' && '90' || '45' }}
+      ROZETKA_FINANCE_LOOKBACK_DAYS: ${{ github.event_name == 'schedule' && '90' || '45' }}
       HTTP_TIMEOUT_SECONDS: "30"
       HTTP_MAX_RETRIES: "4"
       LOG_LEVEL: "INFO"

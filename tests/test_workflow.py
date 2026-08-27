@@ -13,11 +13,11 @@ def test_runner_queue_timeout_is_longer_than_sync_step_timeout() -> None:
     assert "SUPPLIER_IMAXI_SPREADSHEET_ID: ${{ secrets.SUPPLIER_IMAXI_SPREADSHEET_ID }}" in workflow
 
 
-def test_daily_deep_sync_runs_after_kyiv_quiet_hours() -> None:
+def test_daily_deep_sync_runs_at_kyiv_midnight() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    assert '- cron: "0 9 * * *"' in workflow
+    assert '- cron: "0 0 * * *"' in workflow
     assert 'timezone: "Europe/Kyiv"' in workflow
-    assert "github.event.schedule == '0 9 * * *' && '30'" in workflow
-    assert "github.event.schedule == '0 9 * * *' && '90'" in workflow
+    assert "github.event_name == 'schedule' && '30'" in workflow
+    assert "github.event_name == 'schedule' && '90'" in workflow
     assert "13 2 * * *" not in workflow
