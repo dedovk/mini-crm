@@ -14,11 +14,13 @@ from crm_sync.models import (
     OrderItem,
     ResolvedSupplierCost,
     ShipmentStatus,
+    SupplierCostKey,
     SupplierCostRecord,
 )
 from crm_sync.sheet_layout import (
     ALL_HEADERS,
     REPORTING_EXCLUDED_REFUSAL,
+    ROW_DAY,
     ROW_ORDER,
     sheet_serial,
 )
@@ -71,9 +73,15 @@ class StubWorksheet:
 
 
 class ConcurrentCostWorksheet(StubWorksheet):
-    def batch_get(self, ranges, **kwargs):
-        self.values[4][COLUMNS.cost - 1] = 999
-        return super().batch_get(ranges, **kwargs)
+    def __init__(self, values: list[list[Any]]) -> None:
+        super().__init__(values)
+        self.reads = 0
+
+    def get_all_values(self, **kwargs):
+        self.reads += 1
+        if self.reads == 2:
+            self.values[4][COLUMNS.cost - 1] = 999
+        return self.values
 
 
 class LayoutWorksheet(StubWorksheet):
@@ -199,6 +207,34 @@ def test_missing_installment_provenance_column_requires_schema_migration() -> No
     gateway.header_row = 1
 
     assert gateway.requires_schema_migration()
+
+
+def test_missing_daily_usd_rate_control_requires_schema_migration() -> None:
+    headers = list(ALL_HEADERS)
+    day_row = ["Дата дня", sheet_serial(date(2026, 8, 29)), "Виділити день", "", ""]
+    worksheet = LayoutWorksheet([headers, day_row])
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 1
+
+    assert gateway.requires_schema_migration()
+
+
+def test_existing_daily_usd_rate_control_does_not_require_schema_migration() -> None:
+    headers = list(ALL_HEADERS)
+    day_row = [
+        "Дата дня",
+        sheet_serial(date(2026, 8, 29)),
+        "Виділити день",
+        "Курс USD",
+        "45,20",
+    ]
+    worksheet = LayoutWorksheet([headers, day_row])
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 1
+
+    assert not gateway.requires_schema_migration()
 
 
 class BackupWorksheet:
@@ -461,13 +497,13 @@ def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> No
 
     changed = gateway.update_supplier_costs(
         {
-            "20451510462545": ResolvedSupplierCost(
+            SupplierCostKey("20451510462545"): ResolvedSupplierCost(
                 "supplier-imaxi", SupplierCostRecord.cost(Decimal("1079"))
             ),
-            "rmp-598674684": ResolvedSupplierCost(
+            SupplierCostKey("rmp-598674684"): ResolvedSupplierCost(
                 "supplier-imaxi", SupplierCostRecord.prepayment()
             ),
-            "20451509877182": ResolvedSupplierCost(
+            SupplierCostKey("20451509877182"): ResolvedSupplierCost(
                 "supplier-imaxi", SupplierCostRecord.cost(Decimal("368"))
             ),
         },
@@ -476,13 +512,13 @@ def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> No
 
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert changed.cell_updates == 2
-    assert updates["Q5:R5"][0] == 1079
-    assert 'LOWER(Q5&"")' in updates["Q5:R5"][1]
-    assert updates["Q6:R6"][0] == "предоплата"
-    assert 'LOWER(Q6&"")' in updates["Q6:R6"][1]
+    assert updates["Q5"] == [1079]
+    assert 'LOWER(Q5&"")' in updates["R5"][0]
+    assert updates["Q6"] == ["предоплата"]
+    assert 'LOWER(Q6&"")' in updates["R6"][0]
     assert updates["J5"] == ["imaxi-com"]
     assert updates["J6"] == ["imaxi-com"]
-    assert "Q7:R7" not in updates
+    assert "Q7" not in updates
     assert len(changed.audit_events) == 4
 
 
@@ -496,7 +532,7 @@ def test_supplier_costs_write_arbitrary_text_marker_without_formula_error() -> N
 
     changed = gateway.update_supplier_costs(
         {
-            "20450453411783": ResolvedSupplierCost(
+            SupplierCostKey("20450453411783"): ResolvedSupplierCost(
                 "supplier-imaxi", SupplierCostRecord.text("замена")
             )
         },
@@ -533,7 +569,7 @@ def test_supplier_costs_write_formula_like_marker_as_raw_text() -> None:
 
     gateway.update_supplier_costs(
         {
-            "20450420294443": ResolvedSupplierCost(
+            SupplierCostKey("20450420294443"): ResolvedSupplierCost(
                 "supplier-imaxi",
                 SupplierCostRecord.text('=IMPORTXML("https://example.com";"//x")'),
             )
@@ -546,24 +582,23 @@ def test_supplier_costs_write_formula_like_marker_as_raw_text() -> None:
         for update, mode in zip(worksheet.updates, worksheet.update_modes, strict=True)
         if mode is True
     ]
-    assert raw_updates == [
-        {
-            "range": "Q5",
-            "values": [['=IMPORTXML("https://example.com";"//x")']],
-        }
-    ]
+    formula_marker_update = next(update for update in raw_updates if update["range"] == "Q5")
+    assert formula_marker_update == {
+        "range": "Q5",
+        "values": [['=IMPORTXML("https://example.com";"//x")']],
+    }
 
 
 def test_supplier_costs_chunk_large_concurrency_reads_and_writes() -> None:
     candidate_count = 201
     rows = [[""] * LAST_COLUMN for _ in range(candidate_count + 4)]
-    costs: dict[str, ResolvedSupplierCost] = {}
+    costs: dict[SupplierCostKey, ResolvedSupplierCost] = {}
     for offset in range(candidate_count):
         row_index = offset + 4
         tracking = f"2045{offset:010d}"
         rows[row_index][COLUMNS.row_type - 1] = ROW_ORDER
         rows[row_index][COLUMNS.tracking_number - 1] = tracking
-        costs[tracking] = ResolvedSupplierCost(
+        costs[SupplierCostKey(tracking)] = ResolvedSupplierCost(
             "supplier-imaxi", SupplierCostRecord.text("замена")
         )
     worksheet = StubWorksheet(rows)
@@ -576,13 +611,13 @@ def test_supplier_costs_chunk_large_concurrency_reads_and_writes() -> None:
     )
 
     assert changed.cell_updates == candidate_count
-    assert [len(request) for request in worksheet.batch_get_requests] == [600, 3]
+    assert worksheet.batch_get_requests == []
     raw_batches = [
         update
         for update, mode in zip(worksheet.updates, worksheet.update_modes, strict=True)
         if mode is True
     ]
-    assert len(raw_batches) == candidate_count
+    assert len(raw_batches) == candidate_count * 3
 
 
 def test_supplier_costs_ignore_non_order_rows_and_unknown_tracking_numbers() -> None:
@@ -596,10 +631,10 @@ def test_supplier_costs_ignore_non_order_rows_and_unknown_tracking_numbers() -> 
 
     changed = gateway.update_supplier_costs(
         {
-            "20451509877182": ResolvedSupplierCost(
+            SupplierCostKey("20451509877182"): ResolvedSupplierCost(
                 "supplier-imaxi", SupplierCostRecord.cost(Decimal("368"))
             ),
-            "RMP-UNKNOWN": ResolvedSupplierCost(
+            SupplierCostKey("RMP-UNKNOWN"): ResolvedSupplierCost(
                 "supplier-imaxi", SupplierCostRecord.cost(Decimal("10"))
             ),
         },
@@ -620,7 +655,7 @@ def test_supplier_cost_matching_ignores_spaces_in_numeric_tracking_number() -> N
 
     result = gateway.update_supplier_costs(
         {
-            "20451510462545": ResolvedSupplierCost(
+            SupplierCostKey("20451510462545"): ResolvedSupplierCost(
                 "supplier-imaxi", SupplierCostRecord.cost(Decimal("1079"))
             )
         },
@@ -628,7 +663,7 @@ def test_supplier_cost_matching_ignores_spaces_in_numeric_tracking_number() -> N
     )
 
     assert result.cell_updates == 1
-    assert worksheet.updates[0]["range"] == "Q5:R5"
+    assert worksheet.updates[0]["range"] == "Q5"
 
 
 def test_supplier_cost_does_not_overwrite_concurrent_manual_edit() -> None:
@@ -641,7 +676,7 @@ def test_supplier_cost_does_not_overwrite_concurrent_manual_edit() -> None:
 
     result = gateway.update_supplier_costs(
         {
-            "20451510462545": ResolvedSupplierCost(
+            SupplierCostKey("20451510462545"): ResolvedSupplierCost(
                 "supplier-imaxi", SupplierCostRecord.cost(Decimal("1079"))
             )
         },
@@ -650,6 +685,289 @@ def test_supplier_cost_does_not_overwrite_concurrent_manual_edit() -> None:
 
     assert result.cell_updates == 0
     assert worksheet.updates == []
+
+
+def test_melad_cost_uses_operational_day_rate_and_assigns_sender() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    rows[3][COLUMNS.row_type - 1] = ROW_DAY
+    rows[3][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[3][4] = "45,20"
+    rows[5][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[5][COLUMNS.tracking_number - 1] = "20451518006037"
+    rows[5][COLUMNS.product_code - 1] = "PK-ND"
+    rows[5][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[5][COLUMNS.sender - 1] = "наш"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_supplier_costs(
+        {
+            SupplierCostKey("20451518006037", "pknd"): ResolvedSupplierCost(
+                "supplier-melad",
+                SupplierCostRecord.cost(Decimal("187"), currency="USD"),
+                "Melad",
+            )
+        },
+        observed_at=datetime(2026, 8, 29, tzinfo=UTC),
+    )
+
+    updates = {update["range"]: update["values"][0] for update in worksheet.updates}
+    assert result.cell_updates == 1
+    assert updates["Q6"] == [8452.4]
+    assert updates["J6"] == ["Melad"]
+    assert result.warnings == ()
+
+
+def test_melad_cost_is_skipped_when_daily_rate_is_missing() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    rows[3][COLUMNS.row_type - 1] = ROW_DAY
+    rows[3][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[5][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[5][COLUMNS.tracking_number - 1] = "20451518006037"
+    rows[5][COLUMNS.product_code - 1] = "PK-ND"
+    rows[5][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_supplier_costs(
+        {
+            SupplierCostKey("20451518006037", "pknd"): ResolvedSupplierCost(
+                "supplier-melad",
+                SupplierCostRecord.cost(Decimal("187"), currency="USD"),
+                "Melad",
+            )
+        },
+        observed_at=datetime(2026, 8, 29, tzinfo=UTC),
+    )
+
+    assert result.cell_updates == 0
+    assert worksheet.updates == []
+    assert "daily USD rate is empty" in result.warnings[0]
+
+
+def test_melad_cost_rejects_implausible_or_scientific_daily_rate() -> None:
+    for invalid_rate in (452, "4.52E1"):
+        rows = [[""] * LAST_COLUMN for _ in range(6)]
+        rows[3][COLUMNS.row_type - 1] = ROW_DAY
+        rows[3][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+        rows[3][4] = invalid_rate
+        rows[5][COLUMNS.row_type - 1] = ROW_ORDER
+        rows[5][COLUMNS.tracking_number - 1] = "20451518006037"
+        rows[5][COLUMNS.product_code - 1] = "PK-ND"
+        rows[5][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+        worksheet = StubWorksheet(rows)
+        gateway = object.__new__(GoogleSheetsGateway)
+        gateway.worksheet = worksheet
+
+        result = gateway.update_supplier_costs(
+            {
+                SupplierCostKey("20451518006037", "pknd"): ResolvedSupplierCost(
+                    "supplier-melad",
+                    SupplierCostRecord.cost(Decimal("187"), currency="USD"),
+                    "Melad",
+                )
+            },
+            observed_at=datetime(2026, 8, 29, tzinfo=UTC),
+        )
+
+        assert result.cell_updates == 0
+        assert "daily USD rate is invalid" in result.warnings[0]
+
+
+def test_generic_supplier_cost_is_quarantined_for_multi_item_order() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(7)]
+    rows[3][COLUMNS.row_type - 1] = ROW_DAY
+    rows[3][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[3][4] = 45.2
+    for row_index, product_code in ((5, "PK-ND"), (6, "STD-16")):
+        rows[row_index][COLUMNS.row_type - 1] = ROW_ORDER
+        rows[row_index][COLUMNS.tracking_number - 1] = "20451518006037"
+        rows[row_index][COLUMNS.product_code - 1] = product_code
+        rows[row_index][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_supplier_costs(
+        {
+            SupplierCostKey("20451518006037"): ResolvedSupplierCost(
+                "supplier-melad",
+                SupplierCostRecord.cost(Decimal("187"), currency="USD"),
+                "Melad",
+            )
+        },
+        observed_at=datetime(2026, 8, 29, tzinfo=UTC),
+    )
+
+    assert result.cell_updates == 0
+    assert worksheet.updates == []
+    assert "multiple item rows" in result.warnings[0]
+
+
+def test_melad_cost_recalculates_only_with_matching_hidden_provenance() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(7)]
+    rows[3][COLUMNS.row_type - 1] = ROW_DAY
+    rows[3][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[3][4] = 46
+    for row_index in (5, 6):
+        rows[row_index][COLUMNS.row_type - 1] = ROW_ORDER
+        rows[row_index][COLUMNS.tracking_number - 1] = f"2045151800603{row_index}"
+        rows[row_index][COLUMNS.product_code - 1] = "PK-ND"
+        rows[row_index][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+        rows[row_index][COLUMNS.sender - 1] = "Melad"
+        rows[row_index][COLUMNS.cost - 1] = 8452.4
+    rows[5][COLUMNS.supplier_cost_source - 1] = "supplier-melad"
+    rows[5][COLUMNS.supplier_cost_currency - 1] = "USD"
+    rows[5][COLUMNS.supplier_cost_original - 1] = 187
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    costs = {
+        SupplierCostKey("20451518006035", "pknd"): ResolvedSupplierCost(
+            "supplier-melad",
+            SupplierCostRecord.cost(Decimal("187"), currency="USD"),
+            "Melad",
+        ),
+        SupplierCostKey("20451518006036", "pknd"): ResolvedSupplierCost(
+            "supplier-melad",
+            SupplierCostRecord.cost(Decimal("187"), currency="USD"),
+            "Melad",
+        ),
+    }
+    result = gateway.update_supplier_costs(
+        costs, observed_at=datetime(2026, 8, 29, tzinfo=UTC)
+    )
+
+    updates = {update["range"]: update["values"][0] for update in worksheet.updates}
+    assert result.cell_updates == 1
+    assert updates["Q6"] == [8602]
+    assert "Q7" not in updates
+
+
+def test_melad_unchanged_converted_cost_produces_no_writes_or_audit() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    rows[3][COLUMNS.row_type - 1] = ROW_DAY
+    rows[3][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[3][4] = 45.2
+    rows[5][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[5][COLUMNS.tracking_number - 1] = "20451518006037"
+    rows[5][COLUMNS.product_code - 1] = "PK-ND"
+    rows[5][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[5][COLUMNS.sender - 1] = "Melad"
+    rows[5][COLUMNS.cost - 1] = 8452.4
+    rows[5][COLUMNS.markup - 1] = markup_formula(6)
+    rows[5][COLUMNS.supplier_cost_source - 1] = "supplier-melad"
+    rows[5][COLUMNS.supplier_cost_currency - 1] = "USD"
+    rows[5][COLUMNS.supplier_cost_original - 1] = 187
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_supplier_costs(
+        {
+            SupplierCostKey("20451518006037", "pknd"): ResolvedSupplierCost(
+                "supplier-melad",
+                SupplierCostRecord.cost(Decimal("187"), currency="USD"),
+                "Melad",
+            )
+        },
+        observed_at=datetime(2026, 8, 29, tzinfo=UTC),
+    )
+
+    assert result.cell_updates == 0
+    assert result.audit_events == ()
+    assert worksheet.updates == []
+
+
+def test_melad_repairs_missing_markup_formula_when_cost_is_unchanged() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    rows[3][COLUMNS.row_type - 1] = ROW_DAY
+    rows[3][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[3][4] = 45.2
+    rows[5][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[5][COLUMNS.tracking_number - 1] = "20451518006037"
+    rows[5][COLUMNS.product_code - 1] = "PK-ND"
+    rows[5][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[5][COLUMNS.sender - 1] = "Melad"
+    rows[5][COLUMNS.cost - 1] = 8452.4
+    rows[5][COLUMNS.supplier_cost_source - 1] = "supplier-melad"
+    rows[5][COLUMNS.supplier_cost_currency - 1] = "USD"
+    rows[5][COLUMNS.supplier_cost_original - 1] = 187
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_supplier_costs(
+        {
+            SupplierCostKey("20451518006037", "pknd"): ResolvedSupplierCost(
+                "supplier-melad",
+                SupplierCostRecord.cost(Decimal("187"), currency="USD"),
+                "Melad",
+            )
+        },
+        observed_at=datetime(2026, 8, 29, tzinfo=UTC),
+    )
+
+    updates = {update["range"]: update["values"][0] for update in worksheet.updates}
+    assert result.cell_updates == 0
+    assert updates == {"R6": [markup_formula(6)]}
+
+
+def test_melad_recalculates_archived_supplier_row_from_hidden_provenance() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(7)]
+    rows[3][COLUMNS.row_type - 1] = ROW_DAY
+    rows[3][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[3][4] = 46
+    rows[5][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[5][COLUMNS.tracking_number - 1] = "20451518006037"
+    rows[5][COLUMNS.product_code - 1] = "PK-ND"
+    rows[5][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[5][COLUMNS.sender - 1] = "Melad"
+    rows[5][COLUMNS.cost - 1] = 8452.4
+    rows[5][COLUMNS.supplier_cost_source - 1] = "supplier-melad"
+    rows[5][COLUMNS.supplier_cost_currency - 1] = "USD"
+    rows[5][COLUMNS.supplier_cost_original - 1] = 187
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_supplier_costs(
+        {}, observed_at=datetime(2026, 8, 29, tzinfo=UTC)
+    )
+
+    updates = {update["range"]: update["values"][0] for update in worksheet.updates}
+    assert result.cell_updates == 1
+    assert updates["Q6"] == [8602]
+
+
+def test_melad_cost_does_not_fall_back_across_different_product_code() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    rows[3][COLUMNS.row_type - 1] = ROW_DAY
+    rows[3][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    rows[3][4] = 45.2
+    rows[5][COLUMNS.row_type - 1] = ROW_ORDER
+    rows[5][COLUMNS.tracking_number - 1] = "20451518006037"
+    rows[5][COLUMNS.product_code - 1] = "OTHER"
+    rows[5][COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 29))
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    result = gateway.update_supplier_costs(
+        {
+            SupplierCostKey("20451518006037", "pknd"): ResolvedSupplierCost(
+                "supplier-melad",
+                SupplierCostRecord.cost(Decimal("187"), currency="USD"),
+                "Melad",
+            )
+        },
+        observed_at=datetime(2026, 8, 29, tzinfo=UTC),
+    )
+
+    assert result.cell_updates == 0
 
 
 def test_completion_observation_backfills_first_seen_date_and_status() -> None:

@@ -10,6 +10,7 @@ from crm_sync.clients.opencart import OpenCartClient
 from crm_sync.clients.prom import PromClient
 from crm_sync.clients.rozetka import RozetkaClient
 from crm_sync.clients.supplier_imaxi import ImaxiSupplierSheetClient
+from crm_sync.clients.supplier_melad import MeladSupplierSheetClient
 from crm_sync.config import ConfigurationError, Settings
 from crm_sync.github_notifier import notify_sync_health
 from crm_sync.reporting import write_github_summary
@@ -66,6 +67,15 @@ def build_service(settings: Settings) -> SyncService:
             ImaxiSupplierSheetClient(
                 credentials_info=settings.google_service_account_info,
                 spreadsheet_id=settings.supplier_imaxi_spreadsheet_id,
+                timeout=settings.http_timeout,
+                max_retries=settings.http_max_retries,
+            )
+        )
+    if settings.supplier_melad_spreadsheet_id:
+        supplier_cost_sources.append(
+            MeladSupplierSheetClient(
+                credentials_info=settings.google_service_account_info,
+                spreadsheet_id=settings.supplier_melad_spreadsheet_id,
                 timeout=settings.http_timeout,
                 max_retries=settings.http_max_retries,
             )

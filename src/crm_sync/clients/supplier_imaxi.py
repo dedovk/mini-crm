@@ -11,7 +11,7 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 from requests import ConnectionError, Timeout
 
-from crm_sync.models import SupplierCostBatch, SupplierCostRecord
+from crm_sync.models import SupplierCostBatch, SupplierCostKey, SupplierCostRecord
 from crm_sync.utils import tracking_match_key
 
 LOGGER = logging.getLogger(__name__)
@@ -45,8 +45,8 @@ class ImaxiSupplierSheetClient:
     def fetch_costs(self) -> SupplierCostBatch:
         """Fetch L:R once and return non-conflicting values indexed by TTN."""
         rows = self._fetch_rows_with_retry()
-        values: dict[str, SupplierCostRecord] = {}
-        conflicted: set[str] = set()
+        values: dict[SupplierCostKey, SupplierCostRecord] = {}
+        conflicted: set[SupplierCostKey] = set()
         warnings: list[str] = []
         omitted_warnings = 0
         tracking_rows = 0
@@ -63,6 +63,7 @@ class ImaxiSupplierSheetClient:
             raw_cost = row[_COST_COLUMN_OFFSET] if len(row) > _COST_COLUMN_OFFSET else ""
             if not tracking:
                 continue
+            key = SupplierCostKey(tracking)
             tracking_rows += 1
             if str(raw_cost).strip() == "":
                 continue
@@ -70,17 +71,17 @@ class ImaxiSupplierSheetClient:
             if error:
                 warn(f"IMAXI row {row_number}, TTN {tracking}: {error}")
                 continue
-            if cost is None or tracking in conflicted:
+            if cost is None or key in conflicted:
                 continue
-            previous = values.get(tracking)
+            previous = values.get(key)
             if previous is not None and previous != cost:
-                values.pop(tracking, None)
-                conflicted.add(tracking)
+                values.pop(key, None)
+                conflicted.add(key)
                 warn(
                     f"IMAXI TTN {tracking} has conflicting costs; it was not imported"
                 )
                 continue
-            values[tracking] = cost
+            values[key] = cost
 
         if omitted_warnings:
             warnings.append(f"IMAXI: {omitted_warnings} additional warning(s) omitted")
@@ -97,6 +98,7 @@ class ImaxiSupplierSheetClient:
         return SupplierCostBatch(
             source=self.source,
             values=values,
+            sender="imaxi-com",
             warnings=tuple(warnings),
             degraded=degraded,
         )

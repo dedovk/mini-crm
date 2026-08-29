@@ -17,6 +17,7 @@ from crm_sync.models import (
     ShipmentStatusChange,
     ShipmentUpdateResult,
     SupplierCostBatch,
+    SupplierCostKey,
     SupplierCostUpdateResult,
     SyncHealthState,
 )
@@ -24,6 +25,7 @@ from crm_sync.utils import (
     extract_ttn,
     has_prepayment_request,
     parse_prepayment,
+    product_code_match_key,
     tracking_match_key,
 )
 
@@ -136,7 +138,7 @@ class SheetGateway(Protocol):
 
     def update_supplier_costs(
         self,
-        costs: Mapping[str, ResolvedSupplierCost],
+        costs: Mapping[SupplierCostKey, ResolvedSupplierCost],
         *,
         observed_at: datetime,
     ) -> SupplierCostUpdateResult: ...
@@ -170,7 +172,7 @@ class SupplierCostFetch:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedSupplierCosts:
-    values: Mapping[str, ResolvedSupplierCost]
+    values: Mapping[SupplierCostKey, ResolvedSupplierCost]
     warnings: tuple[str, ...]
 
 
@@ -337,9 +339,9 @@ class SyncService:
         supplier_cost_write_failed = False
         supplier_audit_count = 0
         supplier_prepayment_tracking_keys = {
-            tracking_match_key(tracking)
-            for tracking, resolved in resolved_supplier_costs.values.items()
-            if resolved.record.kind == "prepayment" and tracking_match_key(tracking)
+            key.tracking_number
+            for key, resolved in resolved_supplier_costs.values.items()
+            if resolved.record.kind == "prepayment" and key.tracking_number
         }
         quarantine_unverified_refusals = bool(
             self.supplier_cost_sources and supplier_costs.failed_sources
@@ -380,12 +382,16 @@ class SyncService:
             supplier_prepayment_tracking_keys=supplier_prepayment_tracking_keys,
             quarantine_unverified_refusals=quarantine_unverified_refusals,
         )
-        if resolved_supplier_costs.values:
+        should_refresh_supplier_costs = bool(resolved_supplier_costs.values) or any(
+            source.source == "supplier-melad" for source in self.supplier_cost_sources
+        )
+        if should_refresh_supplier_costs:
             try:
                 supplier_cost_update = self.sheets.update_supplier_costs(
                     resolved_supplier_costs.values,
                     observed_at=now,
                 )
+                warnings.extend(supplier_cost_update.warnings)
             except Exception as exc:  # noqa: BLE001 - optional integration boundary
                 supplier_cost_write_failed = True
                 warning = (
@@ -557,32 +563,59 @@ class SyncService:
     def _resolve_supplier_costs(
         batches: tuple[SupplierCostBatch, ...],
     ) -> ResolvedSupplierCosts:
-        values: dict[str, ResolvedSupplierCost] = {}
-        owners: dict[str, str] = {}
-        conflicted: set[str] = set()
+        values: dict[SupplierCostKey, ResolvedSupplierCost] = {}
+        owners: dict[SupplierCostKey, str] = {}
+        conflicted: set[SupplierCostKey] = set()
+        tracking_owners: dict[str, str] = {}
+        conflicted_tracking: set[str] = set()
         warnings: list[str] = []
         for batch in batches:
-            for raw_tracking, record in batch.values.items():
+            for raw_key, record in batch.values.items():
+                raw_tracking = raw_key.tracking_number
+                raw_product_code = raw_key.product_code
                 tracking = tracking_match_key(raw_tracking)
                 if not tracking:
                     warnings.append(
                         f"{batch.source} returned invalid TTN {raw_tracking!r}; it was not imported"
                     )
                     continue
-                if tracking in conflicted:
+                if tracking in conflicted_tracking:
                     continue
-                previous = values.get(tracking)
-                if previous is not None and previous.record != record:
-                    previous_source = owners.pop(tracking)
-                    values.pop(tracking)
-                    conflicted.add(tracking)
+                tracking_owner = tracking_owners.get(tracking)
+                if tracking_owner is not None and tracking_owner != batch.source:
+                    for existing_key in tuple(values):
+                        if existing_key.tracking_number == tracking:
+                            values.pop(existing_key, None)
+                            owners.pop(existing_key, None)
+                    conflicted_tracking.add(tracking)
                     warnings.append(
                         f"Supplier TTN {tracking} conflicts between "
+                        f"{tracking_owner} and {batch.source}; all its item costs were quarantined"
+                    )
+                    continue
+                tracking_owners[tracking] = batch.source
+                key = SupplierCostKey(
+                    tracking_number=tracking,
+                    product_code=product_code_match_key(raw_product_code),
+                )
+                if key in conflicted:
+                    continue
+                previous = values.get(key)
+                if previous is not None and previous.record != record:
+                    previous_source = owners.pop(key)
+                    values.pop(key)
+                    conflicted.add(key)
+                    warnings.append(
+                        f"Supplier TTN {tracking}, product {key.product_code or '*'} conflicts between "
                         f"{previous_source} and {batch.source}; it was not imported"
                     )
                     continue
-                values[tracking] = ResolvedSupplierCost(source=batch.source, record=record)
-                owners[tracking] = batch.source
+                values[key] = ResolvedSupplierCost(
+                    source=batch.source,
+                    record=record,
+                    sender=batch.sender,
+                )
+                owners[key] = batch.source
         return ResolvedSupplierCosts(values=values, warnings=tuple(warnings))
 
     @staticmethod

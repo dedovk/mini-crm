@@ -10,6 +10,7 @@ from crm_sync.models import (
     ShipmentStatus,
     ShipmentUpdateResult,
     SupplierCostBatch,
+    SupplierCostKey,
     SupplierCostRecord,
     SupplierCostUpdateResult,
     SyncHealthState,
@@ -44,7 +45,7 @@ class ProductionSheetsStub(SheetsStub):
         self.force_rebuild = False
         self.supplier_prepayment_tracking_keys: set[str] = set()
         self.refused_orders = False
-        self.supplier_cost_calls: list[dict[str, ResolvedSupplierCost]] = []
+        self.supplier_cost_calls: list[dict[SupplierCostKey, ResolvedSupplierCost]] = []
         self.schema_migration_required = False
 
     def requires_schema_migration(self) -> bool:
@@ -217,7 +218,11 @@ class SupplierCostSourceStub:
     def fetch_costs(self):
         return SupplierCostBatch(
             source=self.source,
-            values={"20451510462545": SupplierCostRecord.cost(Decimal("1079"))},
+            values={
+                SupplierCostKey("20451510462545"): SupplierCostRecord.cost(
+                    Decimal("1079")
+                )
+            },
             warnings=("supplier duplicate was ignored",),
         )
 
@@ -227,6 +232,13 @@ class FailingSupplierCostSource:
 
     def fetch_costs(self):
         raise RuntimeError("supplier sheet timeout")
+
+
+class EmptyMeladCostSource:
+    source = "supplier-melad"
+
+    def fetch_costs(self):
+        return SupplierCostBatch(source=self.source, degraded=True)
 
 
 class SupplierCostWriteFailureSheets(ProductionSheetsStub):
@@ -348,8 +360,8 @@ def test_supplier_costs_are_imported_and_warnings_are_reported() -> None:
 
     assert sheets.supplier_cost_calls == [
         {
-            "20451510462545": ResolvedSupplierCost(
-                "supplier-imaxi", SupplierCostRecord.cost(Decimal("1079"))
+            SupplierCostKey("20451510462545"): ResolvedSupplierCost(
+                "supplier-imaxi", SupplierCostRecord.cost(Decimal("1079")), ""
             )
         }
     ]
@@ -381,6 +393,25 @@ def test_supplier_network_failure_preserves_existing_costs_and_marks_health() ->
     )
 
 
+def test_empty_melad_batch_still_triggers_historical_provenance_refresh() -> None:
+    sheets = ProductionSheetsStub()
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[SuccessfulSource()],  # type: ignore[list-item]
+        supplier_cost_sources=[EmptyMeladCostSource()],
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    service.run()
+
+    assert sheets.supplier_cost_calls == [{}]
+    assert sheets.health_calls == [["supplier-melad"]]
+
+
 def test_supplier_cost_write_failure_does_not_abort_completed_order_sync() -> None:
     sheets = SupplierCostWriteFailureSheets()
     service = SyncService(
@@ -408,22 +439,54 @@ def test_cross_supplier_conflict_is_quarantined_independently_of_order() -> None
         (
             SupplierCostBatch(
                 source="supplier-a",
-                values={"20451510462545": cost, "20451509877182": cost},
+                values={
+                    SupplierCostKey("20451510462545"): cost,
+                    SupplierCostKey("20451509877182"): cost,
+                },
             ),
             SupplierCostBatch(
                 source="supplier-b",
-                values={"20 4515 1046 2545": other_cost, "20451509877182": cost},
+                values={
+                    SupplierCostKey("20 4515 1046 2545"): other_cost,
+                    SupplierCostKey("20451509877182"): cost,
+                },
             ),
         )
     )
 
-    assert resolved.values == {
-        "20451509877182": ResolvedSupplierCost("supplier-b", cost)
-    }
+    assert resolved.values == {}
     assert resolved.warnings == (
         "Supplier TTN 20451510462545 conflicts between supplier-a and supplier-b; "
-        "it was not imported",
+        "all its item costs were quarantined",
+        "Supplier TTN 20451509877182 conflicts between supplier-a and supplier-b; "
+        "all its item costs were quarantined",
     )
+
+
+def test_cross_supplier_conflict_quarantines_generic_and_item_level_keys() -> None:
+    resolved = SyncService._resolve_supplier_costs(
+        (
+            SupplierCostBatch(
+                source="supplier-imaxi",
+                values={
+                    SupplierCostKey("20451518006037"): SupplierCostRecord.cost(
+                        Decimal("100")
+                    )
+                },
+            ),
+            SupplierCostBatch(
+                source="supplier-melad",
+                values={
+                    SupplierCostKey("20451518006037", "pknd"): SupplierCostRecord.cost(
+                        Decimal("187"), currency="USD"
+                    )
+                },
+            ),
+        )
+    )
+
+    assert resolved.values == {}
+    assert "all its item costs were quarantined" in resolved.warnings[0]
 
 
 def test_deep_run_does_not_backfill_previously_unseen_stale_order() -> None:

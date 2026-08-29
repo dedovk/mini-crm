@@ -75,6 +75,10 @@ def test_supplier_sheet_id_is_optional_and_read_from_environment(
 
     monkeypatch.setenv("SUPPLIER_IMAXI_SPREADSHEET_ID", "supplier-sheet")
     assert Settings.from_env().supplier_imaxi_spreadsheet_id == "supplier-sheet"
+    assert Settings.from_env().supplier_melad_spreadsheet_id == ""
+
+    monkeypatch.setenv("SUPPLIER_MELAD_SPREADSHEET_ID", "melad-sheet")
+    assert Settings.from_env().supplier_melad_spreadsheet_id == "melad-sheet"
 
 
 def test_prom_installment_fallback_rate_is_explicit_and_validated(

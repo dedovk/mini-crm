@@ -35,11 +35,14 @@ class SheetColumns:
     installment_commission: int = 28
     installment_commission_source: int = 29
     reporting_state: int = 30
+    supplier_cost_source: int = 31
+    supplier_cost_currency: int = 32
+    supplier_cost_original: int = 33
 
 
 COLUMNS = SheetColumns()
-LAST_COLUMN = COLUMNS.reporting_state
-LAST_COLUMN_LETTER = "AD"
+LAST_COLUMN = COLUMNS.supplier_cost_original
+LAST_COLUMN_LETTER = "AG"
 
 PAYMENT_OPTIONS = (
     "пром оплата(оплата картой)",

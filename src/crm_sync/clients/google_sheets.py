@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Mapping
 
 import gspread
@@ -18,6 +20,8 @@ from crm_sync.models import (
     ShipmentStatus,
     ShipmentStatusChange,
     ShipmentUpdateResult,
+    SupplierCostKey,
+    SupplierCostRecord,
     SupplierCostUpdateResult,
     SyncHealthState,
 )
@@ -57,7 +61,13 @@ from crm_sync.sheet_schema import (
     NOVA_POSHTA_STATUS_OPTIONS,
     PAYMENT_OPTIONS,
 )
-from crm_sync.sheet_snapshot import build_sheet_snapshot
+from crm_sync.sheet_snapshot import (
+    DAY_DATE_LABEL,
+    USD_RATE_LABEL,
+    USD_RATE_LABEL_COLUMN,
+    USD_RATE_VALUE_COLUMN,
+    build_sheet_snapshot,
+)
 from crm_sync.utils import (
     customer_display,
     decimal_for_sheet,
@@ -65,17 +75,35 @@ from crm_sync.utils import (
     extract_ttn,
     normalize_tracking_number,
     parse_prepayment,
+    product_code_match_key,
     tracking_match_key,
 )
 
 LOGGER = logging.getLogger(__name__)
 LEGACY_INSTALLMENT_HEADER = "Комісія оплати частинами, грн"
-IMAXI_SUPPLIER_SOURCE = "supplier-imaxi"
-IMAXI_SENDER = "imaxi-com"
+MELAD_SUPPLIER_SOURCE = "supplier-melad"
+MELAD_SENDER = "Melad"
+SUPPLIER_SENDER_DEFAULTS = {
+    "supplier-imaxi": "imaxi-com",
+    MELAD_SUPPLIER_SOURCE: MELAD_SENDER,
+}
+_USD_RATE_PATTERN = re.compile(r"^\d{2,3}(?:[.,]\d{1,4})?$")
+_MIN_USD_RATE = Decimal("20")
+_MAX_USD_RATE = Decimal("100")
 
 
 class ConcurrentSheetEditError(RuntimeError):
     """The sheet changed while a structural rebuild was being prepared."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SupplierCostCandidate:
+    row_number: int
+    original_row: list[Any]
+    key: SupplierCostKey
+    expected: ResolvedSupplierCost
+    operational_day: date | None
+    rate: Decimal | None
 
 
 class GoogleSheetsGateway:
@@ -158,7 +186,7 @@ class GoogleSheetsGateway:
     def _locate_header_row(self) -> None:
         """Locate the first repeated business header in the active sheet."""
         preview = self.worksheet.get(
-            f"A1:{LAST_COLUMN_LETTER}{min(self.worksheet.row_count, 100)}",
+            f"A1:B{min(self.worksheet.row_count, 100)}",
             value_render_option="UNFORMATTED_VALUE",
         )
         located_header = next(
@@ -399,7 +427,7 @@ class GoogleSheetsGateway:
                         "sheetId": self.worksheet.id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.installment_commission - 1,
-                        "endIndex": COLUMNS.reporting_state,
+                        "endIndex": LAST_COLUMN,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -528,7 +556,7 @@ class GoogleSheetsGateway:
                         "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": COLUMNS.installment_commission - 1,
-                        "endIndex": COLUMNS.reporting_state,
+                        "endIndex": LAST_COLUMN,
                     },
                     "properties": {"hiddenByUser": True},
                     "fields": "hiddenByUser",
@@ -707,6 +735,7 @@ class GoogleSheetsGateway:
             COLUMNS.cost: ("NUMBER", "#,##0.00"),
             COLUMNS.markup: ("NUMBER", "#,##0.00"),
             COLUMNS.advertising: ("NUMBER", "#,##0.00"),
+            COLUMNS.supplier_cost_original: ("NUMBER", "#,##0.00"),
             COLUMNS.operational_date: ("DATE", "dd.mm.yyyy"),
             COLUMNS.first_seen_completed: ("DATE", "dd.mm.yyyy"),
         }
@@ -728,8 +757,9 @@ class GoogleSheetsGateway:
             )
 
         for row_number in typed_rows.get(ROW_DAY, []):
-            requests.append(
-                {
+            requests.extend(
+                [
+                    {
                     "repeatCell": {
                         "range": {
                             "sheetId": sheet_id,
@@ -745,7 +775,67 @@ class GoogleSheetsGateway:
                         },
                         "fields": "userEnteredFormat.numberFormat",
                     }
-                }
+                    },
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": row_number - 1,
+                                "endRowIndex": row_number,
+                                "startColumnIndex": USD_RATE_LABEL_COLUMN - 1,
+                                "endColumnIndex": USD_RATE_VALUE_COLUMN,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "backgroundColorStyle": {
+                                        "rgbColor": self._hex_color("#FFF2CC")
+                                    },
+                                    "textFormat": {"bold": True, "fontSize": 9},
+                                }
+                            },
+                            "fields": "userEnteredFormat(backgroundColorStyle,textFormat)",
+                        }
+                    },
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": row_number - 1,
+                                "endRowIndex": row_number,
+                                "startColumnIndex": USD_RATE_VALUE_COLUMN - 1,
+                                "endColumnIndex": USD_RATE_VALUE_COLUMN,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "numberFormat": {"type": "NUMBER", "pattern": "0.00"}
+                                }
+                            },
+                            "fields": "userEnteredFormat.numberFormat",
+                        }
+                    },
+                    {
+                        "setDataValidation": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": row_number - 1,
+                                "endRowIndex": row_number,
+                                "startColumnIndex": USD_RATE_VALUE_COLUMN - 1,
+                                "endColumnIndex": USD_RATE_VALUE_COLUMN,
+                            },
+                            "rule": {
+                                "condition": {
+                                    "type": "NUMBER_BETWEEN",
+                                    "values": [
+                                        {"userEnteredValue": str(_MIN_USD_RATE)},
+                                        {"userEnteredValue": str(_MAX_USD_RATE)},
+                                    ],
+                                },
+                                "strict": True,
+                                "showCustomUi": True,
+                            },
+                        }
+                    },
+                ]
             )
 
         for row_type in (ROW_MONTH, ROW_DAY):
@@ -1594,109 +1684,97 @@ class GoogleSheetsGateway:
 
     def update_supplier_costs(
         self,
-        costs: Mapping[str, ResolvedSupplierCost],
+        costs: Mapping[SupplierCostKey, ResolvedSupplierCost],
         *,
         observed_at: datetime,
     ) -> SupplierCostUpdateResult:
-        """Fill blank unit-cost cells by matching normalized tracking numbers."""
-        if not costs:
-            return SupplierCostUpdateResult()
-        normalized_costs = {
-            normalized: value
-            for tracking, value in costs.items()
-            if (normalized := tracking_match_key(tracking))
-        }
+        """Fill supplier costs, converting Melad USD values at the CRM day rate."""
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        normalized_costs = _normalize_supplier_costs(costs)
+        normalized_costs = _with_melad_provenance_fallbacks(values, normalized_costs)
         if not normalized_costs:
             return SupplierCostUpdateResult()
-
-        values = self.worksheet.get_all_values(value_render_option="FORMULA")
-        candidates: list[tuple[int, list[Any], str, ResolvedSupplierCost]] = []
-        for row_number, row in enumerate(values, start=1):
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
-            if row_type != ROW_ORDER:
-                continue
-            current_cost = row[COLUMNS.cost - 1] if len(row) >= COLUMNS.cost else ""
-            if str(current_cost).strip():
-                continue
-            tracking = tracking_match_key(
-                row[COLUMNS.tracking_number - 1]
-                if len(row) >= COLUMNS.tracking_number
-                else ""
-            )
-            expected = normalized_costs.get(tracking)
-            if expected is None:
-                continue
-            candidates.append((row_number, row, tracking, expected))
-
+        candidates, warnings = _discover_supplier_cost_candidates(
+            values, normalized_costs
+        )
         if not candidates:
-            return SupplierCostUpdateResult()
+            return SupplierCostUpdateResult(warnings=tuple(warnings))
 
-        ranges = [
-            range_name
-            for row_number, _, _, _ in candidates
-            for range_name in (
-                rowcol_to_a1(row_number, COLUMNS.tracking_number),
-                rowcol_to_a1(row_number, COLUMNS.sender),
-                rowcol_to_a1(row_number, COLUMNS.cost),
-            )
-        ]
-        latest: list[list[list[Any]]] = []
-        ranges_per_request = 600
-        for offset in range(0, len(ranges), ranges_per_request):
-            latest.extend(
-                self.worksheet.batch_get(
-                    ranges[offset : offset + ranges_per_request],
-                    value_render_option="FORMULA",
-                )
-            )
-        updates: list[dict[str, Any]] = []
-        raw_cost_updates: list[dict[str, Any]] = []
+        latest_values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        _, latest_rates, _ = _daily_usd_rates(latest_values)
+        primary_update_bundles: list[list[dict[str, Any]]] = []
+        formula_updates: list[dict[str, Any]] = []
         events: list[OrderAuditEvent] = []
         changed_costs = 0
-        for index, (row_number, row, tracking, expected) in enumerate(candidates):
-            latest_tracking = latest[index * 3][0][0] if latest[index * 3] else ""
-            latest_sender = latest[index * 3 + 1][0][0] if latest[index * 3 + 1] else ""
-            latest_cost = latest[index * 3 + 2][0][0] if latest[index * 3 + 2] else ""
-            if tracking_match_key(latest_tracking) != tracking or str(latest_cost).strip():
+        for candidate in candidates:
+            if candidate.row_number > len(latest_values):
                 continue
-            if expected.record.kind == "unit_cost":
-                if expected.record.unit_cost is None:
-                    raise ValueError("unit cost record is missing its numeric value")
-                sheet_value: str | int | float = decimal_for_sheet(expected.record.unit_cost)
-            elif expected.record.kind == "prepayment":
-                sheet_value = "предоплата"
-            else:
-                if expected.record.text_value is None:
-                    raise ValueError("text cost record is missing its text value")
-                sheet_value = expected.record.text_value
-            cost_cell = rowcol_to_a1(row_number, COLUMNS.cost)
-            markup_cell = rowcol_to_a1(row_number, COLUMNS.markup)
-            if expected.record.kind == "text":
-                updates.append(
-                    {"range": markup_cell, "values": [[markup_formula(row_number)]]}
-                )
-                raw_cost_updates.append(
-                    {"range": cost_cell, "values": [[sheet_value]]}
-                )
-            else:
-                updates.append(
-                    {
-                        "range": f"{cost_cell}:{markup_cell}",
-                        "values": [[sheet_value, markup_formula(row_number)]],
-                    }
-                )
-            changed_costs += 1
-            assign_imaxi_sender = (
-                expected.source == IMAXI_SUPPLIER_SOURCE
-                and str(latest_sender).strip() != IMAXI_SENDER
+            row = candidate.original_row
+            latest_row = latest_values[candidate.row_number - 1]
+            key = candidate.key
+            expected = candidate.expected
+            latest_tracking = _cell_value(latest_row, COLUMNS.tracking_number)
+            latest_product_code = _cell_value(latest_row, COLUMNS.product_code)
+            latest_sender = _cell_value(latest_row, COLUMNS.sender)
+            latest_cost = _cell_value(latest_row, COLUMNS.cost)
+            latest_markup = _cell_value(latest_row, COLUMNS.markup)
+            latest_source = str(
+                _cell_value(latest_row, COLUMNS.supplier_cost_source)
+            ).strip()
+            if (
+                tracking_match_key(latest_tracking) != key.tracking_number
+                or product_code_match_key(latest_product_code) != key.product_code
+            ):
+                continue
+            if str(latest_cost).strip() and latest_source != expected.source:
+                continue
+            if expected.record.currency == "USD":
+                concurrent_rate = latest_rates.get(candidate.operational_day)
+                if concurrent_rate is None or concurrent_rate != candidate.rate:
+                    warnings.append(
+                        f"Melad cost for TTN {key.tracking_number} was skipped because the daily USD rate changed concurrently"
+                    )
+                    continue
+            sheet_value = _supplier_sheet_value(expected, candidate.rate)
+            cost_changed = not _supplier_cost_values_equal(
+                latest_cost, sheet_value, expected
             )
-            if assign_imaxi_sender:
-                updates.append(
+            row_updates: list[dict[str, Any]] = []
+            if cost_changed:
+                changed_costs += 1
+                _append_supplier_cost_cell_updates(
+                    row_updates,
+                    formula_updates,
+                    row_number=candidate.row_number,
+                    expected=expected,
+                    sheet_value=sheet_value,
+                )
+            formula_needs_repair = (
+                not cost_changed
+                and str(latest_markup).strip() != markup_formula(candidate.row_number)
+            )
+            if formula_needs_repair:
+                formula_updates.append(
                     {
-                        "range": rowcol_to_a1(row_number, COLUMNS.sender),
-                        "values": [[IMAXI_SENDER]],
+                        "range": rowcol_to_a1(candidate.row_number, COLUMNS.markup),
+                        "values": [[markup_formula(candidate.row_number)]],
                     }
                 )
+            supplier_sender = expected.sender or SUPPLIER_SENDER_DEFAULTS.get(
+                expected.source, ""
+            )
+            assign_supplier_sender = (
+                bool(supplier_sender) and str(latest_sender).strip() != supplier_sender
+            )
+            if assign_supplier_sender:
+                row_updates.append(
+                    {
+                        "range": rowcol_to_a1(candidate.row_number, COLUMNS.sender),
+                        "values": [[supplier_sender]],
+                    }
+                )
+            if not cost_changed and not assign_supplier_sender and not formula_needs_repair:
+                continue
             sync_key = str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
             source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
             order_id = (
@@ -1705,25 +1783,30 @@ class GoogleSheetsGateway:
                 else ""
             )
             is_text_marker = expected.record.kind == "text"
-            events.append(
-                OrderAuditEvent(
-                    occurred_at=observed_at,
-                    event_type=(
-                        "supplier_cost_marker_filled"
-                        if is_text_marker
-                        else "supplier_cost_filled"
-                    ),
-                    source=source,
-                    order_id=order_id,
-                    sync_key=sync_key,
-                    tracking_number=normalize_tracking_number(latest_tracking),
-                    field="supplier_cost_marker" if is_text_marker else "unit_cost",
-                    old_value="",
-                    new_value=str(sheet_value),
-                    details=expected.source,
+            if cost_changed:
+                events.append(
+                    OrderAuditEvent(
+                        occurred_at=observed_at,
+                        event_type=(
+                            "supplier_cost_marker_filled"
+                            if is_text_marker
+                            else "supplier_cost_filled"
+                        ),
+                        source=source,
+                        order_id=order_id,
+                        sync_key=sync_key,
+                        tracking_number=normalize_tracking_number(latest_tracking),
+                        field="supplier_cost_marker" if is_text_marker else "unit_cost",
+                        old_value=str(latest_cost),
+                        new_value=str(sheet_value),
+                        details=(
+                            f"{expected.source}; USD {expected.record.unit_cost} × rate {candidate.rate}"
+                            if expected.record.currency == "USD"
+                            else expected.source
+                        ),
+                    )
                 )
-            )
-            if assign_imaxi_sender:
+            if assign_supplier_sender:
                 events.append(
                     OrderAuditEvent(
                         occurred_at=observed_at,
@@ -1734,24 +1817,36 @@ class GoogleSheetsGateway:
                         tracking_number=normalize_tracking_number(latest_tracking),
                         field="sender",
                         old_value=str(latest_sender),
-                        new_value=IMAXI_SENDER,
+                        new_value=supplier_sender,
                         details=expected.source,
                     )
                 )
+            if row_updates:
+                primary_update_bundles.append(row_updates)
 
+        bundles_per_request = 100
+        for offset in range(0, len(primary_update_bundles), bundles_per_request):
+            bundled_updates = [
+                update
+                for bundle in primary_update_bundles[
+                    offset : offset + bundles_per_request
+                ]
+                for update in bundle
+            ]
+            self.worksheet.batch_update(
+                bundled_updates,
+                raw=True,
+            )
         updates_per_request = 400
-        for offset in range(0, len(updates), updates_per_request):
+        for offset in range(0, len(formula_updates), updates_per_request):
             self.worksheet.batch_update(
-                updates[offset : offset + updates_per_request], raw=False
+                formula_updates[offset : offset + updates_per_request], raw=False
             )
-        for offset in range(0, len(raw_cost_updates), updates_per_request):
-            self.worksheet.batch_update(
-                raw_cost_updates[offset : offset + updates_per_request], raw=True
-            )
-        LOGGER.info("Filled %s blank supplier cost cell(s)", changed_costs)
+        LOGGER.info("Updated %s supplier cost cell(s)", changed_costs)
         return SupplierCostUpdateResult(
             cell_updates=changed_costs,
             audit_events=tuple(events),
+            warnings=tuple(dict.fromkeys(warnings)),
         )
 
     def append_orders(
@@ -1771,6 +1866,7 @@ class GoogleSheetsGateway:
             return 0
         observation_day = (observed_at.date() if observed_at else operational_day)
         existing_values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        daily_usd_rates = _extract_daily_usd_rate_values(existing_values)
         order_groups = collect_order_groups(
             existing_values,
             orders,
@@ -1786,6 +1882,7 @@ class GoogleSheetsGateway:
             operational_day=operational_day,
             sheet_id=self.worksheet.id,
             spreadsheet_id=getattr(self.spreadsheet, "id", ""),
+            daily_usd_rates=daily_usd_rates,
         )
         rows = snapshot.rows
         last_used_row = snapshot.last_used_row
@@ -1858,9 +1955,298 @@ class GoogleSheetsGateway:
             else ""
         )
         expected_reporting = ALL_HEADERS[COLUMNS.reporting_state - 1].casefold()
+        supplier_metadata_headers = tuple(
+            str(headers[column - 1]).strip().casefold()
+            if len(headers) >= column
+            else ""
+            for column in (
+                COLUMNS.supplier_cost_source,
+                COLUMNS.supplier_cost_currency,
+                COLUMNS.supplier_cost_original,
+            )
+        )
+        expected_supplier_metadata_headers = tuple(
+            ALL_HEADERS[column - 1].casefold()
+            for column in (
+                COLUMNS.supplier_cost_source,
+                COLUMNS.supplier_cost_currency,
+                COLUMNS.supplier_cost_original,
+            )
+        )
         return (
             current == legacy
             or (not current and migrated_header == legacy)
             or source_header != expected_source
             or reporting_header != expected_reporting
+            or supplier_metadata_headers != expected_supplier_metadata_headers
+            or self._requires_daily_usd_rate_layout()
         )
+
+    def _requires_daily_usd_rate_layout(self) -> bool:
+        """Detect interrupted or not-yet-applied daily FX control migration."""
+        rows = self.worksheet.get(
+            f"A1:E{self.worksheet.row_count}",
+            value_render_option="FORMULA",
+        )
+        return any(
+            str(_cell_value(row, 1)).strip().casefold() == DAY_DATE_LABEL.casefold()
+            and str(_cell_value(row, USD_RATE_LABEL_COLUMN)).strip().casefold()
+            != USD_RATE_LABEL.casefold()
+            for row in rows
+        )
+
+
+def _row_operational_day(row: list[Any]) -> date | None:
+    """Return the hidden operational date used to select a manual FX rate."""
+    raw = row[COLUMNS.operational_date - 1] if len(row) >= COLUMNS.operational_date else ""
+    return parse_sheet_date(raw)
+
+
+def _cell_value(row: list[Any], column: int) -> Any:
+    return row[column - 1] if len(row) >= column else ""
+
+
+def _normalize_supplier_costs(
+    costs: Mapping[SupplierCostKey, ResolvedSupplierCost],
+) -> dict[SupplierCostKey, ResolvedSupplierCost]:
+    normalized: dict[SupplierCostKey, ResolvedSupplierCost] = {}
+    for key, value in costs.items():
+        tracking = tracking_match_key(key.tracking_number)
+        if tracking:
+            normalized[
+                SupplierCostKey(tracking, product_code_match_key(key.product_code))
+            ] = value
+    return normalized
+
+
+def _with_melad_provenance_fallbacks(
+    rows: list[list[Any]],
+    costs: Mapping[SupplierCostKey, ResolvedSupplierCost],
+) -> dict[SupplierCostKey, ResolvedSupplierCost]:
+    """Use stored Melad USD provenance when an old supplier row was archived."""
+    resolved = dict(costs)
+    for row in rows:
+        if str(_cell_value(row, COLUMNS.row_type)).strip() != ROW_ORDER:
+            continue
+        if (
+            str(_cell_value(row, COLUMNS.supplier_cost_source)).strip()
+            != MELAD_SUPPLIER_SOURCE
+            or str(_cell_value(row, COLUMNS.supplier_cost_currency)).strip().upper()
+            != "USD"
+        ):
+            continue
+        tracking = tracking_match_key(_cell_value(row, COLUMNS.tracking_number))
+        product_code = product_code_match_key(_cell_value(row, COLUMNS.product_code))
+        if not tracking:
+            continue
+        key = SupplierCostKey(tracking, product_code)
+        if key in resolved or SupplierCostKey(tracking) in resolved:
+            continue
+        original_cost = decimal_value(
+            _cell_value(row, COLUMNS.supplier_cost_original), Decimal("-1")
+        )
+        if original_cost < 0:
+            continue
+        resolved[key] = ResolvedSupplierCost(
+            source=MELAD_SUPPLIER_SOURCE,
+            record=SupplierCostRecord.cost(original_cost, currency="USD"),
+            sender=MELAD_SENDER,
+        )
+    return resolved
+
+
+def _discover_supplier_cost_candidates(
+    rows: list[list[Any]],
+    costs: Mapping[SupplierCostKey, ResolvedSupplierCost],
+) -> tuple[list[_SupplierCostCandidate], list[str]]:
+    raw_rates, valid_rates, _ = _daily_usd_rates(rows)
+    candidates: list[_SupplierCostCandidate] = []
+    warnings: list[str] = []
+    warned_days: set[date] = set()
+    warned_missing_day = False
+    warned_ambiguous_tracking: set[str] = set()
+    tracking_row_counts: dict[str, int] = {}
+    for row in rows:
+        if str(_cell_value(row, COLUMNS.row_type)).strip() != ROW_ORDER:
+            continue
+        tracking = tracking_match_key(_cell_value(row, COLUMNS.tracking_number))
+        if tracking:
+            tracking_row_counts[tracking] = tracking_row_counts.get(tracking, 0) + 1
+    for row_number, row in enumerate(rows, start=1):
+        if str(_cell_value(row, COLUMNS.row_type)).strip() != ROW_ORDER:
+            continue
+        tracking = tracking_match_key(_cell_value(row, COLUMNS.tracking_number))
+        product_code = product_code_match_key(_cell_value(row, COLUMNS.product_code))
+        key = SupplierCostKey(tracking, product_code)
+        expected = costs.get(key)
+        if expected is None:
+            expected = costs.get(SupplierCostKey(tracking))
+            if expected is not None and tracking_row_counts.get(tracking, 0) != 1:
+                if tracking not in warned_ambiguous_tracking:
+                    warnings.append(
+                        f"Supplier cost for TTN {tracking} was skipped: product code is "
+                        "missing and the CRM order has multiple item rows"
+                    )
+                    warned_ambiguous_tracking.add(tracking)
+                continue
+        if expected is None:
+            continue
+        current_cost = _cell_value(row, COLUMNS.cost)
+        current_source = str(
+            _cell_value(row, COLUMNS.supplier_cost_source)
+        ).strip()
+        can_refresh = (
+            expected.record.currency == "USD" and current_source == expected.source
+        )
+        if str(current_cost).strip() and not can_refresh:
+            continue
+        operational_day = _row_operational_day(row)
+        rate = valid_rates.get(operational_day) if operational_day else None
+        if expected.record.currency == "USD" and rate is None:
+            if operational_day and operational_day not in warned_days:
+                raw_rate = raw_rates.get(operational_day, "")
+                reason = (
+                    "is empty"
+                    if str(raw_rate).strip() == ""
+                    else f"is invalid ({raw_rate!r})"
+                )
+                warnings.append(
+                    f"{expected.sender or expected.source} costs for "
+                    f"{operational_day:%d.%m.%Y} were skipped: daily USD rate {reason}"
+                )
+                warned_days.add(operational_day)
+            elif operational_day is None and not warned_missing_day:
+                warnings.append(
+                    f"{expected.sender or expected.source} cost was skipped: "
+                    "CRM order row has no operational date"
+                )
+                warned_missing_day = True
+            continue
+        candidates.append(
+            _SupplierCostCandidate(
+                row_number=row_number,
+                original_row=row,
+                key=key,
+                expected=expected,
+                operational_day=operational_day,
+                rate=rate,
+            )
+        )
+    return candidates, warnings
+
+
+def _supplier_sheet_value(
+    expected: ResolvedSupplierCost, rate: Decimal | None
+) -> str | int | float:
+    record = expected.record
+    if record.kind == "unit_cost":
+        if record.unit_cost is None:
+            raise ValueError("unit cost record is missing its numeric value")
+        numeric_cost = record.unit_cost
+        if record.currency == "USD":
+            if rate is None:
+                raise ValueError("USD supplier cost is missing its daily rate")
+            numeric_cost = (numeric_cost * rate).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        return decimal_for_sheet(numeric_cost)
+    if record.kind == "prepayment":
+        return "предоплата"
+    if record.text_value is None:
+        raise ValueError("text cost record is missing its text value")
+    return record.text_value
+
+
+def _supplier_cost_values_equal(
+    current: Any,
+    expected_value: str | int | float,
+    expected: ResolvedSupplierCost,
+) -> bool:
+    if expected.record.kind == "unit_cost":
+        return decimal_value(current) == decimal_value(expected_value)
+    return str(current).strip().casefold() == str(expected_value).strip().casefold()
+
+
+def _append_supplier_cost_cell_updates(
+    primary_updates: list[dict[str, Any]],
+    formula_updates: list[dict[str, Any]],
+    *,
+    row_number: int,
+    expected: ResolvedSupplierCost,
+    sheet_value: str | int | float,
+) -> None:
+    cost_cell = rowcol_to_a1(row_number, COLUMNS.cost)
+    primary_updates.append({"range": cost_cell, "values": [[sheet_value]]})
+    formula_updates.append(
+        {
+            "range": rowcol_to_a1(row_number, COLUMNS.markup),
+            "values": [[markup_formula(row_number)]],
+        }
+    )
+    original_value = (
+        decimal_for_sheet(expected.record.unit_cost)
+        if expected.record.unit_cost is not None
+        else ""
+    )
+    primary_updates.append(
+        {
+            "range": (
+                f"{rowcol_to_a1(row_number, COLUMNS.supplier_cost_source)}:"
+                f"{rowcol_to_a1(row_number, COLUMNS.supplier_cost_original)}"
+            ),
+            "values": [
+                [expected.source, expected.record.currency, original_value]
+            ],
+        }
+    )
+
+
+def _parse_usd_rate(value: Any) -> Decimal | None:
+    """Parse a plausible manual UAH/USD rate in the documented ``xx,xx`` form."""
+    raw = str(value or "").strip().replace("\u00a0", "").replace(" ", "")
+    if not raw or _USD_RATE_PATTERN.fullmatch(raw) is None:
+        return None
+    try:
+        rate = Decimal(raw.replace(",", "."))
+    except InvalidOperation:
+        return None
+    return (
+        rate
+        if rate.is_finite() and _MIN_USD_RATE <= rate <= _MAX_USD_RATE
+        else None
+    )
+
+
+def _daily_usd_rates(
+    rows: list[list[Any]],
+) -> tuple[dict[date, Any], dict[date, Decimal], dict[date, int]]:
+    raw_rates: dict[date, Any] = {}
+    valid_rates: dict[date, Decimal] = {}
+    rate_rows: dict[date, int] = {}
+    for row_number, row in enumerate(rows, start=1):
+        row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+        if row_type != ROW_DAY:
+            continue
+        day = _row_operational_day(row) or parse_sheet_date(row[1] if len(row) > 1 else "")
+        if day is None:
+            continue
+        raw = row[USD_RATE_VALUE_COLUMN - 1] if len(row) >= USD_RATE_VALUE_COLUMN else ""
+        if day in raw_rates:
+            raw_rates[day] = "duplicate day rows"
+            valid_rates.pop(day, None)
+            rate_rows.pop(day, None)
+            continue
+        raw_rates[day] = raw
+        rate_rows[day] = row_number
+        if (rate := _parse_usd_rate(raw)) is not None:
+            valid_rates[day] = rate
+    return raw_rates, valid_rates, rate_rows
+
+
+def _extract_daily_usd_rate_values(rows: list[list[Any]]) -> dict[date, Any]:
+    """Preserve user-entered daily rates during structural sheet rebuilds."""
+    raw_rates, _, _ = _daily_usd_rates(rows)
+    return {
+        day: "" if value == "duplicate day rows" else value
+        for day, value in raw_rates.items()
+    }

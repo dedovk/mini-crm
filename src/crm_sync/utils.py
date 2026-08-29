@@ -63,6 +63,11 @@ def decimal_value(value: Any, default: Decimal = Decimal(0)) -> Decimal:
         return default
 
 
+def product_code_match_key(value: Any) -> str:
+    """Normalize marketplace and supplier product codes for exact matching."""
+    return re.sub(r"[^0-9a-zа-яіїєґ]+", "", str(value or "").casefold())
+
+
 def first_value(mapping: dict[str, Any], *keys: str, default: Any = "") -> Any:
     for key in keys:
         value = mapping.get(key)

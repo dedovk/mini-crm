@@ -124,6 +124,7 @@ class SupplierCostRecord:
     kind: Literal["unit_cost", "prepayment", "text"]
     unit_cost: Decimal | None = None
     text_value: str | None = None
+    currency: Literal["UAH", "USD"] = "UAH"
 
     def __post_init__(self) -> None:
         if self.kind == "unit_cost":
@@ -132,22 +133,33 @@ class SupplierCostRecord:
                 or not self.unit_cost.is_finite()
                 or self.unit_cost < 0
                 or self.text_value is not None
+                or self.currency not in {"UAH", "USD"}
             ):
                 raise ValueError("unit cost record requires one non-negative finite value")
             return
         if self.kind == "prepayment":
-            if self.unit_cost is not None or self.text_value is not None:
+            if (
+                self.unit_cost is not None
+                or self.text_value is not None
+                or self.currency != "UAH"
+            ):
                 raise ValueError("prepayment record must not carry a value")
             return
         if self.kind == "text":
-            if self.unit_cost is not None or not (self.text_value or "").strip():
+            if (
+                self.unit_cost is not None
+                or not (self.text_value or "").strip()
+                or self.currency != "UAH"
+            ):
                 raise ValueError("text record requires one non-empty text value")
             return
         raise ValueError(f"unsupported supplier cost kind: {self.kind!r}")
 
     @classmethod
-    def cost(cls, value: Decimal) -> SupplierCostRecord:
-        return cls(kind="unit_cost", unit_cost=value)
+    def cost(
+        cls, value: Decimal, *, currency: Literal["UAH", "USD"] = "UAH"
+    ) -> SupplierCostRecord:
+        return cls(kind="unit_cost", unit_cost=value, currency=currency)
 
     @classmethod
     def prepayment(cls) -> SupplierCostRecord:
@@ -163,11 +175,20 @@ class SupplierCostRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class SupplierCostKey:
+    """A supplier lookup key scoped to one shipment and optional product code."""
+
+    tracking_number: str
+    product_code: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class SupplierCostBatch:
     """Immutable normalized supplier values with their source identity."""
 
     source: str
-    values: Mapping[str, SupplierCostRecord] = field(default_factory=dict)
+    values: Mapping[SupplierCostKey, SupplierCostRecord] = field(default_factory=dict)
+    sender: str = ""
     warnings: tuple[str, ...] = ()
     degraded: bool = False
 
@@ -179,9 +200,11 @@ class SupplierCostBatch:
 class ResolvedSupplierCost:
     source: str
     record: SupplierCostRecord
+    sender: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class SupplierCostUpdateResult:
     cell_updates: int = 0
     audit_events: tuple[OrderAuditEvent, ...] = ()
+    warnings: tuple[str, ...] = ()

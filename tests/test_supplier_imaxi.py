@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from crm_sync.clients.supplier_imaxi import ImaxiSupplierSheetClient
-from crm_sync.models import SupplierCostRecord
+from crm_sync.models import SupplierCostKey, SupplierCostRecord
 
 
 class SupplierWorksheetStub:
@@ -39,9 +39,9 @@ def test_fetch_costs_reads_supplier_range_once_and_normalizes_values() -> None:
     batch = client.fetch_costs()
 
     assert batch.values == {
-        "2045146814374": SupplierCostRecord.cost(Decimal("738")),
-        "rmp-633364474": SupplierCostRecord.prepayment(),
-        "0500227745919": SupplierCostRecord.cost(Decimal("1422.50")),
+        SupplierCostKey("2045146814374"): SupplierCostRecord.cost(Decimal("738")),
+        SupplierCostKey("rmp-633364474"): SupplierCostRecord.prepayment(),
+        SupplierCostKey("0500227745919"): SupplierCostRecord.cost(Decimal("1422.50")),
     }
     assert batch.warnings == ()
     assert client._test_worksheet.requests == [("L:R", "UNFORMATTED_VALUE")]
@@ -59,9 +59,9 @@ def test_fetch_costs_preserves_supplier_text_markers_and_typos() -> None:
     batch = client.fetch_costs()
 
     assert batch.values == {
-        "20450420294443": SupplierCostRecord.text("предопата"),
-        "20450453411783": SupplierCostRecord.text("замена"),
-        "20450511605944": SupplierCostRecord.text("Інший текст"),
+        SupplierCostKey("20450420294443"): SupplierCostRecord.text("предопата"),
+        SupplierCostKey("20450453411783"): SupplierCostRecord.text("замена"),
+        SupplierCostKey("20450511605944"): SupplierCostRecord.text("Інший текст"),
     }
     assert batch.warnings == ()
 
@@ -88,7 +88,9 @@ def test_fetch_costs_deduplicates_equal_values_and_skips_conflicts() -> None:
 
     batch = client.fetch_costs()
 
-    assert batch.values == {"2045146814374": SupplierCostRecord.cost(Decimal("738"))}
+    assert batch.values == {
+        SupplierCostKey("2045146814374"): SupplierCostRecord.cost(Decimal("738"))
+    }
     assert batch.warnings == (
         "IMAXI TTN 2045148691245 has conflicting costs; it was not imported",
     )
@@ -107,8 +109,8 @@ def test_fetch_costs_skips_empty_values_but_preserves_invalid_and_negative_marke
     batch = client.fetch_costs()
 
     assert batch.values == {
-        "2045148691245": SupplierCostRecord.text("невідомо"),
-        "2045148692927": SupplierCostRecord.text("-10"),
+        SupplierCostKey("2045148691245"): SupplierCostRecord.text("невідомо"),
+        SupplierCostKey("2045148692927"): SupplierCostRecord.text("-10"),
     }
     assert batch.warnings == ()
     assert not batch.degraded

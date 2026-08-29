@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, Mapping
 
 from crm_sync.sheet_layout import (
     ALL_HEADERS,
@@ -20,6 +20,7 @@ from crm_sync.sheet_schema import (
     ADVERTISING_REPORT_LABEL_COLUMNS,
     COLUMNS,
     LAST_COLUMN,
+    LAST_COLUMN_LETTER,
     REPORT_METRIC_LABELS,
 )
 
@@ -34,15 +35,28 @@ class SheetSnapshot:
         return len(self.rows)
 
 
+DAY_DATE_LABEL = "Дата дня"
+USD_RATE_LABEL = "Курс USD"
+USD_RATE_LABEL_COLUMN = 4
+USD_RATE_VALUE_COLUMN = 5
+
+
 def build_sheet_snapshot(
     order_groups: OrderGroups,
     *,
     operational_day: date,
     sheet_id: int,
     spreadsheet_id: str,
+    daily_usd_rates: Mapping[date, Any] | None = None,
 ) -> SheetSnapshot:
     groups_by_day = _groups_by_day(order_groups)
-    earliest_day = min([operational_day, *order_groups.days.values()])
+    earliest_day = min(
+        [
+            operational_day,
+            *order_groups.days.values(),
+            *(daily_usd_rates or {}).keys(),
+        ]
+    )
     rows: list[list[Any]] = []
     merge_requests: list[dict[str, Any]] = []
     report_rows: list[tuple[int, str, date]] = []
@@ -64,8 +78,10 @@ def build_sheet_snapshot(
             current_month = month
 
         day_row = [""] * LAST_COLUMN
-        day_row[0] = "Дата дня"
+        day_row[0] = DAY_DATE_LABEL
         day_row[1] = sheet_serial(current_day)
+        day_row[USD_RATE_LABEL_COLUMN - 1] = USD_RATE_LABEL
+        day_row[USD_RATE_VALUE_COLUMN - 1] = (daily_usd_rates or {}).get(current_day, "")
         day_row[COLUMNS.row_type - 1] = ROW_DAY
         day_row[COLUMNS.operational_date - 1] = sheet_serial(current_day)
         rows.extend([day_row, list(ALL_HEADERS)])
@@ -163,7 +179,7 @@ def _add_selection_links(
     sheet_id: int,
 ) -> None:
     def link(start_row: int, end_row: int, label: str) -> str:
-        url = f"#gid={sheet_id}&range=A{start_row}:AA{end_row}"
+        url = f"#gid={sheet_id}&range=A{start_row}:{LAST_COLUMN_LETTER}{end_row}"
         return f'=HYPERLINK("{url}";"{label}")'
 
     def cell_link(row_number: int, label: str) -> str:
