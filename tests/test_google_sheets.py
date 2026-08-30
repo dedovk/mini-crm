@@ -7,7 +7,11 @@ from typing import Any
 import pytest
 from gspread.utils import a1_to_rowcol
 
-from crm_sync.clients.google_sheets import ConcurrentSheetEditError, GoogleSheetsGateway
+from crm_sync.clients.google_sheets import (
+    ConcurrentSheetEditError,
+    GoogleSheetsGateway,
+    SheetSchemaMigrationError,
+)
 from crm_sync.models import (
     Order,
     OrderAuditEvent,
@@ -24,7 +28,7 @@ from crm_sync.sheet_layout import (
     ROW_ORDER,
     sheet_serial,
 )
-from crm_sync.sheet_orders import markup_formula
+from crm_sync.sheet_orders import markup_formula, net_profit_formula
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN, LAST_COLUMN_LETTER
 
 
@@ -176,7 +180,76 @@ def test_legacy_installment_column_is_atomically_moved_before_receipt_use() -> N
     copy = gateway.spreadsheet.requests[0]["copyPaste"]
     assert copy["source"]["startColumnIndex"] == COLUMNS.receipt - 1
     assert copy["destination"]["startColumnIndex"] == COLUMNS.installment_commission - 1
-    assert gateway.worksheet.cleared_ranges == ["AA1:AA1000"]
+    assert gateway.worksheet.cleared_ranges == ["AB1:AB1000"]
+
+
+def test_net_profit_column_migration_inserts_before_manager_notes() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = LayoutWorksheet([])
+    gateway.spreadsheet = StubSpreadsheet()
+    old_headers = list(ALL_HEADERS)
+    old_headers.pop(COLUMNS.net_profit - 1)
+
+    gateway._migrate_net_profit_column(old_headers)
+
+    inserted = gateway.spreadsheet.requests[0]["insertDimension"]["range"]
+    assert inserted["startIndex"] == COLUMNS.net_profit - 1
+    assert inserted["endIndex"] == COLUMNS.net_profit
+
+
+def test_net_profit_migration_uses_technical_signature_when_note_header_is_blank() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = LayoutWorksheet([])
+    gateway.spreadsheet = StubSpreadsheet()
+    old_headers = list(ALL_HEADERS)
+    old_headers.pop(COLUMNS.net_profit - 1)
+    old_headers[COLUMNS.net_profit - 1] = ""
+
+    assert gateway._migrate_net_profit_column(old_headers)
+
+
+def test_net_profit_migration_rejects_ambiguous_nonempty_layout() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = LayoutWorksheet([])
+    gateway.spreadsheet = StubSpreadsheet()
+
+    with pytest.raises(SheetSchemaMigrationError):
+        gateway._migrate_net_profit_column(["unexpected"] * COLUMNS.row_type)
+
+
+def test_net_profit_column_migration_is_idempotent() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = LayoutWorksheet([])
+    gateway.spreadsheet = StubSpreadsheet()
+
+    gateway._migrate_net_profit_column(list(ALL_HEADERS))
+
+    assert gateway.spreadsheet.requests == []
+
+
+def test_negative_net_profit_has_a_red_conditional_format_rule() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = LayoutWorksheet([])
+    gateway.header_row = 4
+
+    requests = gateway._conditional_format_requests(20)
+    net_rule = requests[-1]["addConditionalFormatRule"]["rule"]
+
+    assert net_rule["ranges"] == [
+        {
+            "sheetId": gateway.worksheet.id,
+            "startRowIndex": 4,
+            "endRowIndex": 20,
+            "startColumnIndex": COLUMNS.net_profit - 1,
+            "endColumnIndex": COLUMNS.net_profit,
+        }
+    ]
+    condition = net_rule["booleanRule"]["condition"]
+    assert condition == {
+        "type": "NUMBER_LESS",
+        "values": [{"userEnteredValue": "0"}],
+    }
+    assert net_rule["booleanRule"]["format"]["backgroundColorStyle"]
 
 
 def test_receipt_schema_migration_is_idempotent() -> None:
@@ -303,7 +376,7 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     changed = gateway.refresh_order_details([order])
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
-    assert changed == 12
+    assert changed == 13
     assert updates["B5"] == "RMP-483122083"
     assert updates["D5"] == sheet_serial(date(2026, 8, 3))
     assert updates["F5"] == "Київ, Тестовий Отримувач"
@@ -313,9 +386,10 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     assert updates["M5"] == 100
     assert updates["N5"] == 100
     assert updates["R5"] == markup_formula(5)
+    assert updates["T5"] == net_profit_formula(5)
     assert updates["S5"] == 10
-    assert updates["Z5"] == 10
-    assert updates["W5"] > 0
+    assert updates["AA5"] == 10
+    assert updates["X5"] > 0
 
 
 def test_refresh_order_details_repairs_text_unit_price_without_product_code() -> None:
@@ -395,7 +469,7 @@ def test_refresh_preserves_known_installment_when_prom_payload_is_incomplete() -
     gateway.refresh_order_details([order])
 
     updated_ranges = {update["range"] for update in worksheet.updates}
-    assert "AB5" not in updated_ranges
+    assert "AD5" not in updated_ranges
     assert "S5" not in updated_ranges
 
 
@@ -437,7 +511,7 @@ def test_refresh_does_not_replace_known_commission_with_calculation(
     gateway.refresh_order_details([order])
 
     updated_ranges = {update["range"] for update in worksheet.updates}
-    assert "AB5" not in updated_ranges
+    assert "AC5" not in updated_ranges
     assert "S5" not in updated_ranges
     assert "AC5" not in updated_ranges
 
@@ -477,9 +551,9 @@ def test_refresh_replaces_old_fallback_with_new_configured_estimate() -> None:
     gateway.refresh_order_details([order])
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
-    assert updates["AB5"] == 49.17
+    assert updates["AC5"] == 49.17
     assert updates["S5"] == "90.11\n49.17"
-    assert "AC5" not in updates
+    assert "AD5" not in updates
 
 
 def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> None:
@@ -715,7 +789,7 @@ def test_melad_cost_uses_operational_day_rate_and_assigns_sender() -> None:
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert result.cell_updates == 1
     assert updates["Q6"] == [8452.4]
-    assert updates["J6"] == ["Melad"]
+    assert updates["J6"] == ["Melad дроп"]
     assert result.warnings == ()
 
 
@@ -859,6 +933,7 @@ def test_melad_unchanged_converted_cost_produces_no_writes_or_audit() -> None:
     rows[5][COLUMNS.sender - 1] = "Melad"
     rows[5][COLUMNS.cost - 1] = 8452.4
     rows[5][COLUMNS.markup - 1] = markup_formula(6)
+    rows[5][COLUMNS.net_profit - 1] = net_profit_formula(6)
     rows[5][COLUMNS.supplier_cost_source - 1] = "supplier-melad"
     rows[5][COLUMNS.supplier_cost_currency - 1] = "USD"
     rows[5][COLUMNS.supplier_cost_original - 1] = 187
@@ -878,8 +953,10 @@ def test_melad_unchanged_converted_cost_produces_no_writes_or_audit() -> None:
     )
 
     assert result.cell_updates == 0
-    assert result.audit_events == ()
-    assert worksheet.updates == []
+    assert len(result.audit_events) == 1
+    assert result.audit_events[0].field == "sender"
+    assert result.audit_events[0].new_value == "Melad дроп"
+    assert worksheet.updates == [{"range": "J6", "values": [["Melad дроп"]]}]
 
 
 def test_melad_repairs_missing_markup_formula_when_cost_is_unchanged() -> None:
@@ -913,7 +990,11 @@ def test_melad_repairs_missing_markup_formula_when_cost_is_unchanged() -> None:
 
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert result.cell_updates == 0
-    assert updates == {"R6": [markup_formula(6)]}
+    assert updates == {
+        "J6": ["Melad дроп"],
+        "R6": [markup_formula(6)],
+        "T6": [net_profit_formula(6)],
+    }
 
 
 def test_melad_recalculates_archived_supplier_row_from_hidden_provenance() -> None:
@@ -1003,8 +1084,8 @@ def test_completion_observation_backfills_first_seen_date_and_status() -> None:
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
     assert updates["D5"] == sheet_serial(date(2026, 8, 2))
-    assert updates["X5"] == sheet_serial(date(2026, 8, 2))
-    assert updates["Y5"] == "Виконано"
+    assert updates["Y5"] == sheet_serial(date(2026, 8, 2))
+    assert updates["Z5"] == "Виконано"
     assert events == ()
 
 
@@ -1077,9 +1158,9 @@ def test_shipped_order_does_not_set_completion_marker_then_transitions_in_place(
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
     assert updates["D5"] == sheet_serial(date(2026, 8, 11))
-    assert updates["X5"] == sheet_serial(date(2026, 8, 11))
-    assert updates["Y5"] == "Виконано"
-    assert "W5" not in updates
+    assert updates["Y5"] == sheet_serial(date(2026, 8, 11))
+    assert updates["Z5"] == "Виконано"
+    assert "X5" not in updates
     assert len(events) == 1
 
 
@@ -1132,12 +1213,12 @@ def test_completion_backfill_migrates_historical_rows_and_repeated_headers() -> 
 
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert changed == 3
-    assert updates[f"U4:{LAST_COLUMN_LETTER}4"][3:5] == [
+    assert updates[f"V4:{LAST_COLUMN_LETTER}4"][3:5] == [
         "Перше спостереження виконання",
         "Статус замовлення джерела",
     ]
-    assert updates["X6"] == [sheet_serial(date(2026, 7, 1))]
-    assert updates["Y6"] == ["Виконано"]
+    assert updates["Y6"] == [sheet_serial(date(2026, 7, 1))]
+    assert updates["Z6"] == ["Виконано"]
 
 
 def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> None:
@@ -1216,7 +1297,8 @@ def test_append_orders_rebuilds_compact_sections_with_selection_buttons() -> Non
     assert "*Rozetka*" in report_row[13]
     assert "*Prom*" in report_row[15]
     assert report_row[15].endswith(";10)")
-    assert "$AB$" in report_row[17]
+    assert "$AC$" in report_row[17]
+    assert "$T$" in report_row[19]
     forecast_row = written[report_indexes[2]]
     assert forecast_row[10:18] == ["", "", "", "", "", "", "", ""]
     assert worksheet.operations == ["update", "clear"]
@@ -1436,7 +1518,7 @@ def test_update_order_expenses_writes_net_total_only_to_first_item_row() -> None
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
     assert changed == 3
-    assert updates == {"S5": 183.42, "S6": "", "Z5": 183.42}
+    assert updates == {"S5": 183.42, "S6": "", "AA5": 183.42}
 
 
 def test_sheet_integrity_rejects_formula_errors_negative_cost_and_split_order() -> None:

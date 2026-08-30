@@ -33,7 +33,9 @@ def test_rebuild_preserves_receipt_and_counts_multi_item_installment_once() -> N
     )
     assert order_rows[0][COLUMNS.receipt - 1] == "https://check.checkbox.ua/receipt/abc"
     assert [row[COLUMNS.installment_commission - 1] for row in order_rows] == [49.17, ""]
-    assert "$AB$" in report[17]
+    assert "$AC$" in report[17]
+    assert report[18] == "Чистий прибуток, грн"
+    assert "$T$" in report[19]
     day_rows = [row for row in snapshot.rows if row[COLUMNS.row_type - 1] == ROW_DAY]
     assert day_rows[0][3:5] == ["Курс USD", "45,20"]
     assert day_rows[1][3:5] == ["Курс USD", ""]

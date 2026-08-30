@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from crm_sync.models import Order, OrderItem, ShipmentStatus
 from crm_sync.sheet_layout import REPORTING_EXCLUDED_REFUSAL, ROW_ORDER, sheet_serial
-from crm_sync.sheet_orders import collect_order_groups, markup_formula
+from crm_sync.sheet_orders import collect_order_groups, markup_formula, net_profit_formula
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN
 
 
@@ -11,6 +11,13 @@ def test_markup_formula_uses_ukrainian_sheet_separator_and_numeric_safe_text() -
     assert markup_formula(5) == (
         '=IF(OR(Q5="";LOWER(Q5&"")="предоплата");L5*K5;'
         'IF(ISNUMBER(Q5);(L5-Q5)*K5;""))'
+    )
+
+
+def test_net_profit_formula_requires_numeric_cost_and_subtracts_all_expenses() -> None:
+    assert net_profit_formula(5) == (
+        '=IF(AND(ISNUMBER(Q5);ISNUMBER(R5));'
+        'R5-IFERROR(AA5;0)-IFERROR(AC5;0);"")'
     )
 
 
@@ -39,6 +46,22 @@ def test_collect_order_groups_normalizes_legacy_rows_without_losing_manual_value
     assert normalized[COLUMNS.cost - 1] == 700
     assert normalized[COLUMNS.receipt - 1] == "https://check.checkbox.ua/receipt/abc"
     assert normalized[COLUMNS.installment_commission_source - 1] == "legacy"
+
+
+def test_collect_order_groups_migrates_legacy_melad_sender() -> None:
+    row = [""] * LAST_COLUMN
+    row[COLUMNS.tracking_number - 1] = "20451234567890"
+    row[COLUMNS.order_date - 1] = "05.08.2026"
+    row[COLUMNS.sender - 1] = "Melad"
+    row[COLUMNS.sync_key - 1] = "prom:melad"
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 5))
+
+    groups = collect_order_groups(
+        [row], [], {}, sender_default="наш", observation_day=date(2026, 8, 8)
+    )
+
+    assert groups.rows["prom:melad"][0][COLUMNS.sender - 1] == "Melad дроп"
 
 
 def test_collect_order_groups_writes_advertising_once_for_multi_item_order() -> None:

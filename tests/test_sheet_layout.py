@@ -27,7 +27,7 @@ def test_sheet_dates_and_month_label() -> None:
 def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
     formulas = report_formulas(date(2026, 8, 2), first_data_row=5, last_data_row=30)
 
-    assert '$V$5:$V$30;"ORDER"' in formulas[ROW_REPORT_DAY][4]
+    assert '$W$5:$W$30;"ORDER"' in formulas[ROW_REPORT_DAY][4]
     assert "DATE(2026;8;2)" in formulas[ROW_REPORT_DAY][6]
     assert formulas[ROW_REPORT_FORECAST][4].startswith("=ROUNDUP(")
     assert formulas[ROW_REPORT_FORECAST][6].endswith(")*31/2")
@@ -35,19 +35,25 @@ def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
     assert ")*31/2" in formulas[ROW_REPORT_FORECAST][8]
     assert formulas[ROW_REPORT_DAY][8].startswith("=SUMIFS($M$5:$M$30;")
     assert "-SUMIFS($R$5:$R$30;" in formulas[ROW_REPORT_DAY][8]
-    assert '$A$5:$A$30;"*Prom*";$Z$5:$Z$30;"<>10"' in formulas[ROW_REPORT_DAY][12]
-    assert '$AB$5:$AB$30' not in formulas[ROW_REPORT_DAY][12]
+    assert '$A$5:$A$30;"*Prom*";$AA$5:$AA$30;"<>10"' in formulas[ROW_REPORT_DAY][12]
+    assert '$AC$5:$AC$30' not in formulas[ROW_REPORT_DAY][12]
     assert '$A$5:$A$30;"*Rozetka*"' in formulas[ROW_REPORT_DAY][14]
-    assert '$A$5:$A$30;"*Prom*";$Z$5:$Z$30;10' in formulas[ROW_REPORT_DAY][16]
+    assert '$A$5:$A$30;"*Prom*";$AA$5:$AA$30;10' in formulas[ROW_REPORT_DAY][16]
     assert formulas[ROW_REPORT_DAY][18] == (
-        '=SUMIFS($AB$5:$AB$30;$V$5:$V$30;"ORDER";'
-        '$AD$5:$AD$30;"<>EXCLUDED_REFUSAL";'
-        '$W$5:$W$30;DATE(2026;8;2))'
+        '=SUMIFS($AC$5:$AC$30;$W$5:$W$30;"ORDER";'
+        '$AE$5:$AE$30;"<>EXCLUDED_REFUSAL";'
+        '$X$5:$X$30;DATE(2026;8;2))'
+    )
+    assert formulas[ROW_REPORT_DAY][20] == (
+        '=SUMIFS($T$5:$T$30;$W$5:$W$30;"ORDER";'
+        '$AE$5:$AE$30;"<>EXCLUDED_REFUSAL";'
+        '$X$5:$X$30;DATE(2026;8;2))'
     )
     assert 12 not in formulas[ROW_REPORT_FORECAST]
     assert 14 not in formulas[ROW_REPORT_FORECAST]
     assert 16 not in formulas[ROW_REPORT_FORECAST]
     assert 18 not in formulas[ROW_REPORT_FORECAST]
+    assert 20 not in formulas[ROW_REPORT_FORECAST]
 
 
 def test_clean_customer_display_removes_serialized_rozetka_city() -> None:

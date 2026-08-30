@@ -54,7 +54,7 @@ def test_fetch_costs_matches_each_item_by_ttn_and_product_code() -> None:
             Decimal("8.80"), currency="USD"
         ),
     }
-    assert batch.sender == "Melad"
+    assert batch.sender == "Melad дроп"
     assert batch.warnings == ()
     assert client._test_worksheet.requests == [("A:J", "UNFORMATTED_VALUE")]
 
