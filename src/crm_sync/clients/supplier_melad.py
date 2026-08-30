@@ -24,6 +24,7 @@ _PRODUCT_COLUMN = 6
 _QUANTITY_COLUMN = 7
 _UNIT_USD_COLUMN = 8
 _TOTAL_USD_COLUMN = 9
+_PREFIXLESS_PRM_DIGITS = 9
 
 
 class MeladSupplierSheetClient:
@@ -55,6 +56,10 @@ class MeladSupplierSheetClient:
         warnings: list[str] = []
         omitted = 0
         tracking_rows = 0
+        item_rows_by_tracking: dict[str, int] = {}
+        usable_rows_by_tracking: dict[
+            str, list[tuple[SupplierCostKey, SupplierCostRecord]]
+        ] = {}
 
         def warn(message: str) -> None:
             nonlocal omitted
@@ -64,12 +69,13 @@ class MeladSupplierSheetClient:
                 omitted += 1
 
         for row_number, row in enumerate(rows, start=1):
-            tracking = tracking_match_key(
+            tracking = _supplier_tracking_key(
                 row[_TRACKING_COLUMN] if len(row) > _TRACKING_COLUMN else ""
             )
             if not tracking:
                 continue
             tracking_rows += 1
+            item_rows_by_tracking[tracking] = item_rows_by_tracking.get(tracking, 0) + 1
             product_name = row[_PRODUCT_COLUMN] if len(row) > _PRODUCT_COLUMN else ""
             product_code = _extract_product_code(product_name)
             quantity = _positive_decimal(
@@ -94,6 +100,7 @@ class MeladSupplierSheetClient:
                 continue
             key = SupplierCostKey(tracking, product_code)
             record = SupplierCostRecord.cost(unit_cost, currency="USD")
+            usable_rows_by_tracking.setdefault(tracking, []).append((key, record))
             if key in conflicted:
                 continue
             previous = values.get(key)
@@ -106,6 +113,23 @@ class MeladSupplierSheetClient:
                 continue
             values[key] = record
 
+        # A product-less key is also a fallback, so never retain one for a
+        # physically multi-row supplier shipment, even if other rows are invalid.
+        for tracking, item_count in item_rows_by_tracking.items():
+            if item_count != 1:
+                values.pop(SupplierCostKey(tracking), None)
+
+        # Marketplace and supplier SKUs are not always the same. A TTN-only alias
+        # is safe only when the supplier has exactly one item row for that TTN;
+        # invalid sibling rows must not make a multi-item shipment look singular.
+        for tracking, entries in usable_rows_by_tracking.items():
+            if item_rows_by_tracking.get(tracking) != 1 or len(entries) != 1:
+                continue
+            key, record = entries[0]
+            if key in conflicted:
+                continue
+            values.setdefault(SupplierCostKey(tracking), record)
+
         if omitted:
             warnings.append(f"Melad: {omitted} additional warning(s) omitted")
         degraded = not rows or (tracking_rows > 0 and not values)
@@ -115,8 +139,10 @@ class MeladSupplierSheetClient:
             warnings.append(
                 "Melad schema check failed: TTNs were found in A, but H/I had no usable costs"
             )
+        usable_row_count = sum(len(entries) for entries in usable_rows_by_tracking.values())
         LOGGER.info(
-            "Melad supplier sheet returned %s usable item cost(s) and %s warning(s)",
+            "Melad supplier sheet returned %s usable row(s), %s lookup key(s), and %s warning(s)",
+            usable_row_count,
             len(values),
             len(warnings),
         )
@@ -158,17 +184,40 @@ def _extract_product_code(value: Any) -> str:
     """Extract the last SKU-like parenthesized token from a product title."""
     candidates = _PRODUCT_CODE_RE.findall(str(value or ""))
     for candidate in reversed(candidates):
-        stripped = candidate.strip()
-        if (
-            stripped
-            and len(stripped) <= 50
-            and not any(character.isspace() for character in stripped)
-            and (
-                any(character.isdigit() for character in stripped)
-                or any(separator in stripped for separator in "-_/")
-            )
-        ):
+        stripped = " ".join(candidate.split())
+        if _is_product_code_candidate(stripped):
             return product_code_match_key(stripped)
+    return ""
+
+
+def _is_product_code_candidate(value: str) -> bool:
+    """Return whether one parenthesized Melad token looks like an SKU."""
+    if not value or len(value) > 50:
+        return False
+    tokens = value.split()
+    if len(tokens) == 1:
+        return any(character.isdigit() for character in value) or any(
+            separator in value for separator in "-_/"
+        )
+    if len(tokens) != 2:
+        return False
+    prefix, numeric_suffix = tokens
+    normalized_prefix = prefix.upper()
+    return bool(
+        re.fullmatch(r"[A-Z][A-Z0-9_./-]*", normalized_prefix)
+        and re.fullmatch(r"\d[A-Z0-9_./-]*", numeric_suffix.upper())
+    )
+
+
+def _supplier_tracking_key(value: Any) -> str:
+    """Normalize TTNs; Melad's column omits ``PRM-`` from bare Prom identifiers."""
+    raw = str(value or "").strip()
+    known_tracking = tracking_match_key(raw)
+    if known_tracking:
+        return known_tracking
+    compact_digits = re.sub(r"[\s\u00a0]+", "", raw)
+    if re.fullmatch(rf"\d{{{_PREFIXLESS_PRM_DIGITS}}}", compact_digits):
+        return tracking_match_key(f"PRM-{compact_digits}")
     return ""
 
 
