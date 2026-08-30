@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 TTN_RE = re.compile(r"(?<!\d)((?:\d[\s-]*){14})(?!\d)")
 RMP_RE = re.compile(r"\bRMP-\d+\b", re.IGNORECASE)
+PRM_RE = re.compile(r"\bPRM-\d+\b", re.IGNORECASE)
 INTERNATIONAL_TRACKING_RE = re.compile(r"\b[A-Z]{2}\d{9}[A-Z]{2}\b", re.IGNORECASE)
 UKRPOST_DOMESTIC_RE = re.compile(r"(?<!\d)\d{13}(?!\d)")
 MEEST_TRACKING_RE = re.compile(
@@ -167,7 +168,14 @@ def normalize_tracking_number(value: Any) -> str:
         raw,
         flags=re.IGNORECASE,
     )
-    for pattern in (RMP_RE, INTERNATIONAL_TRACKING_RE, TTN_RE, UKRPOST_DOMESTIC_RE, MEEST_TRACKING_RE):
+    for pattern in (
+        RMP_RE,
+        PRM_RE,
+        INTERNATIONAL_TRACKING_RE,
+        TTN_RE,
+        UKRPOST_DOMESTIC_RE,
+        MEEST_TRACKING_RE,
+    ):
         match = pattern.search(raw)
         if match:
             return " ".join(match.group(0).split()).strip(" ,;.")
