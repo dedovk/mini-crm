@@ -567,6 +567,7 @@ class SyncService:
         owners: dict[SupplierCostKey, str] = {}
         conflicted: set[SupplierCostKey] = set()
         tracking_owners: dict[str, str] = {}
+        keys_by_tracking: dict[str, set[SupplierCostKey]] = {}
         conflicted_tracking: set[str] = set()
         warnings: list[str] = []
         for batch in batches:
@@ -583,10 +584,9 @@ class SyncService:
                     continue
                 tracking_owner = tracking_owners.get(tracking)
                 if tracking_owner is not None and tracking_owner != batch.source:
-                    for existing_key in tuple(values):
-                        if existing_key.tracking_number == tracking:
-                            values.pop(existing_key, None)
-                            owners.pop(existing_key, None)
+                    for existing_key in keys_by_tracking.pop(tracking, set()):
+                        values.pop(existing_key, None)
+                        owners.pop(existing_key, None)
                     conflicted_tracking.add(tracking)
                     warnings.append(
                         f"Supplier TTN {tracking} conflicts between "
@@ -604,6 +604,7 @@ class SyncService:
                 if previous is not None and previous.record != record:
                     previous_source = owners.pop(key)
                     values.pop(key)
+                    keys_by_tracking.get(tracking, set()).discard(key)
                     conflicted.add(key)
                     warnings.append(
                         f"Supplier TTN {tracking}, product {key.product_code or '*'} conflicts between "
@@ -616,6 +617,7 @@ class SyncService:
                     sender=batch.sender,
                 )
                 owners[key] = batch.source
+                keys_by_tracking.setdefault(tracking, set()).add(key)
         return ResolvedSupplierCosts(values=values, warnings=tuple(warnings))
 
     @staticmethod
