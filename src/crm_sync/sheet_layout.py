@@ -8,7 +8,7 @@ from typing import Any
 
 from gspread.utils import rowcol_to_a1
 
-from crm_sync.sheet_schema import COLUMNS
+from crm_sync.sheet_schema import COLUMNS, FORECAST_EXCLUDED_REPORT_VALUE_COLUMNS
 from crm_sync.utils import customer_display, short_person_name
 
 BUSINESS_HEADERS = (
@@ -31,6 +31,7 @@ BUSINESS_HEADERS = (
     "Собівартість за одиницю, грн",
     "Націнка, грн",
     "Витрати на рекламу, грн",
+    "Чистий прибуток, грн",
     "Примітка менеджера",
 )
 
@@ -192,6 +193,7 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
         14: advertising_formula(day_filter, "rozetka"),
         16: advertising_formula(day_filter, "prom_fixed"),
         18: f"=SUMIFS({installment_range};{order_filter};{day_filter})",
+        20: f"=SUMIFS({range_for(COLUMNS.net_profit)};{order_filter};{day_filter})",
     }
     mtd = {
         4: f"=COUNTUNIQUEIFS({range_for(COLUMNS.sync_key)};{order_filter};{mtd_filter})",
@@ -205,10 +207,11 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
         14: advertising_formula(mtd_filter, "rozetka"),
         16: advertising_formula(mtd_filter, "prom_fixed"),
         18: f"=SUMIFS({installment_range};{order_filter};{mtd_filter})",
+        20: f"=SUMIFS({range_for(COLUMNS.net_profit)};{order_filter};{mtd_filter})",
     }
     forecast = {}
     for column, formula in mtd.items():
-        if column in {12, 14, 16, 18}:
+        if column in FORECAST_EXCLUDED_REPORT_VALUE_COLUMNS:
             continue
         projected = f"({formula[1:]})*{days_in_month}/{elapsed}"
         forecast[column] = f"=ROUNDUP({projected};0)" if column == 4 else f"={projected}"

@@ -19,6 +19,7 @@ from crm_sync.sheet_layout import (
     source_key,
 )
 from crm_sync.sheet_schema import COLUMNS, LAST_COLUMN
+from crm_sync.supplier_identity import MELAD_LEGACY_SENDERS, MELAD_SENDER
 from crm_sync.utils import (
     customer_display,
     decimal_for_sheet,
@@ -80,6 +81,18 @@ def markup_formula(row_number: int) -> str:
         f'=IF(OR({cost}="";LOWER({cost}&"")="предоплата");'
         f'{unit_price}*{quantity};IF(ISNUMBER({cost});'
         f'({unit_price}-{cost})*{quantity};""))'
+    )
+
+
+def net_profit_formula(row_number: int) -> str:
+    """Build net profit from margin and both marketplace commission components."""
+    cost = rowcol_to_a1(row_number, COLUMNS.cost)
+    markup = rowcol_to_a1(row_number, COLUMNS.markup)
+    advertising = rowcol_to_a1(row_number, COLUMNS.advertising_base)
+    installment = rowcol_to_a1(row_number, COLUMNS.installment_commission)
+    return (
+        f'=IF(AND(ISNUMBER({cost});ISNUMBER({markup}));'
+        f'{markup}-IFERROR({advertising};0)-IFERROR({installment};0);"")'
     )
 
 
@@ -210,6 +223,8 @@ def _normalize_existing_row(
     row[COLUMNS.order_date - 1] = sheet_serial(completion_day) if completion_day else ""
     if not str(row[COLUMNS.sender - 1]).strip() or row[COLUMNS.sender - 1] == "-":
         row[COLUMNS.sender - 1] = sender_default
+    elif str(row[COLUMNS.sender - 1]).strip().casefold() in MELAD_LEGACY_SENDERS:
+        row[COLUMNS.sender - 1] = MELAD_SENDER
     if not str(row[COLUMNS.payment_method - 1]).strip() and source_key(
         row[COLUMNS.source - 1]
     ) == "rozetka":

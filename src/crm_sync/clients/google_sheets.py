@@ -36,6 +36,7 @@ from crm_sync.sheet_layout import (
     ROW_REPORT_DAY,
     ROW_REPORT_FORECAST,
     ROW_REPORT_MTD,
+    TECHNICAL_HEADERS,
     parse_sheet_date,
     sheet_serial,
     source_display,
@@ -51,6 +52,7 @@ from crm_sync.sheet_orders import (
     advertising_display,
     collect_order_groups,
     markup_formula,
+    net_profit_formula,
     row_has_prepayment,
     row_is_refused,
 )
@@ -68,6 +70,7 @@ from crm_sync.sheet_snapshot import (
     USD_RATE_VALUE_COLUMN,
     build_sheet_snapshot,
 )
+from crm_sync.supplier_identity import MELAD_SENDER, MELAD_SUPPLIER_SOURCE
 from crm_sync.utils import (
     customer_display,
     decimal_for_sheet,
@@ -81,8 +84,6 @@ from crm_sync.utils import (
 
 LOGGER = logging.getLogger(__name__)
 LEGACY_INSTALLMENT_HEADER = "Комісія оплати частинами, грн"
-MELAD_SUPPLIER_SOURCE = "supplier-melad"
-MELAD_SENDER = "Melad"
 SUPPLIER_SENDER_DEFAULTS = {
     "supplier-imaxi": "imaxi-com",
     MELAD_SUPPLIER_SOURCE: MELAD_SENDER,
@@ -94,6 +95,10 @@ _MAX_USD_RATE = Decimal("100")
 
 class ConcurrentSheetEditError(RuntimeError):
     """The sheet changed while a structural rebuild was being prepared."""
+
+
+class SheetSchemaMigrationError(RuntimeError):
+    """The existing sheet layout cannot be migrated without risking data loss."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,9 +173,11 @@ class GoogleSheetsGateway:
                 )
 
         if apply_changes:
+            if self._migrate_net_profit_column(headers):
+                headers = self.worksheet.row_values(self.header_row)
+            self._migrate_legacy_installment_column(headers)
             if self.worksheet.col_count < LAST_COLUMN:
                 self.worksheet.add_cols(LAST_COLUMN - self.worksheet.col_count)
-            self._migrate_legacy_installment_column(headers)
             self.worksheet.update(
                 values=[list(ALL_HEADERS[COLUMNS.sync_key - 1 :])],
                 range_name=(
@@ -182,6 +189,56 @@ class GoogleSheetsGateway:
             self._configure_validations_and_hidden_key()
             ensure_sheet_audit_worksheet(self.spreadsheet)
             self._refresh_end_navigation_link()
+
+    def _migrate_net_profit_column(self, headers: list[str]) -> bool:
+        """Insert the new business column without overwriting notes or technical data."""
+        current = (
+            str(headers[COLUMNS.net_profit - 1]).strip().casefold()
+            if len(headers) >= COLUMNS.net_profit
+            else ""
+        )
+        expected = BUSINESS_HEADERS[COLUMNS.net_profit - 1].casefold()
+        if current == expected:
+            return False
+        legacy_sync_key = (
+            str(headers[COLUMNS.sync_key - 2]).strip().casefold()
+            if len(headers) >= COLUMNS.sync_key - 1
+            else ""
+        )
+        legacy_row_type = (
+            str(headers[COLUMNS.row_type - 2]).strip().casefold()
+            if len(headers) >= COLUMNS.row_type - 1
+            else ""
+        )
+        legacy_layout = (
+            legacy_sync_key == TECHNICAL_HEADERS[0].casefold()
+            and legacy_row_type == TECHNICAL_HEADERS[1].casefold()
+        )
+        if not any(str(value).strip() for value in headers):
+            return False
+        if not legacy_layout:
+            raise SheetSchemaMigrationError(
+                "Cannot safely insert the net-profit column: existing technical "
+                "headers do not match either the current or legacy layout"
+            )
+        self.spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "insertDimension": {
+                            "range": {
+                                "sheetId": self.worksheet.id,
+                                "dimension": "COLUMNS",
+                                "startIndex": COLUMNS.net_profit - 1,
+                                "endIndex": COLUMNS.net_profit,
+                            },
+                            "inheritFromBefore": True,
+                        }
+                    }
+                ]
+            }
+        )
+        return True
 
     def _locate_header_row(self) -> None:
         """Locate the first repeated business header in the active sheet."""
@@ -327,7 +384,8 @@ class GoogleSheetsGateway:
                 rendered = str(value).strip()
                 if rendered in formula_errors:
                     repairable = (
-                        row_type == ROW_ORDER and column == COLUMNS.markup
+                        row_type == ROW_ORDER
+                        and column in {COLUMNS.markup, COLUMNS.net_profit}
                     ) or row_type in managed_report_rows
                     prefix = "repairable " if repairable else ""
                     errors.append(
@@ -576,16 +634,38 @@ class GoogleSheetsGateway:
             },
         ]
 
-        widths = (55, 105, 100, 78, 80, 135, 95, 180, 70, 85, 60, 80, 85, 90, 90, 75, 85, 75, 80, 110)
-        for index, width in enumerate(widths):
+        widths = {
+            COLUMNS.source: 55,
+            COLUMNS.tracking_number: 105,
+            COLUMNS.shipment_status: 100,
+            COLUMNS.order_date: 78,
+            COLUMNS.order_number: 80,
+            COLUMNS.customer: 135,
+            COLUMNS.phone: 95,
+            COLUMNS.product: 180,
+            COLUMNS.product_code: 70,
+            COLUMNS.sender: 85,
+            COLUMNS.quantity: 60,
+            COLUMNS.unit_price: 80,
+            COLUMNS.line_total: 85,
+            COLUMNS.order_total: 90,
+            COLUMNS.payment_method: 90,
+            COLUMNS.prepayment: 75,
+            COLUMNS.cost: 85,
+            COLUMNS.markup: 75,
+            COLUMNS.advertising: 80,
+            COLUMNS.net_profit: 85,
+            COLUMNS.manager_note: 110,
+        }
+        for column, width in widths.items():
             requests.append(
                 {
                     "updateDimensionProperties": {
                         "range": {
                             "sheetId": sheet_id,
                             "dimension": "COLUMNS",
-                            "startIndex": index,
-                            "endIndex": index + 1,
+                            "startIndex": column - 1,
+                            "endIndex": column,
                         },
                         "properties": {"pixelSize": width},
                         "fields": "pixelSize",
@@ -735,6 +815,7 @@ class GoogleSheetsGateway:
             COLUMNS.cost: ("NUMBER", "#,##0.00"),
             COLUMNS.markup: ("NUMBER", "#,##0.00"),
             COLUMNS.advertising: ("NUMBER", "#,##0.00"),
+            COLUMNS.net_profit: ("NUMBER", "#,##0.00"),
             COLUMNS.supplier_cost_original: ("NUMBER", "#,##0.00"),
             COLUMNS.operational_date: ("DATE", "dd.mm.yyyy"),
             COLUMNS.first_seen_completed: ("DATE", "dd.mm.yyyy"),
@@ -867,7 +948,7 @@ class GoogleSheetsGateway:
 
         for row_type in (ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST):
             for row_number in typed_rows.get(row_type, []):
-                for column in (4, 6, 8, 10, 12):
+                for column in (4, 6, 8, 10, 12, 14, 16, 18, 20):
                     pattern = "0" if column == 4 else "#,##0.00"
                     requests.append(
                         {
@@ -1003,6 +1084,36 @@ class GoogleSheetsGateway:
                 "index": 0,
             }
         }
+        net_profit_range = dict(
+            data_range,
+            startColumnIndex=COLUMNS.net_profit - 1,
+            endColumnIndex=COLUMNS.net_profit,
+        )
+        negative_net_profit_rule = {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [net_profit_range],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "NUMBER_LESS",
+                            "values": [{"userEnteredValue": "0"}],
+                        },
+                        "format": {
+                            "backgroundColorStyle": {
+                                "rgbColor": self._hex_color("#F4CCCC")
+                            },
+                            "textFormat": {
+                                "bold": True,
+                                "foregroundColorStyle": {
+                                    "rgbColor": self._hex_color("#9C0006")
+                                },
+                            },
+                        },
+                    },
+                },
+                "index": 0,
+            }
+        }
         return [
             rule("Відмова", "#F4CCCC"),
             rule("Повернуто", "#F4CCCC"),
@@ -1011,6 +1122,7 @@ class GoogleSheetsGateway:
             rule("дорозі", "#FFF2CC"),
             rule("Прибуло", "#FFF2CC"),
             refusal_block_rule,
+            negative_net_profit_rule,
         ]
 
     @staticmethod
@@ -1042,8 +1154,12 @@ class GoogleSheetsGateway:
 
     def latest_layout_day(self) -> date | None:
         """Return the newest explicit day section without reading business columns."""
+        row_type_column = rowcol_to_a1(1, COLUMNS.row_type).rstrip("1")
+        operational_date_column = rowcol_to_a1(
+            1, COLUMNS.operational_date
+        ).rstrip("1")
         values = self.worksheet.get(
-            f"V1:W{self.worksheet.row_count}",
+            f"{row_type_column}1:{operational_date_column}{self.worksheet.row_count}",
             value_render_option="UNFORMATTED_VALUE",
         )
         days = [
@@ -1444,6 +1560,19 @@ class GoogleSheetsGateway:
                             "values": [[formula]],
                         }
                     )
+                net_formula = net_profit_formula(row_number)
+                current_net_formula = (
+                    str(row[COLUMNS.net_profit - 1]).strip()
+                    if len(row) >= COLUMNS.net_profit
+                    else ""
+                )
+                if order and current_net_formula != net_formula:
+                    updates.append(
+                        {
+                            "range": rowcol_to_a1(row_number, COLUMNS.net_profit),
+                            "values": [[net_formula]],
+                        }
+                    )
 
         if updates:
             self.worksheet.batch_update(updates, raw=False)
@@ -1718,6 +1847,7 @@ class GoogleSheetsGateway:
             latest_sender = _cell_value(latest_row, COLUMNS.sender)
             latest_cost = _cell_value(latest_row, COLUMNS.cost)
             latest_markup = _cell_value(latest_row, COLUMNS.markup)
+            latest_net_profit = _cell_value(latest_row, COLUMNS.net_profit)
             latest_source = str(
                 _cell_value(latest_row, COLUMNS.supplier_cost_source)
             ).strip()
@@ -1749,19 +1879,28 @@ class GoogleSheetsGateway:
                     expected=expected,
                     sheet_value=sheet_value,
                 )
-            formula_needs_repair = (
-                not cost_changed
-                and str(latest_markup).strip() != markup_formula(candidate.row_number)
+            expected_formulas = (
+                (COLUMNS.markup, latest_markup, markup_formula(candidate.row_number)),
+                (
+                    COLUMNS.net_profit,
+                    latest_net_profit,
+                    net_profit_formula(candidate.row_number),
+                ),
             )
-            if formula_needs_repair:
-                formula_updates.append(
-                    {
-                        "range": rowcol_to_a1(candidate.row_number, COLUMNS.markup),
-                        "values": [[markup_formula(candidate.row_number)]],
-                    }
-                )
-            supplier_sender = expected.sender or SUPPLIER_SENDER_DEFAULTS.get(
-                expected.source, ""
+            formula_needs_repair = False
+            if not cost_changed:
+                for column, current_formula, expected_formula in expected_formulas:
+                    if str(current_formula).strip() == expected_formula:
+                        continue
+                    formula_needs_repair = True
+                    formula_updates.append(
+                        {
+                            "range": rowcol_to_a1(candidate.row_number, column),
+                            "values": [[expected_formula]],
+                        }
+                    )
+            supplier_sender = SUPPLIER_SENDER_DEFAULTS.get(
+                expected.source, expected.sender
             )
             assign_supplier_sender = (
                 bool(supplier_sender) and str(latest_sender).strip() != supplier_sender
@@ -1929,9 +2068,15 @@ class GoogleSheetsGateway:
         return order_groups.added_rows
 
     def requires_schema_migration(self) -> bool:
-        """Return whether receipt or commission-provenance schema is outdated."""
+        """Return whether business, receipt, commission, or provenance schema is outdated."""
         self._locate_header_row()
         headers = self.worksheet.row_values(self.header_row)
+        net_profit_header = (
+            str(headers[COLUMNS.net_profit - 1]).strip().casefold()
+            if len(headers) >= COLUMNS.net_profit
+            else ""
+        )
+        expected_net_profit = BUSINESS_HEADERS[COLUMNS.net_profit - 1].casefold()
         current = (
             str(headers[COLUMNS.receipt - 1]).strip().casefold()
             if len(headers) >= COLUMNS.receipt
@@ -1974,7 +2119,8 @@ class GoogleSheetsGateway:
             )
         )
         return (
-            current == legacy
+            net_profit_header != expected_net_profit
+            or current == legacy
             or (not current and migrated_header == legacy)
             or source_header != expected_source
             or reporting_header != expected_reporting
@@ -2181,6 +2327,12 @@ def _append_supplier_cost_cell_updates(
         {
             "range": rowcol_to_a1(row_number, COLUMNS.markup),
             "values": [[markup_formula(row_number)]],
+        }
+    )
+    formula_updates.append(
+        {
+            "range": rowcol_to_a1(row_number, COLUMNS.net_profit),
+            "values": [[net_profit_formula(row_number)]],
         }
     )
     original_value = (

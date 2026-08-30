@@ -15,10 +15,10 @@ from crm_sync.sheet_layout import (
     report_formulas,
     sheet_serial,
 )
-from crm_sync.sheet_orders import OrderGroups, markup_formula
+from crm_sync.sheet_orders import OrderGroups, markup_formula, net_profit_formula
 from crm_sync.sheet_schema import (
-    ADVERTISING_REPORT_LABEL_COLUMNS,
     COLUMNS,
+    FORECAST_EXCLUDED_REPORT_LABEL_COLUMNS,
     LAST_COLUMN,
     LAST_COLUMN_LETTER,
     REPORT_METRIC_LABELS,
@@ -138,6 +138,7 @@ def _append_order_group(rows: list[list[Any]], group: list[list[Any]]) -> None:
         row = list(source_row)
         final_row = len(rows) + 1
         row[COLUMNS.markup - 1] = markup_formula(final_row)
+        row[COLUMNS.net_profit - 1] = net_profit_formula(final_row)
         row[COLUMNS.order_number - 1] = first_order_number if item_index == 0 else ""
         row[COLUMNS.order_total - 1] = first_order_total if item_index == 0 else ""
         rows.append(row)
@@ -160,7 +161,10 @@ def _append_report_rows(
         row = [""] * LAST_COLUMN
         row[0] = labels[row_type]
         for column, label in REPORT_METRIC_LABELS.items():
-            if row_type != ROW_REPORT_FORECAST or column not in ADVERTISING_REPORT_LABEL_COLUMNS:
+            if (
+                row_type != ROW_REPORT_FORECAST
+                or column not in FORECAST_EXCLUDED_REPORT_LABEL_COLUMNS
+            ):
                 row[column - 1] = label
         row[COLUMNS.row_type - 1] = row_type
         row[COLUMNS.operational_date - 1] = sheet_serial(report_day)

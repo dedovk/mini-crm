@@ -125,7 +125,7 @@ class Settings:
         sender_options = tuple(
             dict.fromkeys(
                 value.strip()
-                for value in _env("SENDER_OPTIONS", "imaxi-com,Melad,Melad дроп,наш").split(",")
+                for value in _env("SENDER_OPTIONS", "imaxi-com,Melad дроп,наш").split(",")
                 if value.strip()
             )
         )

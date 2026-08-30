@@ -24,25 +24,26 @@ class SheetColumns:
     cost: int = 17
     markup: int = 18
     advertising: int = 19
-    manager_note: int = 20
-    sync_key: int = 21
-    row_type: int = 22
-    operational_date: int = 23
-    first_seen_completed: int = 24
-    order_status: int = 25
-    advertising_base: int = 26
-    receipt: int = 27
-    installment_commission: int = 28
-    installment_commission_source: int = 29
-    reporting_state: int = 30
-    supplier_cost_source: int = 31
-    supplier_cost_currency: int = 32
-    supplier_cost_original: int = 33
+    net_profit: int = 20
+    manager_note: int = 21
+    sync_key: int = 22
+    row_type: int = 23
+    operational_date: int = 24
+    first_seen_completed: int = 25
+    order_status: int = 26
+    advertising_base: int = 27
+    receipt: int = 28
+    installment_commission: int = 29
+    installment_commission_source: int = 30
+    reporting_state: int = 31
+    supplier_cost_source: int = 32
+    supplier_cost_currency: int = 33
+    supplier_cost_original: int = 34
 
 
 COLUMNS = SheetColumns()
 LAST_COLUMN = COLUMNS.supplier_cost_original
-LAST_COLUMN_LETTER = "AG"
+LAST_COLUMN_LETTER = "AH"
 
 PAYMENT_OPTIONS = (
     "пром оплата(оплата картой)",
@@ -74,8 +75,13 @@ REPORT_METRIC_LABELS = {
     13: "Rozetka, грн",
     15: "Prom 10 грн",
     17: "Оплата част., грн",
+    19: "Чистий прибуток, грн",
 }
 ADVERTISING_REPORT_LABEL_COLUMNS = {11, 13, 15, 17}
+FORECAST_EXCLUDED_REPORT_LABEL_COLUMNS = {*ADVERTISING_REPORT_LABEL_COLUMNS, 19}
+FORECAST_EXCLUDED_REPORT_VALUE_COLUMNS = {
+    column + 1 for column in FORECAST_EXCLUDED_REPORT_LABEL_COLUMNS
+}
 
 AUDIT_WORKSHEET_NAME = "Журнал змін"
 AUDIT_HEADERS = (

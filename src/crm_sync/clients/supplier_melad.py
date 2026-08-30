@@ -13,6 +13,7 @@ from gspread.exceptions import APIError
 from requests import ConnectionError, Timeout
 
 from crm_sync.models import SupplierCostBatch, SupplierCostKey, SupplierCostRecord
+from crm_sync.supplier_identity import MELAD_SENDER, MELAD_SUPPLIER_SOURCE
 from crm_sync.utils import product_code_match_key, tracking_match_key
 
 LOGGER = logging.getLogger(__name__)
@@ -30,8 +31,8 @@ _PREFIXLESS_PRM_DIGITS = 9
 class MeladSupplierSheetClient:
     """Read per-item USD costs from the Melad supplier worksheet."""
 
-    source = "supplier-melad"
-    sender = "Melad"
+    source = MELAD_SUPPLIER_SOURCE
+    sender = MELAD_SENDER
 
     def __init__(
         self,
