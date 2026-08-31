@@ -25,6 +25,7 @@ from crm_sync.utils import (
 )
 
 LOGGER = logging.getLogger(__name__)
+ROZETKA_SHIPPED_STATUS_IDS = frozenset({26})
 
 
 def _payment_text(raw: dict[str, Any]) -> str:
@@ -167,6 +168,7 @@ class RozetkaClient:
             return []
         observed_at = datetime.now(ZoneInfo(self.timezone))
         orders_by_key: dict[str, Order] = {}
+        details_by_order_id: dict[str, dict[str, Any] | None] = {}
         # Rozetka groups active and completed orders separately. Query both groups
         # and then keep only the exact business statuses supported by the CRM.
         for order_type in (2, 3):
@@ -181,7 +183,7 @@ class RozetkaClient:
                         "sort": "-changed",
                         "expand": (
                             "user,delivery,purchases,status_data,payment_type_name,"
-                            "payment_status,status_payment,credit_info"
+                            "payment_status,status_payment,credit_info,order_status_history"
                         ),
                     },
                 )
@@ -195,35 +197,63 @@ class RozetkaClient:
                     if not isinstance(raw, dict):
                         continue
                     source_status = self._eligible_source_status(raw)
-                    if not source_status:
+                    search_has_status = self._has_status_fields(raw)
+                    if not source_status and search_has_status:
                         continue
                     normalized_raw = raw
-                    # The search response commonly omits seller-only comments.
-                    # Fetch order details only when no note-like field is present,
-                    # keeping the normal polling request count small.
-                    if not collect_note_text(raw):
+                    # Search rows can omit comments, TTNs, or item lines. Hydrate only
+                    # incomplete rows and cache the result across duplicate groups/pages.
+                    if (
+                        not source_status
+                        or self._search_order_needs_details(raw)
+                        or (
+                            source_status == "Виконано"
+                            and not self._has_shipped_history(raw)
+                        )
+                    ):
                         order_id = str(first_value(raw, "id", "order_id")).strip()
                         if order_id:
-                            try:
-                                detail_payload = self._request_authorized(
-                                    f"/orders/{order_id}",
-                                    params={
-                                        "expand": (
-                                            "user,delivery,purchases,status_data,payment_type_name,"
-                                            "payment_status,status_payment,credit_info,item_details"
+                            if order_id not in details_by_order_id:
+                                try:
+                                    detail_payload = self._request_authorized(
+                                        f"/orders/{order_id}",
+                                        params={
+                                            "expand": (
+                                                "user,delivery,purchases,status_data,payment_type_name,"
+                                                "payment_status,status_payment,credit_info,item_details,"
+                                                "order_status_history"
+                                            )
+                                        },
+                                    )
+                                except ApiError as exc:
+                                    LOGGER.warning(
+                                        "Rozetka order %s details are unavailable; using search data: %s",
+                                        order_id,
+                                        exc,
+                                    )
+                                    details_by_order_id[order_id] = None
+                                else:
+                                    detail = detail_payload.get("content")
+                                    details_by_order_id[order_id] = (
+                                        detail if isinstance(detail, dict) else None
+                                    )
+                            detail = details_by_order_id[order_id]
+                            if detail is not None:
+                                if self._has_status_fields(detail):
+                                    source_status = self._eligible_source_status(detail)
+                                    if not source_status:
+                                        LOGGER.info(
+                                            "Rozetka order %s became ineligible while details were loaded",
+                                            order_id,
                                         )
-                                    },
-                                )
-                            except ApiError as exc:
-                                LOGGER.warning(
-                                    "Rozetka order %s details are unavailable; using search data: %s",
-                                    order_id,
-                                    exc,
-                                )
-                            else:
-                                detail = detail_payload.get("content")
-                                if isinstance(detail, dict):
-                                    normalized_raw = {**raw, **detail}
+                                        continue
+                                normalized_raw = self._merge_search_and_detail(raw, detail)
+                    if not source_status:
+                        LOGGER.warning(
+                            "Rozetka order %s was skipped because its status is unavailable",
+                            str(first_value(raw, "id", "order_id")).strip(),
+                        )
+                        continue
                     try:
                         order = self._normalize(
                             normalized_raw,
@@ -233,8 +263,21 @@ class RozetkaClient:
                     except (ValueError, TypeError) as exc:
                         LOGGER.warning("Rozetka order skipped because normalization failed: %s", exc)
                         continue
-                    if order.tracking_number and order.items:
-                        orders_by_key[order.sync_key.casefold()] = order
+                    if not order.tracking_number or not order.items:
+                        LOGGER.warning(
+                            "Rozetka order %s with status %s was skipped because %s",
+                            order.external_id,
+                            source_status,
+                            "tracking number is missing"
+                            if not order.tracking_number
+                            else "items are missing",
+                        )
+                        continue
+                    key = order.sync_key.casefold()
+                    existing = orders_by_key.get(key)
+                    orders_by_key[key] = (
+                        self._merge_order_versions(existing, order) if existing else order
+                    )
                 meta = content.get("_meta") or {}
                 if not isinstance(meta, dict):
                     raise ApiError("Rozetka order search metadata must be an object")
@@ -263,16 +306,153 @@ class RozetkaClient:
             )
         )
 
+    @staticmethod
+    def _search_order_needs_details(raw: dict[str, Any]) -> bool:
+        """Return whether search data lacks fields required for a complete CRM row."""
+        purchases = raw.get("purchases")
+        delivery = raw.get("delivery") if isinstance(raw.get("delivery"), dict) else {}
+        notes = collect_note_text(raw)
+        tracking = find_tracking_number(
+            first_value(raw, "ttn", "tracking_number", "declaration_number"),
+            first_value(
+                delivery,
+                "ttn",
+                "tracking_number",
+                "declaration_number",
+                "document_number",
+            ),
+            *notes,
+        )
+        return (
+            not notes
+            or not isinstance(purchases, list)
+            or not any(isinstance(item, dict) for item in purchases)
+            or not tracking
+        )
+
+    @staticmethod
+    def _has_status_fields(raw: dict[str, Any]) -> bool:
+        """Return whether a response contains an authoritative current-order status."""
+        direct = (
+            raw.get(key)
+            for key in ("status", "status_id", "status_name", "status_title")
+        )
+        if any(value is not None and str(value).strip() for value in direct):
+            return True
+        status_data = raw.get("status_data")
+        if isinstance(status_data, dict) and any(
+            status_data.get(key) is not None and str(status_data.get(key)).strip()
+            for key in ("id", "status_id", "name", "title", "status_name", "status_title")
+        ):
+            return True
+        status_group = first_value(
+            raw,
+            "status_group",
+            default=(status_data or {}).get("status_group")
+            if isinstance(status_data, dict)
+            else "",
+        )
+        try:
+            return int(status_group) == 2
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _has_shipped_history(cls, raw: dict[str, Any]) -> bool:
+        """Return whether status history contains the shipment accounting milestone."""
+        history = raw.get("order_status_history")
+        if not isinstance(history, list):
+            return False
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            nested_status = entry.get("status") if isinstance(entry.get("status"), dict) else {}
+            status_id = first_value(
+                entry,
+                "status_id",
+                default=first_value(nested_status, "id", "status_id"),
+            )
+            status_name = first_value(
+                entry,
+                "status_name",
+                "status_title",
+                default=first_value(nested_status, "name", "title"),
+            )
+            if cls._eligible_source_status(
+                {"status": status_id, "status_name": status_name}
+            ) == "Відправлено":
+                return True
+        return False
+
+    @staticmethod
+    def _merge_search_and_detail(
+        search: dict[str, Any], detail: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge eventually-consistent details without erasing complete search values."""
+        merged = dict(search)
+        nested_fields = {"delivery", "user", "status_data"}
+        for key, value in detail.items():
+            if value is None or value == "" or value == [] or value == {}:
+                continue
+            if key in nested_fields and isinstance(value, dict):
+                existing = merged.get(key)
+                merged[key] = {
+                    **(existing if isinstance(existing, dict) else {}),
+                    **{
+                        nested_key: nested_value
+                        for nested_key, nested_value in value.items()
+                        if nested_value is not None and nested_value != ""
+                    },
+                }
+                continue
+            merged[key] = value
+        return merged
+
+    @staticmethod
+    def _merge_order_versions(existing: Order, candidate: Order) -> Order:
+        """Keep the newest lifecycle state while preserving the first accounting milestone."""
+        rank = {"відправлено": 1, "виконано": 2, "скасовано": 3}
+        preferred = (
+            candidate
+            if rank.get(candidate.source_status.casefold(), 0)
+            >= rank.get(existing.source_status.casefold(), 0)
+            else existing
+        )
+        versions = (
+            (existing.completed_at, existing.completion_is_exact),
+            (candidate.completed_at, candidate.completion_is_exact),
+        )
+        exact_versions = tuple(value for value in versions if value[1])
+        earliest = min(exact_versions or versions, key=lambda value: value[0])
+        preferred.completed_at = earliest[0]
+        preferred.completion_is_exact = earliest[1]
+        return preferred
+
     @classmethod
     def _eligible_source_status(cls, raw: dict[str, Any]) -> str:
         status_data = raw.get("status_data") if isinstance(raw.get("status_data"), dict) else {}
+        status_name = cls._status_name(raw).casefold()
+        if status_name.startswith(
+            ("скасовано", "отменен", "відмова", "отказ", "canceled", "cancelled")
+        ):
+            return "Скасовано"
         status_group = first_value(raw, "status_group", default=status_data.get("status_group"))
         try:
             if int(status_group) == 2:
                 return "Виконано"
         except (TypeError, ValueError):
             pass
-        status_name = cls._status_name(raw).casefold()
+        raw_status = first_value(
+            raw,
+            "status",
+            "status_id",
+            default=first_value(status_data, "id", "status_id"),
+        )
+        try:
+            if int(raw_status) in ROZETKA_SHIPPED_STATUS_IDS:
+                return "Відправлено"
+        except (TypeError, ValueError):
+            pass
         if status_name.startswith(("виконано", "выполнен")):
             return "Виконано"
         if status_name.startswith(("відправлено", "отправлен")):
@@ -566,20 +746,54 @@ class RozetkaClient:
         user_name = person_name(first_value(user, "name", "full_name", "title")) or person_name(user)
         payment_text = _payment_text(raw)
         created_at = parse_datetime(first_value(raw, "created", "created_at"), self.timezone)
-        current_status = first_value(raw, "status", default=nested_value(raw, (("status_data", "id"),)))
+        current_status = first_value(
+            raw,
+            "status",
+            "status_id",
+            default=nested_value(raw, (("status_data", "id"),)),
+        )
         history = raw.get("order_status_history") or []
-        history_timestamp: Any = ""
+        shipped_transitions: list[datetime] = []
+        current_transitions: list[datetime] = []
         if isinstance(history, list):
-            for entry in reversed(history):
+            for entry in history:
                 if not isinstance(entry, dict):
                     continue
-                status_id = first_value(entry, "status_id", default=nested_value(entry, (("status", "id"),)))
+                nested_status = entry.get("status") if isinstance(entry.get("status"), dict) else {}
+                status_id = first_value(
+                    entry,
+                    "status_id",
+                    default=first_value(nested_status, "id", "status_id"),
+                )
+                status_name = first_value(
+                    entry,
+                    "status_name",
+                    "status_title",
+                    default=first_value(nested_status, "name", "title"),
+                )
+                transition_at = parse_optional_datetime(
+                    first_value(entry, "created", "created_at"), self.timezone
+                )
+                if transition_at is None:
+                    continue
+                history_status = self._eligible_source_status(
+                    {"status": status_id, "status_name": status_name}
+                )
+                if history_status == "Відправлено":
+                    shipped_transitions.append(transition_at)
                 if str(status_id) == str(current_status):
-                    history_timestamp = first_value(entry, "created", "created_at")
-                    break
-        completion_value = history_timestamp or first_value(
-            raw, "changed", "status_updated_at", "updated_at"
+                    current_transitions.append(transition_at)
+        history_transition = (
+            min(shipped_transitions)
+            if shipped_transitions
+            else max(current_transitions, default=None)
         )
+        explicit_transition = first_value(
+            raw, "status_changed_at", "order_status_modified"
+        )
+        completion_value = history_transition or explicit_transition
+        if source_status == "Виконано" and not completion_value:
+            completion_value = first_value(raw, "changed", "updated_at")
         completed_at = parse_optional_datetime(
             completion_value,
             self.timezone,
