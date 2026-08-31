@@ -603,6 +603,7 @@ class RozetkaShippedStub:
                     "id": "902000001",
                     "created": "2026-08-01 10:00:00",
                     "changed": "2026-08-10 09:15:00",
+                    "status_changed_at": "2026-08-10 09:15:00",
                     "status": 26,
                     "status_group": 1,
                     "status_data": {"id": 26, "name": "Відправлено", "status_group": 1},
@@ -646,6 +647,367 @@ def test_rozetka_shipped_order_uses_status_change_date_and_comment() -> None:
     assert orders[0].source_status == "Відправлено"
     assert orders[0].completed_at.strftime("%d.%m.%Y %H:%M") == "10.08.2026 09:15"
     assert orders[0].note == "предо 400"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ({"status": 26}, "Відправлено"),
+        ({"status_data": {"id": "26"}}, "Відправлено"),
+        ({"status": 25}, ""),
+        ({"status": 27}, ""),
+    ],
+)
+def test_rozetka_recognizes_only_supported_numeric_shipped_status(
+    raw: dict[str, object], expected: str
+) -> None:
+    assert RozetkaClient._eligible_source_status(raw) == expected
+
+
+class RozetkaIncompleteSearchRowStub:
+    def __init__(self) -> None:
+        self.detail_requests = 0
+
+    def request_json(self, method: str, url: str, **kwargs):
+        if url.endswith("/orders/902000003"):
+            self.detail_requests += 1
+            return {
+                "success": True,
+                "content": {
+                    "id": "902000003",
+                    "status": 26,
+                    "status_changed_at": "2026-08-31 09:15:00",
+                    "status_data": {"id": 26, "name": "Відправлено"},
+                    "delivery": {
+                        "ttn": "RMP-787478919",
+                        "locality": {"name": "Київ"},
+                    },
+                    "purchases": [
+                        {
+                            "item_id": "SKU-1",
+                            "item_name": "Товар",
+                            "quantity": 1,
+                            "price": 999,
+                            "cost": 999,
+                        }
+                    ],
+                },
+            }
+        orders = []
+        if kwargs["params"]["types"] == 2:
+            orders = [
+                {
+                    "id": "902000003",
+                    "created": "2026-08-30 10:00:00",
+                    "changed": "2026-08-31 09:15:00",
+                    "status": 26,
+                    "current_seller_comment": "передзвонити покупцю",
+                    "cost": 999,
+                }
+            ]
+        return {
+            "success": True,
+            "content": {"orders": orders, "_meta": {"pageCount": 1}},
+        }
+
+
+def test_rozetka_loads_details_when_search_row_has_comment_but_no_ttn_or_items() -> None:
+    http = RozetkaIncompleteSearchRowStub()
+    client = RozetkaClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert http.detail_requests == 1
+    assert len(orders) == 1
+    assert orders[0].tracking_number == "RMP-787478919"
+    assert orders[0].source_status == "Відправлено"
+    assert orders[0].completed_at.strftime("%d.%m.%Y %H:%M") == "31.08.2026 09:15"
+    assert len(orders[0].items) == 1
+
+
+def test_rozetka_shipped_generic_changed_time_is_not_treated_as_transition() -> None:
+    observed_at = datetime(2026, 8, 31, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+    client = RozetkaClient(
+        RozetkaSearchStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+    raw = {
+        "id": "902000004",
+        "created": "2026-08-20 10:00:00",
+        "changed": "2026-08-30 18:00:00",
+        "status": 26,
+        "delivery": {"ttn": "RMP-787478920"},
+        "purchases": [
+            {"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}
+        ],
+        "cost": 999,
+    }
+
+    order = client._normalize(
+        raw, source_status="Відправлено", observed_at=observed_at
+    )
+
+    assert order.completed_at == observed_at
+    assert not order.completion_is_exact
+
+
+class RozetkaCancelledDetailStub(RozetkaIncompleteSearchRowStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        payload = super().request_json(method, url, **kwargs)
+        if url.endswith("/orders/902000003"):
+            payload["content"]["status"] = 99
+            payload["content"]["status_data"] = {"id": 99, "name": "Скасовано"}
+        return payload
+
+
+def test_rozetka_returns_order_cancelled_before_detail_hydration_for_reconciliation() -> None:
+    client = RozetkaClient(
+        RozetkaCancelledDetailStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(
+        datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv"))
+    )
+
+    assert len(orders) == 1
+    assert orders[0].source_status == "Скасовано"
+    assert orders[0].is_cancelled
+
+
+class RozetkaDuplicateIncompleteRowStub(RozetkaIncompleteSearchRowStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        if not url.endswith("/orders/902000003") and kwargs["params"]["types"] == 3:
+            copied_kwargs = {
+                **kwargs,
+                "params": {**kwargs["params"], "types": 2},
+            }
+            return super().request_json(method, url, **copied_kwargs)
+        return super().request_json(method, url, **kwargs)
+
+
+def test_rozetka_hydrates_duplicate_search_rows_only_once() -> None:
+    http = RozetkaDuplicateIncompleteRowStub()
+    client = RozetkaClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert http.detail_requests == 1
+    assert len(orders) == 1
+
+
+def test_rozetka_partial_detail_does_not_erase_search_ttn_items_or_status() -> None:
+    search = {
+        "status": 26,
+        "status_data": {"id": 26, "name": "Відправлено"},
+        "delivery": {"ttn": "RMP-787478919", "city": "Київ"},
+        "purchases": [{"item_id": "SKU"}],
+    }
+    detail = {
+        "status": None,
+        "status_data": {},
+        "delivery": {},
+        "purchases": [],
+    }
+
+    merged = RozetkaClient._merge_search_and_detail(search, detail)
+
+    assert merged["status"] == 26
+    assert merged["status_data"] == {"id": 26, "name": "Відправлено"}
+    assert merged["delivery"] == {"ttn": "RMP-787478919", "city": "Київ"}
+    assert merged["purchases"] == [{"item_id": "SKU"}]
+    assert not RozetkaClient._has_status_fields(detail)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"status_group": 1},
+        {"status_data": {"status_group": 1}},
+    ],
+)
+def test_rozetka_active_group_without_exact_status_requires_details(
+    raw: dict[str, object]
+) -> None:
+    assert not RozetkaClient._has_status_fields(raw)
+
+
+class RozetkaMissingSearchStatusStub(RozetkaIncompleteSearchRowStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        payload = super().request_json(method, url, **kwargs)
+        if not url.endswith("/orders/902000003"):
+            for order in payload["content"]["orders"]:
+                order.pop("status", None)
+        return payload
+
+
+def test_rozetka_recovers_missing_search_status_from_details() -> None:
+    client = RozetkaClient(
+        RozetkaMissingSearchStatusStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert len(orders) == 1
+    assert orders[0].source_status == "Відправлено"
+
+
+def test_rozetka_completed_order_uses_earlier_shipped_history_at_month_boundary() -> None:
+    client = RozetkaClient(
+        RozetkaSearchStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+    raw = {
+        "id": "902000005",
+        "created": "2026-08-30 10:00:00",
+        "changed": "2026-09-01 12:00:00",
+        "status": 30,
+        "status_group": 2,
+        "delivery": {"ttn": "RMP-787478921"},
+        "purchases": [
+            {"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}
+        ],
+        "cost": 999,
+        "order_status_history": [
+            {"status_id": 26, "created": "2026-08-31 23:50:00"},
+            {"status_id": 30, "created": "2026-09-01 12:00:00"},
+        ],
+    }
+
+    order = client._normalize(raw, source_status="Виконано")
+
+    assert order.completed_at.strftime("%d.%m.%Y %H:%M") == "31.08.2026 23:50"
+    assert order.completion_is_exact
+
+
+@pytest.mark.parametrize("name", ["Скасовано", "Відмова від замовлення", "Отменен"])
+def test_rozetka_terminal_group_cancellation_is_not_completed(name: str) -> None:
+    raw = {"status_group": 2, "status_data": {"name": name}}
+
+    assert RozetkaClient._eligible_source_status(raw) == "Скасовано"
+
+
+class RozetkaCompletedHistoryDetailStub:
+    def __init__(self) -> None:
+        self.detail_requests = 0
+
+    def request_json(self, method: str, url: str, **kwargs):
+        base = {
+            "id": "902000006",
+            "created": "2026-08-30 10:00:00",
+            "changed": "2026-09-01 12:00:00",
+            "status": 30,
+            "status_group": 2,
+            "status_data": {"id": 30, "name": "Виконано", "status_group": 2},
+            "current_seller_comment": "готово",
+            "delivery": {"ttn": "RMP-787478922"},
+            "purchases": [
+                {"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}
+            ],
+            "cost": 999,
+        }
+        if url.endswith("/orders/902000006"):
+            self.detail_requests += 1
+            return {
+                "success": True,
+                "content": {
+                    **base,
+                    "order_status_history": [
+                        {"status_id": 26, "created": "2026-08-31 23:50:00"},
+                        {"status_id": 30, "created": "2026-09-01 12:00:00"},
+                    ],
+                },
+            }
+        orders = [base] if kwargs["params"]["types"] == 3 else []
+        return {
+            "success": True,
+            "content": {"orders": orders, "_meta": {"pageCount": 1}},
+        }
+
+
+def test_rozetka_fetches_missing_history_for_completed_month_boundary_order() -> None:
+    http = RozetkaCompletedHistoryDetailStub()
+    client = RozetkaClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert http.detail_requests == 1
+    assert len(orders) == 1
+    assert orders[0].source_status == "Виконано"
+    assert orders[0].completed_at.strftime("%d.%m.%Y %H:%M") == "31.08.2026 23:50"
+
+
+def test_rozetka_duplicate_merge_prioritizes_cancellation_and_exact_transition() -> None:
+    client = RozetkaClient(
+        RozetkaSearchStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+    base = {
+        "id": "902000007",
+        "created": "2026-08-30 10:00:00",
+        "delivery": {"ttn": "RMP-787478923"},
+        "purchases": [
+            {"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}
+        ],
+        "cost": 999,
+    }
+    observed = datetime(2026, 8, 31, 10, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+    shipped_observed = client._normalize(
+        base, source_status="Відправлено", observed_at=observed
+    )
+    cancelled_exact = client._normalize(
+        {**base, "status_changed_at": "2026-08-31 11:00:00"},
+        source_status="Скасовано",
+        observed_at=observed,
+    )
+
+    merged = client._merge_order_versions(shipped_observed, cancelled_exact)
+
+    assert merged.source_status == "Скасовано"
+    assert merged.completed_at.strftime("%d.%m.%Y %H:%M") == "31.08.2026 11:00"
+    assert merged.completion_is_exact
 
 
 class RozetkaDetailCommentStub:
