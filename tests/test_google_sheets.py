@@ -436,6 +436,42 @@ def test_refresh_order_details_repairs_text_unit_price_without_product_code() ->
     assert updates["R5"] == markup_formula(5)
 
 
+def test_refresh_order_details_does_not_redate_existing_rozetka_row() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "rozetka:902000001"
+    row[COLUMNS.order_date - 1] = sheet_serial(date(2026, 8, 31))
+    row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 8, 31))
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 4
+    order = Order(
+        source="rozetka",
+        external_id="902000001",
+        created_at=datetime(2026, 8, 30, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 10, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="RMP-787478919",
+        total=Decimal(100),
+        payment_method="наложка",
+        note="",
+        sender="наш",
+        source_status="Відправлено",
+        completion_is_exact=True,
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    gateway.refresh_order_details([order])
+
+    updated_ranges = {update["range"] for update in worksheet.updates}
+    assert "D5" not in updated_ranges
+    assert "X5" not in updated_ranges
+
+
 def test_refresh_preserves_known_installment_when_prom_payload_is_incomplete() -> None:
     rows = [[""] * LAST_COLUMN for _ in range(5)]
     row = rows[4]
@@ -1157,7 +1193,7 @@ def test_shipped_order_does_not_set_completion_marker_then_transitions_in_place(
     )
 
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
-    assert updates["D5"] == sheet_serial(date(2026, 8, 11))
+    assert "D5" not in updates
     assert updates["Y5"] == sheet_serial(date(2026, 8, 11))
     assert updates["Z5"] == "Виконано"
     assert "X5" not in updates

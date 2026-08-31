@@ -1356,7 +1356,14 @@ class GoogleSheetsGateway:
                                 "values": [[order.tracking_number]],
                             }
                         )
-                if order and order.completion_is_exact:
+                # Existing Rozetka rows keep the date on which they first
+                # entered the CRM. Shipment-status refreshes may update the
+                # status/details, but must never move rows between day blocks.
+                if (
+                    order
+                    and order.completion_is_exact
+                    and order.source.casefold() != "rozetka"
+                ):
                     completion_date = order.completed_at.date()
                     current_completion_date = parse_sheet_date(
                         row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else ""
@@ -1634,7 +1641,10 @@ class GoogleSheetsGateway:
                 if order.completion_is_exact
                 else stored_day or observed_at.date()
             )
-            if current_completion != desired_status_day:
+            if (
+                order.source.casefold() != "rozetka"
+                and current_completion != desired_status_day
+            ):
                 updates.append(
                     {
                         "range": rowcol_to_a1(row_number, COLUMNS.order_date),

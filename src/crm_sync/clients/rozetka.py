@@ -25,7 +25,11 @@ from crm_sync.utils import (
 )
 
 LOGGER = logging.getLogger(__name__)
-ROZETKA_SHIPPED_STATUS_IDS = frozenset({26})
+# Rozetka Seller API order status identifiers:
+# 3 - transferred to delivery service, 4 - delivering, 5 - at pickup point,
+# 6 - received. Status 26 means "processing" and must not be treated as shipped.
+ROZETKA_SHIPPED_STATUS_IDS = frozenset({3, 4, 5})
+ROZETKA_COMPLETED_STATUS_IDS = frozenset({6})
 
 
 def _payment_text(raw: dict[str, Any]) -> str:
@@ -449,8 +453,15 @@ class RozetkaClient:
             default=first_value(status_data, "id", "status_id"),
         )
         try:
-            if int(raw_status) in ROZETKA_SHIPPED_STATUS_IDS:
+            status_id = int(raw_status)
+            if status_id in ROZETKA_COMPLETED_STATUS_IDS:
+                return "Виконано"
+            if status_id in ROZETKA_SHIPPED_STATUS_IDS:
                 return "Відправлено"
+            # A known numeric status is authoritative. In particular, do not
+            # let an inconsistent localized label turn status 26 (processing)
+            # into an eligible shipment.
+            return ""
         except (TypeError, ValueError):
             pass
         if status_name.startswith(("виконано", "выполнен")):

@@ -149,7 +149,7 @@ def test_rozetka_normalizer_extracts_city_name_from_delivery_object() -> None:
     assert order.tracking_number == "RMP-483122083"
 
 
-def test_rozetka_normalizer_prefers_current_status_history_timestamp() -> None:
+def test_rozetka_normalizer_prefers_first_delivery_status_timestamp() -> None:
     client = RozetkaClient(
         HttpClient(max_retries=0),
         token="test",
@@ -174,7 +174,7 @@ def test_rozetka_normalizer_prefers_current_status_history_timestamp() -> None:
         }
     )
 
-    assert order.completed_at.strftime("%d.%m.%Y %H:%M") == "02.08.2026 12:34"
+    assert order.completed_at.strftime("%d.%m.%Y %H:%M") == "01.08.2026 11:00"
     assert order.completion_is_exact is True
 
 
@@ -604,9 +604,9 @@ class RozetkaShippedStub:
                     "created": "2026-08-01 10:00:00",
                     "changed": "2026-08-10 09:15:00",
                     "status_changed_at": "2026-08-10 09:15:00",
-                    "status": 26,
+                    "status": 3,
                     "status_group": 1,
-                    "status_data": {"id": 26, "name": "Відправлено", "status_group": 1},
+                    "status_data": {"id": 3, "name": "Передано в службу доставки", "status_group": 1},
                     "current_seller_comment": "предо 400",
                     "cost": "1200",
                     "user": {"name": "Тестовий Покупець", "phone": "0501234567"},
@@ -652,10 +652,12 @@ def test_rozetka_shipped_order_uses_status_change_date_and_comment() -> None:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ({"status": 26}, "Відправлено"),
-        ({"status_data": {"id": "26"}}, "Відправлено"),
-        ({"status": 25}, ""),
-        ({"status": 27}, ""),
+        ({"status": 3}, "Відправлено"),
+        ({"status_data": {"id": "4"}}, "Відправлено"),
+        ({"status": 5}, "Відправлено"),
+        ({"status": 6}, "Виконано"),
+        ({"status": 26}, ""),
+        ({"status": 26, "status_data": {"name": "Відправлено"}}, ""),
     ],
 )
 def test_rozetka_recognizes_only_supported_numeric_shipped_status(
@@ -675,9 +677,9 @@ class RozetkaIncompleteSearchRowStub:
                 "success": True,
                 "content": {
                     "id": "902000003",
-                    "status": 26,
+                    "status": 3,
                     "status_changed_at": "2026-08-31 09:15:00",
-                    "status_data": {"id": 26, "name": "Відправлено"},
+                    "status_data": {"id": 3, "name": "Передано в службу доставки"},
                     "delivery": {
                         "ttn": "RMP-787478919",
                         "locality": {"name": "Київ"},
@@ -700,7 +702,7 @@ class RozetkaIncompleteSearchRowStub:
                     "id": "902000003",
                     "created": "2026-08-30 10:00:00",
                     "changed": "2026-08-31 09:15:00",
-                    "status": 26,
+                    "status": 3,
                     "current_seller_comment": "передзвонити покупцю",
                     "cost": 999,
                 }
@@ -746,7 +748,7 @@ def test_rozetka_shipped_generic_changed_time_is_not_treated_as_transition() -> 
         "id": "902000004",
         "created": "2026-08-20 10:00:00",
         "changed": "2026-08-30 18:00:00",
-        "status": 26,
+        "status": 3,
         "delivery": {"ttn": "RMP-787478920"},
         "purchases": [
             {"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}
@@ -820,8 +822,8 @@ def test_rozetka_hydrates_duplicate_search_rows_only_once() -> None:
 
 def test_rozetka_partial_detail_does_not_erase_search_ttn_items_or_status() -> None:
     search = {
-        "status": 26,
-        "status_data": {"id": 26, "name": "Відправлено"},
+        "status": 3,
+        "status_data": {"id": 3, "name": "Передано в службу доставки"},
         "delivery": {"ttn": "RMP-787478919", "city": "Київ"},
         "purchases": [{"item_id": "SKU"}],
     }
@@ -834,8 +836,8 @@ def test_rozetka_partial_detail_does_not_erase_search_ttn_items_or_status() -> N
 
     merged = RozetkaClient._merge_search_and_detail(search, detail)
 
-    assert merged["status"] == 26
-    assert merged["status_data"] == {"id": 26, "name": "Відправлено"}
+    assert merged["status"] == 3
+    assert merged["status_data"] == {"id": 3, "name": "Передано в службу доставки"}
     assert merged["delivery"] == {"ttn": "RMP-787478919", "city": "Київ"}
     assert merged["purchases"] == [{"item_id": "SKU"}]
     assert not RozetkaClient._has_status_fields(detail)
@@ -900,7 +902,7 @@ def test_rozetka_completed_order_uses_earlier_shipped_history_at_month_boundary(
         ],
         "cost": 999,
         "order_status_history": [
-            {"status_id": 26, "created": "2026-08-31 23:50:00"},
+            {"status_id": 3, "created": "2026-08-31 23:50:00"},
             {"status_id": 30, "created": "2026-09-01 12:00:00"},
         ],
     }
@@ -944,7 +946,7 @@ class RozetkaCompletedHistoryDetailStub:
                 "content": {
                     **base,
                     "order_status_history": [
-                        {"status_id": 26, "created": "2026-08-31 23:50:00"},
+                        {"status_id": 3, "created": "2026-08-31 23:50:00"},
                         {"status_id": 30, "created": "2026-09-01 12:00:00"},
                     ],
                 },
