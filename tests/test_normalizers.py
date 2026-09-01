@@ -579,7 +579,7 @@ class RozetkaSearchStub:
         return {"success": True, "content": {"orders": [], "_meta": {"pageCount": 1}}}
 
 
-def test_rozetka_search_requests_shipped_and_completed_orders() -> None:
+def test_rozetka_search_requests_delivery_completed_and_cancelled_types() -> None:
     http = RozetkaSearchStub()
     client = RozetkaClient(
         http,  # type: ignore[arg-type]
@@ -591,13 +591,13 @@ def test_rozetka_search_requests_shipped_and_completed_orders() -> None:
     )
 
     assert client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv"))) == []
-    assert {params["types"] for params in http.params} == {2, 3}
+    assert {params["types"] for params in http.params} == {3, 5, 6}
 
 
 class RozetkaShippedStub:
     def request_json(self, method: str, url: str, **kwargs):
         orders = []
-        if kwargs["params"]["types"] == 2:
+        if kwargs["params"]["types"] == 5:
             orders = [
                 {
                     "id": "902000001",
@@ -696,7 +696,7 @@ class RozetkaIncompleteSearchRowStub:
                 },
             }
         orders = []
-        if kwargs["params"]["types"] == 2:
+        if kwargs["params"]["types"] == 5:
             orders = [
                 {
                     "id": "902000003",
@@ -797,7 +797,7 @@ class RozetkaDuplicateIncompleteRowStub(RozetkaIncompleteSearchRowStub):
         if not url.endswith("/orders/902000003") and kwargs["params"]["types"] == 3:
             copied_kwargs = {
                 **kwargs,
-                "params": {**kwargs["params"], "types": 2},
+                "params": {**kwargs["params"], "types": 5},
             }
             return super().request_json(method, url, **copied_kwargs)
         return super().request_json(method, url, **kwargs)
@@ -879,6 +879,53 @@ def test_rozetka_recovers_missing_search_status_from_details() -> None:
 
     assert len(orders) == 1
     assert orders[0].source_status == "Відправлено"
+
+
+class RozetkaUnknownSearchStatusStub(RozetkaIncompleteSearchRowStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        payload = super().request_json(method, url, **kwargs)
+        if not url.endswith("/orders/902000003"):
+            for order in payload["content"]["orders"]:
+                order["status"] = 999
+                order["status_data"] = {"id": 999, "name": "Новий статус API"}
+        return payload
+
+
+def test_rozetka_recovers_unknown_search_status_from_order_details() -> None:
+    client = RozetkaClient(
+        RozetkaUnknownSearchStatusStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert len(orders) == 1
+    assert orders[0].tracking_number == "RMP-787478919"
+    assert orders[0].source_status == "Відправлено"
+
+
+@pytest.mark.parametrize(
+    ("search_status", "detail_status", "expected"),
+    [
+        ("Відправлено", "", "Відправлено"),
+        ("Відправлено", "Виконано", "Виконано"),
+        ("Відправлено", "Скасовано", "Скасовано"),
+        ("Скасовано", "Відправлено", "Скасовано"),
+        ("", "Відправлено", "Відправлено"),
+    ],
+)
+def test_rozetka_detail_status_can_promote_but_not_regress_search_status(
+    search_status: str,
+    detail_status: str,
+    expected: str,
+) -> None:
+    assert (
+        RozetkaClient._prefer_lifecycle_status(search_status, detail_status) == expected
+    )
 
 
 def test_rozetka_completed_order_uses_earlier_shipped_history_at_month_boundary() -> None:
@@ -1023,7 +1070,7 @@ class RozetkaDetailCommentStub:
                 },
             }
         orders = []
-        if kwargs["params"]["types"] == 2:
+        if kwargs["params"]["types"] == 5:
             orders = [
                 {
                     "id": "902000002",
