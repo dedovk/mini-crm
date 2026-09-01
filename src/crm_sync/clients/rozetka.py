@@ -30,6 +30,11 @@ LOGGER = logging.getLogger(__name__)
 # 6 - received. Status 26 means "processing" and must not be treated as shipped.
 ROZETKA_SHIPPED_STATUS_IDS = frozenset({3, 4, 5})
 ROZETKA_COMPLETED_STATUS_IDS = frozenset({6})
+# `/orders/search?types=` categories: 5 - delivering, 3 - successfully
+# completed, 6 - unsuccessfully completed. These cover insertion plus later
+# completion/cancellation reconciliation without downloading all orders.
+ROZETKA_ORDER_TYPES = (5, 3, 6)
+ROZETKA_STATUS_RANK = {"відправлено": 1, "виконано": 2, "скасовано": 3}
 
 
 def _payment_text(raw: dict[str, Any]) -> str:
@@ -173,9 +178,7 @@ class RozetkaClient:
         observed_at = datetime.now(ZoneInfo(self.timezone))
         orders_by_key: dict[str, Order] = {}
         details_by_order_id: dict[str, dict[str, Any] | None] = {}
-        # Rozetka groups active and completed orders separately. Query both groups
-        # and then keep only the exact business statuses supported by the CRM.
-        for order_type in (2, 3):
+        for order_type in ROZETKA_ORDER_TYPES:
             page_number = 1
             while True:
                 payload = self._request_authorized(
@@ -201,9 +204,6 @@ class RozetkaClient:
                     if not isinstance(raw, dict):
                         continue
                     source_status = self._eligible_source_status(raw)
-                    search_has_status = self._has_status_fields(raw)
-                    if not source_status and search_has_status:
-                        continue
                     normalized_raw = raw
                     # Search rows can omit comments, TTNs, or item lines. Hydrate only
                     # incomplete rows and cache the result across duplicate groups/pages.
@@ -244,7 +244,11 @@ class RozetkaClient:
                             detail = details_by_order_id[order_id]
                             if detail is not None:
                                 if self._has_status_fields(detail):
-                                    source_status = self._eligible_source_status(detail)
+                                    detail_status = self._eligible_source_status(detail)
+                                    source_status = self._prefer_lifecycle_status(
+                                        source_status,
+                                        detail_status,
+                                    )
                                     if not source_status:
                                         LOGGER.info(
                                             "Rozetka order %s became ineligible while details were loaded",
@@ -282,14 +286,18 @@ class RozetkaClient:
                     orders_by_key[key] = (
                         self._merge_order_versions(existing, order) if existing else order
                     )
-                meta = content.get("_meta") or {}
+                meta = content.get("_meta")
                 if not isinstance(meta, dict):
                     raise ApiError("Rozetka order search metadata must be an object")
                 try:
-                    page_count = int(meta.get("pageCount") or page_number)
+                    page_count = int(meta["pageCount"])
+                except KeyError as exc:
+                    raise ApiError(
+                        "Rozetka order search metadata must contain pageCount"
+                    ) from exc
                 except (TypeError, ValueError) as exc:
                     raise ApiError("Rozetka order search pageCount must be an integer") from exc
-                if page_count < page_number or page_count > 10_000:
+                if page_count < 1 or page_count < page_number or page_count > 10_000:
                     raise ApiError(f"Rozetka order search returned invalid pageCount={page_count}")
                 if page_number >= page_count:
                     break
@@ -415,11 +423,10 @@ class RozetkaClient:
     @staticmethod
     def _merge_order_versions(existing: Order, candidate: Order) -> Order:
         """Keep the newest lifecycle state while preserving the first accounting milestone."""
-        rank = {"відправлено": 1, "виконано": 2, "скасовано": 3}
         preferred = (
             candidate
-            if rank.get(candidate.source_status.casefold(), 0)
-            >= rank.get(existing.source_status.casefold(), 0)
+            if ROZETKA_STATUS_RANK.get(candidate.source_status.casefold(), 0)
+            >= ROZETKA_STATUS_RANK.get(existing.source_status.casefold(), 0)
             else existing
         )
         versions = (
@@ -431,6 +438,15 @@ class RozetkaClient:
         preferred.completed_at = earliest[0]
         preferred.completion_is_exact = earliest[1]
         return preferred
+
+    @staticmethod
+    def _prefer_lifecycle_status(current: str, candidate: str) -> str:
+        """Promote an eventually consistent status without lifecycle regression."""
+        if ROZETKA_STATUS_RANK.get(candidate.casefold(), 0) > ROZETKA_STATUS_RANK.get(
+            current.casefold(), 0
+        ):
+            return candidate
+        return current
 
     @classmethod
     def _eligible_source_status(cls, raw: dict[str, Any]) -> str:
