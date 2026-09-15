@@ -181,25 +181,52 @@ class RozetkaClient:
         for order_type in ROZETKA_ORDER_TYPES:
             page_number = 1
             while True:
-                payload = self._request_authorized(
-                    "/orders/search",
-                    params={
-                        "page": page_number,
-                        "changed_from": since.strftime("%Y-%m-%d"),
-                        "types": order_type,
-                        "sort": "-changed",
-                        "expand": (
-                            "user,delivery,purchases,status_data,payment_type_name,"
-                            "payment_status,status_payment,credit_info,order_status_history"
-                        ),
-                    },
+                try:
+                    payload = self._request_authorized(
+                        "/orders/search",
+                        params={
+                            "page": page_number,
+                            "changed_from": since.strftime("%Y-%m-%d"),
+                            "types": order_type,
+                            "sort": "-changed",
+                            "expand": (
+                                "user,delivery,purchases,status_data,payment_type_name,"
+                                "payment_status,status_payment,credit_info,order_status_history"
+                            ),
+                        },
+                    )
+                except ApiError as exc:
+                    raise ApiError(
+                        f"Rozetka order search failed for type={order_type}, page={page_number}: {exc}",
+                        status_code=exc.status_code,
+                    ) from exc
+                try:
+                    content = payload.get("content")
+                    if not isinstance(content, dict):
+                        raise ApiError("content must be an object")
+                    raw_orders = content.get("orders")
+                    if not isinstance(raw_orders, list):
+                        raise ApiError("orders must be a list")
+                    page_count = self._order_search_page_count(
+                        content.get("_meta"),
+                        page_number=page_number,
+                        order_count=len(raw_orders),
+                    )
+                except ApiError as exc:
+                    raise ApiError(
+                        f"Rozetka order search response is invalid for "
+                        f"type={order_type}, page={page_number}: {exc}"
+                    ) from exc
+                LOGGER.debug(
+                    "Rozetka order search type=%s page=%s returned %s raw order(s), pageCount=%s",
+                    order_type,
+                    page_number,
+                    len(raw_orders),
+                    page_count,
                 )
-                content = payload.get("content")
-                if not isinstance(content, dict):
-                    raise ApiError("Rozetka order search content must be an object")
-                raw_orders = content.get("orders")
-                if not isinstance(raw_orders, list):
-                    raise ApiError("Rozetka order search orders must be a list")
+                if page_count == 0:
+                    LOGGER.info("Rozetka order search type=%s returned no orders", order_type)
+                    break
                 for raw in raw_orders:
                     if not isinstance(raw, dict):
                         continue
@@ -286,23 +313,39 @@ class RozetkaClient:
                     orders_by_key[key] = (
                         self._merge_order_versions(existing, order) if existing else order
                     )
-                meta = content.get("_meta")
-                if not isinstance(meta, dict):
-                    raise ApiError("Rozetka order search metadata must be an object")
-                try:
-                    page_count = int(meta["pageCount"])
-                except KeyError as exc:
-                    raise ApiError(
-                        "Rozetka order search metadata must contain pageCount"
-                    ) from exc
-                except (TypeError, ValueError) as exc:
-                    raise ApiError("Rozetka order search pageCount must be an integer") from exc
-                if page_count < 1 or page_count < page_number or page_count > 10_000:
-                    raise ApiError(f"Rozetka order search returned invalid pageCount={page_count}")
                 if page_number >= page_count:
                     break
                 page_number += 1
         return list(orders_by_key.values())
+
+    @staticmethod
+    def _order_search_page_count(
+        meta: Any,
+        *,
+        page_number: int,
+        order_count: int,
+    ) -> int:
+        """Validate order pagination while accepting Rozetka's empty-result sentinel."""
+        if not isinstance(meta, dict):
+            raise ApiError("Rozetka order search metadata must be an object")
+        try:
+            raw_page_count = meta["pageCount"]
+        except KeyError as exc:
+            raise ApiError(
+                "Rozetka order search metadata must contain pageCount"
+            ) from exc
+        if isinstance(raw_page_count, bool) or not isinstance(raw_page_count, int):
+            raise ApiError("Rozetka order search pageCount must be an integer")
+        page_count = raw_page_count
+        if page_count == 0:
+            if page_number == 1 and order_count == 0:
+                return 0
+            raise ApiError(
+                "Rozetka order search returned pageCount=0 with a non-empty or later page"
+            )
+        if page_count < page_number or page_count > 10_000:
+            raise ApiError(f"Rozetka order search returned invalid pageCount={page_count}")
+        return page_count
 
     @staticmethod
     def _status_name(raw: dict[str, Any]) -> str:
