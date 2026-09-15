@@ -594,6 +594,78 @@ def test_rozetka_search_requests_delivery_completed_and_cancelled_types() -> Non
     assert {params["types"] for params in http.params} == {3, 5, 6}
 
 
+class RozetkaEmptyPageCountStub(RozetkaSearchStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        self.params.append(kwargs["params"])
+        return {"success": True, "content": {"orders": [], "_meta": {"pageCount": 0}}}
+
+
+def test_rozetka_accepts_zero_page_count_for_empty_order_types() -> None:
+    http = RozetkaEmptyPageCountStub()
+    client = RozetkaClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    assert client.fetch_orders(datetime(2026, 9, 8, tzinfo=ZoneInfo("Europe/Kyiv"))) == []
+    assert [params["types"] for params in http.params] == [5, 3, 6]
+
+
+class RozetkaLaterTypeNetworkFailureStub(RozetkaSearchStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        order_type = kwargs["params"]["types"]
+        if order_type == 3:
+            raise ApiError("temporary network failure", status_code=503)
+        return super().request_json(method, url, **kwargs)
+
+
+def test_rozetka_propagates_later_type_network_failure_with_context() -> None:
+    client = RozetkaClient(
+        RozetkaLaterTypeNetworkFailureStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    with pytest.raises(ApiError, match=r"type=3, page=1.*temporary network failure") as error:
+        client.fetch_orders(datetime(2026, 9, 8, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert error.value.status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("meta", "page_number", "order_count"),
+    [
+        ({"pageCount": 0}, 1, 1),
+        ({"pageCount": 0}, 2, 0),
+        ({"pageCount": -1}, 1, 0),
+        ({"pageCount": "invalid"}, 1, 0),
+        ({"pageCount": "1"}, 1, 0),
+        ({"pageCount": 1.5}, 1, 0),
+        ({"pageCount": True}, 1, 0),
+        ({}, 1, 0),
+        (None, 1, 0),
+    ],
+)
+def test_rozetka_rejects_inconsistent_or_malformed_order_pagination(
+    meta: object,
+    page_number: int,
+    order_count: int,
+) -> None:
+    with pytest.raises(ApiError):
+        RozetkaClient._order_search_page_count(
+            meta,
+            page_number=page_number,
+            order_count=order_count,
+        )
+
+
 class RozetkaShippedStub:
     def request_json(self, method: str, url: str, **kwargs):
         orders = []
@@ -631,6 +703,39 @@ class RozetkaShippedStub:
         }
 
 
+class RozetkaShippedThenEmptyTypesStub(RozetkaShippedStub):
+    def request_json(self, method: str, url: str, **kwargs):
+        if kwargs["params"]["types"] != 5:
+            return {
+                "success": True,
+                "content": {"orders": [], "_meta": {"pageCount": 0}},
+            }
+        return super().request_json(method, url, **kwargs)
+
+
+class RozetkaSecondPageStub(RozetkaShippedStub):
+    def __init__(self) -> None:
+        self.requests: list[tuple[int, int]] = []
+
+    def request_json(self, method: str, url: str, **kwargs):
+        order_type = kwargs["params"]["types"]
+        page = kwargs["params"]["page"]
+        self.requests.append((order_type, page))
+        if order_type != 5:
+            return {
+                "success": True,
+                "content": {"orders": [], "_meta": {"pageCount": 0}},
+            }
+        if page == 1:
+            return {
+                "success": True,
+                "content": {"orders": [], "_meta": {"pageCount": 2}},
+            }
+        payload = super().request_json(method, url, **kwargs)
+        payload["content"]["_meta"]["pageCount"] = 2
+        return payload
+
+
 def test_rozetka_shipped_order_uses_status_change_date_and_comment() -> None:
     client = RozetkaClient(
         RozetkaShippedStub(),  # type: ignore[arg-type]
@@ -647,6 +752,40 @@ def test_rozetka_shipped_order_uses_status_change_date_and_comment() -> None:
     assert orders[0].source_status == "Відправлено"
     assert orders[0].completed_at.strftime("%d.%m.%Y %H:%M") == "10.08.2026 09:15"
     assert orders[0].note == "предо 400"
+
+
+def test_rozetka_preserves_orders_when_later_types_have_zero_pages() -> None:
+    client = RozetkaClient(
+        RozetkaShippedThenEmptyTypesStub(),  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(datetime(2026, 9, 8, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert len(orders) == 1
+    assert orders[0].external_id == "902000001"
+
+
+def test_rozetka_fetches_orders_from_later_pages_before_empty_types() -> None:
+    http = RozetkaSecondPageStub()
+    client = RozetkaClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        username="",
+        password="",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(datetime(2026, 9, 8, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+    assert len(orders) == 1
+    assert orders[0].external_id == "902000001"
+    assert http.requests == [(5, 1), (5, 2), (3, 1), (6, 1)]
 
 
 @pytest.mark.parametrize(
