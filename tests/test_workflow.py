@@ -8,7 +8,7 @@ def test_runner_queue_timeout_is_longer_than_sync_step_timeout() -> None:
 
     assert "    timeout-minutes: 60" in workflow
     synchronize_block = workflow.split("- name: Synchronize orders", 1)[1]
-    assert "        timeout-minutes: 15" in synchronize_block
+    assert "        timeout-minutes: 30" in synchronize_block
     assert "cancel-in-progress: false" in workflow
     assert "SUPPLIER_IMAXI_SPREADSHEET_ID: ${{ secrets.SUPPLIER_IMAXI_SPREADSHEET_ID }}" in workflow
 

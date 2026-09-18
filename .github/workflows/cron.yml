@@ -18,6 +18,16 @@ on:
         required: false
         default: "7"
         type: string
+      payment_backfill_days:
+        description: "Payment-only Prom history correction; 0 runs the normal synchronization"
+        required: false
+        default: "0"
+        type: string
+      payment_backfill_order_ids:
+        description: "Optional comma-separated Prom order IDs that must be confirmed as paid"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: marketplace-crm-sync
@@ -70,6 +80,8 @@ jobs:
       SENDER_DEFAULT: "наш"
       SENDER_OPTIONS: ${{ secrets.SENDER_OPTIONS || 'imaxi-com,Melad,Melad дроп,наш' }}
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      PAYMENT_BACKFILL_DAYS: ${{ inputs.payment_backfill_days || '0' }}
+      PAYMENT_BACKFILL_ORDER_IDS: ${{ inputs.payment_backfill_order_ids || '' }}
       GITHUB_TOKEN: ${{ github.token }}
 
     steps:
@@ -86,7 +98,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Synchronize orders
-        timeout-minutes: 15
-        run: python -m crm_sync.main
+        timeout-minutes: 30
+        run: |
+          if [ "$PAYMENT_BACKFILL_DAYS" != "0" ]; then
+            python -m crm_sync.payment_backfill
+          else
+            python -m crm_sync.main
+          fi
         env:
           PYTHONPATH: src

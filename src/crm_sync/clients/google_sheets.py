@@ -16,6 +16,7 @@ from crm_sync.integrity import IntegrityReport
 from crm_sync.models import (
     Order,
     OrderAuditEvent,
+    PaymentBackfillResult,
     ResolvedSupplierCost,
     ShipmentStatus,
     ShipmentStatusChange,
@@ -62,6 +63,7 @@ from crm_sync.sheet_schema import (
     LAST_COLUMN_LETTER,
     NOVA_POSHTA_STATUS_OPTIONS,
     PAYMENT_OPTIONS,
+    PROM_PAYMENT_METHOD,
 )
 from crm_sync.sheet_snapshot import (
     DAY_DATE_LABEL,
@@ -139,8 +141,161 @@ class GoogleSheetsGateway:
     def append_audit_events(self, events: list[OrderAuditEvent]) -> int:
         return append_sheet_audit_events(self.spreadsheet, events)
 
+    def _existing_audit_details(self) -> set[str]:
+        """Return audit idempotency markers already persisted in column J."""
+        audit = ensure_sheet_audit_worksheet(self.spreadsheet)
+        return {
+            str(value).strip()
+            for row in audit.get_all_values()
+            for value in row[9:10]
+            if str(value).strip()
+        }
+
     def create_backup(self, *, created_at: datetime) -> str:
         return create_sheet_backup(self.spreadsheet, self.worksheet, created_at=created_at)
+
+    def backfill_prom_payments(
+        self,
+        orders: list[Order],
+        *,
+        observed_at: datetime,
+        apply_changes: bool,
+        expected_order_ids: set[str] | None = None,
+    ) -> PaymentBackfillResult:
+        """Correct confirmed Prom payments without rebuilding or reordering the sheet."""
+        expected_by_key = {
+            order.sync_key.casefold(): order
+            for order in orders
+            if order.source.casefold() == "prom" and order.payment_method == PROM_PAYMENT_METHOD
+        }
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        sheet_prom_keys = {
+            str(row[COLUMNS.sync_key - 1]).strip().casefold()
+            for row in values
+            if len(row) >= COLUMNS.sync_key
+            and str(row[COLUMNS.row_type - 1]).strip() == ROW_ORDER
+            and str(row[COLUMNS.sync_key - 1]).strip().casefold().startswith("prom:")
+        }
+        matched_keys = sheet_prom_keys & set(expected_by_key)
+        candidate_order_ids = {order.external_id for order in expected_by_key.values()}
+        missing_expected_ids = tuple(
+            sorted((expected_order_ids or set()) - candidate_order_ids)
+        )
+        protected_keys = {
+            str(row[COLUMNS.sync_key - 1]).strip().casefold()
+            for row in values
+            if len(row) >= COLUMNS.sync_key
+            and (
+                decimal_value(row[COLUMNS.prepayment - 1] if len(row) >= COLUMNS.prepayment else "")
+                > 0
+                or (
+                    str(row[COLUMNS.payment_method - 1]).strip().casefold()
+                    if len(row) >= COLUMNS.payment_method
+                    else ""
+                )
+                in {"смешанная", "оплата частями", "оплата на счет", "зачет"}
+            )
+        }
+        conflicting_keys: set[str] = set()
+        for row in values:
+            if len(row) < COLUMNS.sync_key or str(row[COLUMNS.row_type - 1]).strip() != ROW_ORDER:
+                continue
+            sync_key = str(row[COLUMNS.sync_key - 1]).strip().casefold()
+            order = expected_by_key.get(sync_key)
+            if not order:
+                continue
+            visible_source = (
+                str(row[COLUMNS.source - 1]).strip().casefold()
+                if len(row) >= COLUMNS.source
+                else ""
+            )
+            visible_order_id = (
+                str(row[COLUMNS.order_number - 1]).strip()
+                if len(row) >= COLUMNS.order_number
+                else ""
+            )
+            if (visible_source and "prom" not in visible_source) or (
+                visible_order_id and visible_order_id != order.external_id
+            ):
+                conflicting_keys.add(sync_key)
+        updates: list[dict[str, Any]] = []
+        changed_orders: dict[str, tuple[Order, str]] = {}
+        for row_number, row in enumerate(values, start=1):
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            )
+            if row_type != ROW_ORDER:
+                continue
+            sync_key = (
+                str(row[COLUMNS.sync_key - 1]).strip().casefold()
+                if len(row) >= COLUMNS.sync_key
+                else ""
+            )
+            order = expected_by_key.get(sync_key)
+            if not order or sync_key in protected_keys or sync_key in conflicting_keys:
+                continue
+            current = (
+                str(row[COLUMNS.payment_method - 1]).strip()
+                if len(row) >= COLUMNS.payment_method
+                else ""
+            )
+            if current.casefold() != "наложка":
+                continue
+            updates.append(
+                {
+                    "range": rowcol_to_a1(row_number, COLUMNS.payment_method),
+                    "values": [[order.payment_method]],
+                }
+            )
+            changed_orders.setdefault(sync_key, (order, current))
+
+        events = tuple(
+            OrderAuditEvent(
+                occurred_at=observed_at,
+                event_type="Виправлено спосіб оплати",
+                source=order.source,
+                order_id=order.external_id,
+                sync_key=order.sync_key,
+                tracking_number=order.tracking_number,
+                field="Спосіб оплати",
+                old_value=old_value,
+                new_value=order.payment_method,
+                details=(
+                    f"prom-payment-backfill:{order.sync_key.casefold()}:{PROM_PAYMENT_METHOD}"
+                ),
+            )
+            for order, old_value in changed_orders.values()
+        )
+        if not apply_changes or not updates:
+            return PaymentBackfillResult(
+                cell_updates=len(updates),
+                order_updates=len(changed_orders),
+                audit_events=events,
+                sheet_order_count=len(sheet_prom_keys),
+                authoritative_candidates=len(expected_by_key),
+                api_order_matches=len(matched_keys),
+                unmatched_sheet_orders=len(sheet_prom_keys - set(expected_by_key)),
+                missing_expected_order_ids=missing_expected_ids,
+            )
+
+        backup_name = self.create_backup(created_at=observed_at)
+        existing_audit_details = self._existing_audit_details()
+        missing_events = [event for event in events if event.details not in existing_audit_details]
+        if missing_events:
+            self.append_audit_events(missing_events)
+        for start in range(0, len(updates), 400):
+            self.worksheet.batch_update(updates[start : start + 400], raw=True)
+        return PaymentBackfillResult(
+            cell_updates=len(updates),
+            order_updates=len(changed_orders),
+            audit_events=events,
+            backup_name=backup_name,
+            sheet_order_count=len(sheet_prom_keys),
+            authoritative_candidates=len(expected_by_key),
+            api_order_matches=len(matched_keys),
+            unmatched_sheet_orders=len(sheet_prom_keys - set(expected_by_key)),
+            missing_expected_order_ids=missing_expected_ids,
+        )
 
     def record_sync_health(
         self,
@@ -376,21 +531,17 @@ class GoogleSheetsGateway:
 
         for row_number, row in enumerate(values, start=1):
             row_type = (
-                str(row[COLUMNS.row_type - 1]).strip()
-                if len(row) >= COLUMNS.row_type
-                else ""
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
             )
             for column, value in enumerate(row, start=1):
                 rendered = str(value).strip()
                 if rendered in formula_errors:
                     repairable = (
-                        row_type == ROW_ORDER
-                        and column in {COLUMNS.markup, COLUMNS.net_profit}
+                        row_type == ROW_ORDER and column in {COLUMNS.markup, COLUMNS.net_profit}
                     ) or row_type in managed_report_rows
                     prefix = "repairable " if repairable else ""
                     errors.append(
-                        f"{prefix}formula error at "
-                        f"{rowcol_to_a1(row_number, column)}: {rendered}"
+                        f"{prefix}formula error at {rowcol_to_a1(row_number, column)}: {rendered}"
                     )
             if row_type != ROW_ORDER:
                 continue
@@ -409,7 +560,9 @@ class GoogleSheetsGateway:
             raw_total = row[COLUMNS.order_total - 1] if len(row) >= COLUMNS.order_total else ""
             if str(raw_total).strip():
                 totals_by_key.setdefault(sync_key, set()).add(decimal_value(raw_total))
-            if not str(row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else "").strip():
+            if not str(
+                row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else ""
+            ).strip():
                 missing_completion_keys.add(sync_key)
 
         for sync_key, row_numbers in rows_by_key.items():
@@ -502,7 +655,9 @@ class GoogleSheetsGateway:
         typed_rows: dict[str, list[int]] = {}
         order_groups: dict[str, list[int]] = {}
         for row_number, row in enumerate(values, start=1):
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            )
             if (
                 row
                 and str(row[0]).strip().casefold() == BUSINESS_HEADERS[0].casefold()
@@ -696,10 +851,14 @@ class GoogleSheetsGateway:
                                 },
                                 "cell": {
                                     "userEnteredFormat": {
-                                        "backgroundColorStyle": {"rgbColor": self._hex_color(fill_hex)},
+                                        "backgroundColorStyle": {
+                                            "rgbColor": self._hex_color(fill_hex)
+                                        },
                                         "textFormat": {
                                             "bold": True,
-                                            "foregroundColorStyle": {"rgbColor": self._hex_color(font_hex)},
+                                            "foregroundColorStyle": {
+                                                "rgbColor": self._hex_color(font_hex)
+                                            },
                                             "fontSize": font_size,
                                         },
                                         "horizontalAlignment": "CENTER",
@@ -727,44 +886,46 @@ class GoogleSheetsGateway:
         for order_index, row_number in enumerate(typed_rows.get(ROW_ORDER, [])):
             requests.extend(
                 [
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": row_number - 1,
-                            "endRowIndex": row_number,
-                            "startColumnIndex": 0,
-                            "endColumnIndex": len(BUSINESS_HEADERS),
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "backgroundColorStyle": {
-                                    "rgbColor": self._hex_color("#F3F8FC" if order_index % 2 else "#FFFFFF")
-                                },
-                                "textFormat": {"fontFamily": "Arial", "fontSize": 8},
-                                "borders": {
-                                    "bottom": {
-                                        "style": "SOLID",
-                                        "colorStyle": {"rgbColor": self._hex_color("#D9E0E7")},
-                                    }
-                                },
-                            }
-                        },
-                        "fields": "userEnteredFormat(backgroundColorStyle,textFormat,borders.bottom)",
-                    }
-                },
-                {
-                    "updateDimensionProperties": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "dimension": "ROWS",
-                            "startIndex": row_number - 1,
-                            "endIndex": row_number,
-                        },
-                        "properties": {"pixelSize": 44},
-                        "fields": "pixelSize",
-                    }
-                },
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": row_number - 1,
+                                "endRowIndex": row_number,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": len(BUSINESS_HEADERS),
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "backgroundColorStyle": {
+                                        "rgbColor": self._hex_color(
+                                            "#F3F8FC" if order_index % 2 else "#FFFFFF"
+                                        )
+                                    },
+                                    "textFormat": {"fontFamily": "Arial", "fontSize": 8},
+                                    "borders": {
+                                        "bottom": {
+                                            "style": "SOLID",
+                                            "colorStyle": {"rgbColor": self._hex_color("#D9E0E7")},
+                                        }
+                                    },
+                                }
+                            },
+                            "fields": "userEnteredFormat(backgroundColorStyle,textFormat,borders.bottom)",
+                        }
+                    },
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": row_number - 1,
+                                "endIndex": row_number,
+                            },
+                            "properties": {"pixelSize": 44},
+                            "fields": "pixelSize",
+                        }
+                    },
                 ]
             )
 
@@ -831,7 +992,11 @@ class GoogleSheetsGateway:
                             "startColumnIndex": column - 1,
                             "endColumnIndex": column,
                         },
-                        "cell": {"userEnteredFormat": {"numberFormat": {"type": format_type, "pattern": pattern}}},
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {"type": format_type, "pattern": pattern}
+                            }
+                        },
                         "fields": "userEnteredFormat.numberFormat",
                     }
                 }
@@ -841,21 +1006,21 @@ class GoogleSheetsGateway:
             requests.extend(
                 [
                     {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": row_number - 1,
-                            "endRowIndex": row_number,
-                            "startColumnIndex": 1,
-                            "endColumnIndex": 2,
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "numberFormat": {"type": "DATE", "pattern": "dd.mm.yyyy"}
-                            }
-                        },
-                        "fields": "userEnteredFormat.numberFormat",
-                    }
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": row_number - 1,
+                                "endRowIndex": row_number,
+                                "startColumnIndex": 1,
+                                "endColumnIndex": 2,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "numberFormat": {"type": "DATE", "pattern": "dd.mm.yyyy"}
+                                }
+                            },
+                            "fields": "userEnteredFormat.numberFormat",
+                        }
                     },
                     {
                         "repeatCell": {
@@ -933,11 +1098,15 @@ class GoogleSheetsGateway:
                             },
                             "cell": {
                                 "userEnteredFormat": {
-                                    "backgroundColorStyle": {"rgbColor": self._hex_color("#2F75B5")},
+                                    "backgroundColorStyle": {
+                                        "rgbColor": self._hex_color("#2F75B5")
+                                    },
                                     "textFormat": {
                                         "bold": True,
                                         "fontSize": 8,
-                                        "foregroundColorStyle": {"rgbColor": self._hex_color("#FFFFFF")},
+                                        "foregroundColorStyle": {
+                                            "rgbColor": self._hex_color("#FFFFFF")
+                                        },
                                     },
                                 }
                             },
@@ -1007,8 +1176,7 @@ class GoogleSheetsGateway:
                             }
                         },
                         "fields": (
-                            "userEnteredFormat.textFormat.fontSize,"
-                            "userEnteredFormat.wrapStrategy"
+                            "userEnteredFormat.textFormat.fontSize,userEnteredFormat.wrapStrategy"
                         ),
                     }
                 },
@@ -1037,7 +1205,11 @@ class GoogleSheetsGateway:
             "startColumnIndex": 0,
             "endColumnIndex": len(BUSINESS_HEADERS),
         }
-        status_range = dict(data_range, startColumnIndex=COLUMNS.shipment_status - 1, endColumnIndex=COLUMNS.shipment_status)
+        status_range = dict(
+            data_range,
+            startColumnIndex=COLUMNS.shipment_status - 1,
+            endColumnIndex=COLUMNS.shipment_status,
+        )
 
         def rule(text: str, color: str) -> dict[str, Any]:
             return {
@@ -1045,8 +1217,13 @@ class GoogleSheetsGateway:
                     "rule": {
                         "ranges": [status_range],
                         "booleanRule": {
-                            "condition": {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": text}]},
-                            "format": {"backgroundColorStyle": {"rgbColor": self._hex_color(color)}},
+                            "condition": {
+                                "type": "TEXT_CONTAINS",
+                                "values": [{"userEnteredValue": text}],
+                            },
+                            "format": {
+                                "backgroundColorStyle": {"rgbColor": self._hex_color(color)}
+                            },
                         },
                     },
                     "index": 0,
@@ -1068,16 +1245,14 @@ class GoogleSheetsGateway:
                             "values": [
                                 {
                                     "userEnteredValue": (
-                                        f'=${reporting_column}{self.header_row + 1}='
+                                        f"=${reporting_column}{self.header_row + 1}="
                                         f'"{REPORTING_EXCLUDED_REFUSAL}"'
                                     )
                                 }
                             ],
                         },
                         "format": {
-                            "backgroundColorStyle": {
-                                "rgbColor": self._hex_color("#F4CCCC")
-                            }
+                            "backgroundColorStyle": {"rgbColor": self._hex_color("#F4CCCC")}
                         },
                     },
                 },
@@ -1099,14 +1274,10 @@ class GoogleSheetsGateway:
                             "values": [{"userEnteredValue": "0"}],
                         },
                         "format": {
-                            "backgroundColorStyle": {
-                                "rgbColor": self._hex_color("#F4CCCC")
-                            },
+                            "backgroundColorStyle": {"rgbColor": self._hex_color("#F4CCCC")},
                             "textFormat": {
                                 "bold": True,
-                                "foregroundColorStyle": {
-                                    "rgbColor": self._hex_color("#9C0006")
-                                },
+                                "foregroundColorStyle": {"rgbColor": self._hex_color("#9C0006")},
                             },
                         },
                     },
@@ -1138,7 +1309,9 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values()
         keys: set[str] = set()
         for row in values:
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            )
             if row_type and row_type != ROW_ORDER:
                 continue
             if len(row) >= COLUMNS.sync_key and str(row[COLUMNS.sync_key - 1]).strip():
@@ -1147,7 +1320,11 @@ class GoogleSheetsGateway:
                     keys.add(key)
                 continue
             source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
-            order_id = str(row[COLUMNS.order_number - 1]).strip() if len(row) >= COLUMNS.order_number else ""
+            order_id = (
+                str(row[COLUMNS.order_number - 1]).strip()
+                if len(row) >= COLUMNS.order_number
+                else ""
+            )
             if source and order_id:
                 keys.add(f"{source.casefold()}:{order_id}")
         return keys
@@ -1155,9 +1332,7 @@ class GoogleSheetsGateway:
     def latest_layout_day(self) -> date | None:
         """Return the newest explicit day section without reading business columns."""
         row_type_column = rowcol_to_a1(1, COLUMNS.row_type).rstrip("1")
-        operational_date_column = rowcol_to_a1(
-            1, COLUMNS.operational_date
-        ).rstrip("1")
+        operational_date_column = rowcol_to_a1(1, COLUMNS.operational_date).rstrip("1")
         values = self.worksheet.get(
             f"{row_type_column}1:{operational_date_column}{self.worksheet.row_count}",
             value_render_option="UNFORMATTED_VALUE",
@@ -1192,29 +1367,23 @@ class GoogleSheetsGateway:
                 continue
             has_supplier_prepayment = any(
                 tracking_match_key(
-                    row[COLUMNS.tracking_number - 1]
-                    if len(row) >= COLUMNS.tracking_number
-                    else ""
+                    row[COLUMNS.tracking_number - 1] if len(row) >= COLUMNS.tracking_number else ""
                 )
                 in supplier_prepayments
                 for row in rows
             )
-            has_prepayment = has_supplier_prepayment or any(
-                row_has_prepayment(row) for row in rows
-            )
+            has_prepayment = has_supplier_prepayment or any(row_has_prepayment(row) for row in rows)
             if not has_prepayment and not quarantine_unverified_refusals:
                 return True
             if not has_prepayment and all(
                 len(row) >= COLUMNS.reporting_state
-                and str(row[COLUMNS.reporting_state - 1]).strip()
-                == REPORTING_EXCLUDED_REFUSAL
+                and str(row[COLUMNS.reporting_state - 1]).strip() == REPORTING_EXCLUDED_REFUSAL
                 for row in rows
             ):
                 continue
             if any(
                 len(row) < COLUMNS.reporting_state
-                or str(row[COLUMNS.reporting_state - 1]).strip()
-                != REPORTING_EXCLUDED_REFUSAL
+                or str(row[COLUMNS.reporting_state - 1]).strip() != REPORTING_EXCLUDED_REFUSAL
                 for row in rows
             ):
                 return True
@@ -1224,7 +1393,9 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values()
         numbers: list[str] = []
         for row in values:
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            )
             if row_type and row_type != ROW_ORDER:
                 continue
             raw_tracking = (
@@ -1253,7 +1424,9 @@ class GoogleSheetsGateway:
         updates: list[dict[str, Any]] = []
         changes: dict[str, ShipmentStatusChange] = {}
         for row_number, row in enumerate(values, start=1):
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            )
             if row_type and row_type != ROW_ORDER:
                 continue
             raw_tracking = (
@@ -1278,9 +1451,7 @@ class GoogleSheetsGateway:
                     }
                 )
                 sync_key = (
-                    str(row[COLUMNS.sync_key - 1]).strip()
-                    if len(row) >= COLUMNS.sync_key
-                    else ""
+                    str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
                 )
                 source = source_key(row[COLUMNS.source - 1] if len(row) >= COLUMNS.source else "")
                 order_id = (
@@ -1311,7 +1482,9 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values(value_render_option="FORMULA")
         rows_by_key: dict[str, list[tuple[int, list[str]]]] = {}
         for row_number, row in enumerate(values, start=1):
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            )
             if row_type != ROW_ORDER:
                 continue
             key = (
@@ -1325,6 +1498,25 @@ class GoogleSheetsGateway:
         updates: list[dict[str, Any]] = []
         for key, sheet_rows in rows_by_key.items():
             order = order_by_key.get(key)
+            protected_prom_payment = bool(
+                order
+                and order.payment_method == PROM_PAYMENT_METHOD
+                and any(
+                    decimal_value(
+                        sheet_row[COLUMNS.prepayment - 1]
+                        if len(sheet_row) >= COLUMNS.prepayment
+                        else ""
+                    )
+                    > 0
+                    or (
+                        str(sheet_row[COLUMNS.payment_method - 1]).strip().casefold()
+                        if len(sheet_row) >= COLUMNS.payment_method
+                        else ""
+                    )
+                    in {"смешанная", "оплата частями", "оплата на счет", "зачет"}
+                    for _, sheet_row in sheet_rows
+                )
+            )
             customer = ""
             if order:
                 customer = customer_display(order.city, order.customer_name)
@@ -1332,9 +1524,7 @@ class GoogleSheetsGateway:
                 if order and order.channel:
                     desired_source = source_display(order.channel or order.source)
                     current_source = (
-                        str(row[COLUMNS.source - 1]).strip()
-                        if len(row) >= COLUMNS.source
-                        else ""
+                        str(row[COLUMNS.source - 1]).strip() if len(row) >= COLUMNS.source else ""
                     )
                     if current_source != desired_source:
                         updates.append(
@@ -1359,11 +1549,7 @@ class GoogleSheetsGateway:
                 # Existing Rozetka rows keep the date on which they first
                 # entered the CRM. Shipment-status refreshes may update the
                 # status/details, but must never move rows between day blocks.
-                if (
-                    order
-                    and order.completion_is_exact
-                    and order.source.casefold() != "rozetka"
-                ):
+                if order and order.completion_is_exact and order.source.casefold() != "rozetka":
                     completion_date = order.completed_at.date()
                     current_completion_date = parse_sheet_date(
                         row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else ""
@@ -1388,7 +1574,11 @@ class GoogleSheetsGateway:
                             }
                         )
                 if customer:
-                    current = str(row[COLUMNS.customer - 1]).strip() if len(row) >= COLUMNS.customer else ""
+                    current = (
+                        str(row[COLUMNS.customer - 1]).strip()
+                        if len(row) >= COLUMNS.customer
+                        else ""
+                    )
                     if current != customer:
                         updates.append(
                             {
@@ -1431,7 +1621,9 @@ class GoogleSheetsGateway:
                         and existing_quantity > 0
                         and existing_line_total > 1
                     ):
-                        numeric_updates[COLUMNS.unit_price] = existing_line_total / existing_quantity
+                        numeric_updates[COLUMNS.unit_price] = (
+                            existing_line_total / existing_quantity
+                        )
                     for column, expected in numeric_updates.items():
                         current = row[column - 1] if len(row) >= column else ""
                         if decimal_value(current) != expected:
@@ -1442,7 +1634,9 @@ class GoogleSheetsGateway:
                                 }
                             )
                 if order and item_index == 0:
-                    current_total = row[COLUMNS.order_total - 1] if len(row) >= COLUMNS.order_total else ""
+                    current_total = (
+                        row[COLUMNS.order_total - 1] if len(row) >= COLUMNS.order_total else ""
+                    )
                     if decimal_value(current_total) != order.total:
                         updates.append(
                             {
@@ -1515,9 +1709,7 @@ class GoogleSheetsGateway:
                         order.advertising_cost, effective_installment
                     )
                     current_advertising = (
-                        row[COLUMNS.advertising - 1]
-                        if len(row) >= COLUMNS.advertising
-                        else ""
+                        row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
                     )
                     if str(current_advertising) != str(expected_advertising):
                         updates.append(
@@ -1528,9 +1720,7 @@ class GoogleSheetsGateway:
                         )
                     prepayment = order.prepayment or parse_prepayment(order.note)
                     current_prepayment = (
-                        row[COLUMNS.prepayment - 1]
-                        if len(row) >= COLUMNS.prepayment
-                        else ""
+                        row[COLUMNS.prepayment - 1] if len(row) >= COLUMNS.prepayment else ""
                     )
                     if prepayment > 0 and decimal_value(current_prepayment) == 0:
                         updates.append(
@@ -1539,13 +1729,17 @@ class GoogleSheetsGateway:
                                 "values": [[decimal_for_sheet(prepayment)]],
                             }
                         )
-                if order and order.payment_method:
+                if order and order.payment_method and not protected_prom_payment:
                     current = (
                         str(row[COLUMNS.payment_method - 1]).strip()
                         if len(row) >= COLUMNS.payment_method
                         else ""
                     )
-                    if current != order.payment_method:
+                    transition_allowed = (
+                        order.payment_method != PROM_PAYMENT_METHOD
+                        or current.casefold() == "наложка"
+                    )
+                    if current != order.payment_method and transition_allowed:
                         updates.append(
                             {
                                 "range": rowcol_to_a1(row_number, COLUMNS.payment_method),
@@ -1600,7 +1794,9 @@ class GoogleSheetsGateway:
         event_keys: set[str] = set()
 
         for row_number, row in enumerate(values, start=1):
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            )
             if row_type != ROW_ORDER:
                 continue
             key = (
@@ -1641,10 +1837,7 @@ class GoogleSheetsGateway:
                 if order.completion_is_exact
                 else stored_day or observed_at.date()
             )
-            if (
-                order.source.casefold() != "rozetka"
-                and current_completion != desired_status_day
-            ):
+            if order.source.casefold() != "rozetka" and current_completion != desired_status_day:
                 updates.append(
                     {
                         "range": rowcol_to_a1(row_number, COLUMNS.order_date),
@@ -1690,7 +1883,9 @@ class GoogleSheetsGateway:
         values = self.worksheet.get_all_values(value_render_option="FORMULA")
         updates: list[dict[str, Any]] = []
         for row_number, row in enumerate(values, start=1):
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            )
             marker_source = str(row[0]).strip().casefold() if row else ""
             marker_ttn = str(row[1]).strip().casefold() if len(row) > 1 else ""
             if row_type == ROW_HEADER or (
@@ -1763,13 +1958,17 @@ class GoogleSheetsGateway:
         rows_by_order: dict[str, list[tuple[int, list[Any]]]] = {}
         wanted_source = source_key(source)
         for row_number, row in enumerate(values, start=1):
-            row_type = str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            row_type = (
+                str(row[COLUMNS.row_type - 1]).strip() if len(row) >= COLUMNS.row_type else ""
+            )
             if row_type != ROW_ORDER:
                 continue
             row_source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
             if row_source != wanted_source:
                 continue
-            sync_key = str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
+            sync_key = (
+                str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
+            )
             order_id = sync_key.split(":", 1)[1].strip() if ":" in sync_key else ""
             if not order_id and len(row) >= COLUMNS.order_number:
                 order_id = str(row[COLUMNS.order_number - 1]).strip()
@@ -1810,7 +2009,10 @@ class GoogleSheetsGateway:
                                 "values": [[""]],
                             }
                         )
-                    if len(row) >= COLUMNS.advertising and str(row[COLUMNS.advertising - 1]).strip():
+                    if (
+                        len(row) >= COLUMNS.advertising
+                        and str(row[COLUMNS.advertising - 1]).strip()
+                    ):
                         updates.append(
                             {
                                 "range": rowcol_to_a1(row_number, COLUMNS.advertising),
@@ -1833,9 +2035,7 @@ class GoogleSheetsGateway:
         normalized_costs = _with_melad_provenance_fallbacks(values, normalized_costs)
         if not normalized_costs:
             return SupplierCostUpdateResult()
-        candidates, warnings = _discover_supplier_cost_candidates(
-            values, normalized_costs
-        )
+        candidates, warnings = _discover_supplier_cost_candidates(values, normalized_costs)
         if not candidates:
             return SupplierCostUpdateResult(warnings=tuple(warnings))
 
@@ -1858,9 +2058,7 @@ class GoogleSheetsGateway:
             latest_cost = _cell_value(latest_row, COLUMNS.cost)
             latest_markup = _cell_value(latest_row, COLUMNS.markup)
             latest_net_profit = _cell_value(latest_row, COLUMNS.net_profit)
-            latest_source = str(
-                _cell_value(latest_row, COLUMNS.supplier_cost_source)
-            ).strip()
+            latest_source = str(_cell_value(latest_row, COLUMNS.supplier_cost_source)).strip()
             if (
                 tracking_match_key(latest_tracking) != key.tracking_number
                 or product_code_match_key(latest_product_code) != key.product_code
@@ -1876,9 +2074,7 @@ class GoogleSheetsGateway:
                     )
                     continue
             sheet_value = _supplier_sheet_value(expected, candidate.rate)
-            cost_changed = not _supplier_cost_values_equal(
-                latest_cost, sheet_value, expected
-            )
+            cost_changed = not _supplier_cost_values_equal(latest_cost, sheet_value, expected)
             row_updates: list[dict[str, Any]] = []
             if cost_changed:
                 changed_costs += 1
@@ -1909,9 +2105,7 @@ class GoogleSheetsGateway:
                             "values": [[expected_formula]],
                         }
                     )
-            supplier_sender = SUPPLIER_SENDER_DEFAULTS.get(
-                expected.source, expected.sender
-            )
+            supplier_sender = SUPPLIER_SENDER_DEFAULTS.get(expected.source, expected.sender)
             assign_supplier_sender = (
                 bool(supplier_sender) and str(latest_sender).strip() != supplier_sender
             )
@@ -1924,7 +2118,9 @@ class GoogleSheetsGateway:
                 )
             if not cost_changed and not assign_supplier_sender and not formula_needs_repair:
                 continue
-            sync_key = str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
+            sync_key = (
+                str(row[COLUMNS.sync_key - 1]).strip() if len(row) >= COLUMNS.sync_key else ""
+            )
             source = source_key(row[COLUMNS.source - 1]) if len(row) >= COLUMNS.source else ""
             order_id = (
                 str(row[COLUMNS.order_number - 1]).strip()
@@ -1977,9 +2173,7 @@ class GoogleSheetsGateway:
         for offset in range(0, len(primary_update_bundles), bundles_per_request):
             bundled_updates = [
                 update
-                for bundle in primary_update_bundles[
-                    offset : offset + bundles_per_request
-                ]
+                for bundle in primary_update_bundles[offset : offset + bundles_per_request]
                 for update in bundle
             ]
             self.worksheet.batch_update(
@@ -2013,7 +2207,7 @@ class GoogleSheetsGateway:
     ) -> int:
         if not orders and not force_rebuild:
             return 0
-        observation_day = (observed_at.date() if observed_at else operational_day)
+        observation_day = observed_at.date() if observed_at else operational_day
         existing_values = self.worksheet.get_all_values(value_render_option="FORMULA")
         daily_usd_rates = _extract_daily_usd_rate_values(existing_values)
         order_groups = collect_order_groups(
@@ -2111,9 +2305,7 @@ class GoogleSheetsGateway:
         )
         expected_reporting = ALL_HEADERS[COLUMNS.reporting_state - 1].casefold()
         supplier_metadata_headers = tuple(
-            str(headers[column - 1]).strip().casefold()
-            if len(headers) >= column
-            else ""
+            str(headers[column - 1]).strip().casefold() if len(headers) >= column else ""
             for column in (
                 COLUMNS.supplier_cost_source,
                 COLUMNS.supplier_cost_currency,
@@ -2169,9 +2361,7 @@ def _normalize_supplier_costs(
     for key, value in costs.items():
         tracking = tracking_match_key(key.tracking_number)
         if tracking:
-            normalized[
-                SupplierCostKey(tracking, product_code_match_key(key.product_code))
-            ] = value
+            normalized[SupplierCostKey(tracking, product_code_match_key(key.product_code))] = value
     return normalized
 
 
@@ -2185,10 +2375,8 @@ def _with_melad_provenance_fallbacks(
         if str(_cell_value(row, COLUMNS.row_type)).strip() != ROW_ORDER:
             continue
         if (
-            str(_cell_value(row, COLUMNS.supplier_cost_source)).strip()
-            != MELAD_SUPPLIER_SOURCE
-            or str(_cell_value(row, COLUMNS.supplier_cost_currency)).strip().upper()
-            != "USD"
+            str(_cell_value(row, COLUMNS.supplier_cost_source)).strip() != MELAD_SUPPLIER_SOURCE
+            or str(_cell_value(row, COLUMNS.supplier_cost_currency)).strip().upper() != "USD"
         ):
             continue
         tracking = tracking_match_key(_cell_value(row, COLUMNS.tracking_number))
@@ -2248,12 +2436,8 @@ def _discover_supplier_cost_candidates(
         if expected is None:
             continue
         current_cost = _cell_value(row, COLUMNS.cost)
-        current_source = str(
-            _cell_value(row, COLUMNS.supplier_cost_source)
-        ).strip()
-        can_refresh = (
-            expected.record.currency == "USD" and current_source == expected.source
-        )
+        current_source = str(_cell_value(row, COLUMNS.supplier_cost_source)).strip()
+        can_refresh = expected.record.currency == "USD" and current_source == expected.source
         if str(current_cost).strip() and not can_refresh:
             continue
         operational_day = _row_operational_day(row)
@@ -2261,11 +2445,7 @@ def _discover_supplier_cost_candidates(
         if expected.record.currency == "USD" and rate is None:
             if operational_day and operational_day not in warned_days:
                 raw_rate = raw_rates.get(operational_day, "")
-                reason = (
-                    "is empty"
-                    if str(raw_rate).strip() == ""
-                    else f"is invalid ({raw_rate!r})"
-                )
+                reason = "is empty" if str(raw_rate).strip() == "" else f"is invalid ({raw_rate!r})"
                 warnings.append(
                     f"{expected.sender or expected.source} costs for "
                     f"{operational_day:%d.%m.%Y} were skipped: daily USD rate {reason}"
@@ -2302,9 +2482,7 @@ def _supplier_sheet_value(
         if record.currency == "USD":
             if rate is None:
                 raise ValueError("USD supplier cost is missing its daily rate")
-            numeric_cost = (numeric_cost * rate).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
+            numeric_cost = (numeric_cost * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return decimal_for_sheet(numeric_cost)
     if record.kind == "prepayment":
         return "предоплата"
@@ -2356,9 +2534,7 @@ def _append_supplier_cost_cell_updates(
                 f"{rowcol_to_a1(row_number, COLUMNS.supplier_cost_source)}:"
                 f"{rowcol_to_a1(row_number, COLUMNS.supplier_cost_original)}"
             ),
-            "values": [
-                [expected.source, expected.record.currency, original_value]
-            ],
+            "values": [[expected.source, expected.record.currency, original_value]],
         }
     )
 
@@ -2372,11 +2548,7 @@ def _parse_usd_rate(value: Any) -> Decimal | None:
         rate = Decimal(raw.replace(",", "."))
     except InvalidOperation:
         return None
-    return (
-        rate
-        if rate.is_finite() and _MIN_USD_RATE <= rate <= _MAX_USD_RATE
-        else None
-    )
+    return rate if rate.is_finite() and _MIN_USD_RATE <= rate <= _MAX_USD_RATE else None
 
 
 def _daily_usd_rates(
@@ -2408,7 +2580,4 @@ def _daily_usd_rates(
 def _extract_daily_usd_rate_values(rows: list[list[Any]]) -> dict[date, Any]:
     """Preserve user-entered daily rates during structural sheet rebuilds."""
     raw_rates, _, _ = _daily_usd_rates(rows)
-    return {
-        day: "" if value == "duplicate day rows" else value
-        for day, value in raw_rates.items()
-    }
+    return {day: "" if value == "duplicate day rows" else value for day, value in raw_rates.items()}

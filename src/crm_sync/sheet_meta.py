@@ -44,7 +44,8 @@ def append_sheet_audit_events(spreadsheet: Any, events: list[OrderAuditEvent]) -
         ]
         for event in events
     ]
-    audit.append_rows(rows, value_input_option="USER_ENTERED")
+    for start in range(0, len(rows), 500):
+        audit.append_rows(rows[start : start + 500], value_input_option="USER_ENTERED")
     return len(rows)
 
 

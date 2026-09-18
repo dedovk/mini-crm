@@ -95,6 +95,21 @@ class OrderAuditEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class PaymentBackfillResult:
+    """Outcome of a payment-only historical correction."""
+
+    cell_updates: int = 0
+    order_updates: int = 0
+    audit_events: tuple[OrderAuditEvent, ...] = ()
+    backup_name: str = ""
+    sheet_order_count: int = 0
+    authoritative_candidates: int = 0
+    api_order_matches: int = 0
+    unmatched_sheet_orders: int = 0
+    missing_expected_order_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class OrderExpenseTransaction:
     transaction_id: str
     order_id: str
@@ -138,11 +153,7 @@ class SupplierCostRecord:
                 raise ValueError("unit cost record requires one non-negative finite value")
             return
         if self.kind == "prepayment":
-            if (
-                self.unit_cost is not None
-                or self.text_value is not None
-                or self.currency != "UAH"
-            ):
+            if self.unit_cost is not None or self.text_value is not None or self.currency != "UAH":
                 raise ValueError("prepayment record must not carry a value")
             return
         if self.kind == "text":
@@ -156,9 +167,7 @@ class SupplierCostRecord:
         raise ValueError(f"unsupported supplier cost kind: {self.kind!r}")
 
     @classmethod
-    def cost(
-        cls, value: Decimal, *, currency: Literal["UAH", "USD"] = "UAH"
-    ) -> SupplierCostRecord:
+    def cost(cls, value: Decimal, *, currency: Literal["UAH", "USD"] = "UAH") -> SupplierCostRecord:
         return cls(kind="unit_cost", unit_cost=value, currency=currency)
 
     @classmethod

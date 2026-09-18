@@ -162,9 +162,7 @@ def test_non_prepaid_source_cancellation_still_requires_removal() -> None:
     assert gateway.needs_refusal_reconciliation()
 
     row[COLUMNS.reporting_state - 1] = REPORTING_EXCLUDED_REFUSAL
-    assert not gateway.needs_refusal_reconciliation(
-        quarantine_unverified_refusals=True
-    )
+    assert not gateway.needs_refusal_reconciliation(quarantine_unverified_refusals=True)
     assert gateway.needs_refusal_reconciliation()
 
 
@@ -390,6 +388,249 @@ def test_refresh_order_details_combines_city_and_recipient_and_restores_markup_f
     assert updates["S5"] == 10
     assert updates["AA5"] == 10
     assert updates["X5"] > 0
+
+
+def test_prom_payment_backfill_updates_only_payment_cells_and_creates_audit() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    for row in rows[4:6]:
+        row[COLUMNS.row_type - 1] = ROW_ORDER
+        row[COLUMNS.sync_key - 1] = "prom:427844867"
+        row[COLUMNS.payment_method - 1] = "наложка"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.spreadsheet = object()
+    backups: list[datetime] = []
+    audit_events: list[OrderAuditEvent] = []
+    gateway.create_backup = lambda *, created_at: backups.append(created_at) or "backup"
+    gateway._existing_audit_details = lambda: set()
+    gateway.append_audit_events = lambda events: audit_events.extend(events) or len(events)
+    observed_at = datetime(2026, 9, 18, 10, 0, tzinfo=UTC)
+    order = Order(
+        source="prom",
+        external_id="427844867",
+        created_at=observed_at,
+        completed_at=observed_at,
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451536961000",
+        total=Decimal(2099),
+        payment_method="пром оплата(оплата картой)",
+        note="",
+        sender="наш",
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(2099), Decimal(2099))],
+    )
+
+    result = gateway.backfill_prom_payments(
+        [order],
+        observed_at=observed_at,
+        apply_changes=True,
+    )
+
+    assert result.cell_updates == 2
+    assert result.order_updates == 1
+    assert result.backup_name == "backup"
+    assert [update["range"] for update in worksheet.updates] == ["O5", "O6"]
+    assert all(update["values"] == [["пром оплата(оплата картой)"]] for update in worksheet.updates)
+    assert backups == [observed_at]
+    assert len(audit_events) == 1
+    assert audit_events[0].old_value == "наложка"
+    assert audit_events[0].new_value == "пром оплата(оплата картой)"
+
+
+def test_prom_payment_backfill_does_not_duplicate_audit_after_partial_retry() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:427844867"
+    row[COLUMNS.payment_method - 1] = "наложка"
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = StubWorksheet(rows)
+    gateway.spreadsheet = object()
+    gateway.create_backup = lambda **kwargs: "backup"
+    marker = "prom-payment-backfill:prom:427844867:пром оплата(оплата картой)"
+    gateway._existing_audit_details = lambda: {marker}
+    gateway.append_audit_events = lambda events: pytest.fail("duplicate audit write")
+    observed_at = datetime(2026, 9, 18, 10, 0, tzinfo=UTC)
+    order = Order(
+        source="prom",
+        external_id="427844867",
+        created_at=observed_at,
+        completed_at=observed_at,
+        customer_name="Customer",
+        city="Kyiv",
+        phone="",
+        tracking_number="20451536961000",
+        total=Decimal(100),
+        payment_method="пром оплата(оплата картой)",
+        note="",
+        sender="наш",
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    result = gateway.backfill_prom_payments(
+        [order], observed_at=observed_at, apply_changes=True
+    )
+
+    assert result.cell_updates == 1
+    assert gateway.worksheet.updates[0]["range"] == "O5"
+
+
+def test_prom_payment_backfill_dry_run_does_not_write_or_create_backup() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:428234493"
+    row[COLUMNS.payment_method - 1] = "наложка"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.create_backup = lambda **kwargs: pytest.fail("dry run created a backup")
+    gateway.append_audit_events = lambda events: pytest.fail("dry run wrote audit events")
+    observed_at = datetime(2026, 9, 18, 10, 0, tzinfo=UTC)
+    order = Order(
+        source="prom",
+        external_id="428234493",
+        created_at=observed_at,
+        completed_at=observed_at,
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451538574642",
+        total=Decimal(458),
+        payment_method="пром оплата(оплата картой)",
+        note="",
+        sender="наш",
+        items=[OrderItem("Product", "SKU", Decimal(2), Decimal(229), Decimal(458))],
+    )
+
+    result = gateway.backfill_prom_payments(
+        [order],
+        observed_at=observed_at,
+        apply_changes=False,
+    )
+
+    assert result.cell_updates == 1
+    assert result.order_updates == 1
+    assert result.backup_name == ""
+    assert worksheet.updates == []
+
+
+@pytest.mark.parametrize(
+    ("protected_payment", "prepayment"),
+    [
+        ("смешанная", 0),
+        ("оплата частями", 0),
+        ("оплата на счет", 0),
+        ("зачет", 0),
+        ("наложка", 300),
+    ],
+)
+def test_prom_payment_backfill_preserves_protected_multirow_orders(
+    protected_payment: str,
+    prepayment: int,
+) -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    for row in rows[4:6]:
+        row[COLUMNS.row_type - 1] = ROW_ORDER
+        row[COLUMNS.sync_key - 1] = "prom:protected"
+        row[COLUMNS.payment_method - 1] = "наложка"
+    rows[5][COLUMNS.payment_method - 1] = protected_payment
+    rows[5][COLUMNS.prepayment - 1] = prepayment
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = StubWorksheet(rows)
+    observed_at = datetime(2026, 9, 18, 10, 0, tzinfo=UTC)
+    order = Order(
+        source="prom",
+        external_id="protected",
+        created_at=observed_at,
+        completed_at=observed_at,
+        customer_name="Customer",
+        city="Kyiv",
+        phone="",
+        tracking_number="20451536961000",
+        total=Decimal(100),
+        payment_method="пром оплата(оплата картой)",
+        note="",
+        sender="наш",
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    result = gateway.backfill_prom_payments([order], observed_at=observed_at, apply_changes=False)
+
+    assert result.cell_updates == 0
+    assert result.order_updates == 0
+    assert gateway.worksheet.updates == []
+
+
+def test_prom_payment_backfill_does_not_replace_blank_or_manual_payment() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    for index, current in enumerate(("", "ручна оплата"), start=4):
+        rows[index][COLUMNS.row_type - 1] = ROW_ORDER
+        rows[index][COLUMNS.sync_key - 1] = "prom:manual"
+        rows[index][COLUMNS.payment_method - 1] = current
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = StubWorksheet(rows)
+    observed_at = datetime(2026, 9, 18, 10, 0, tzinfo=UTC)
+    order = Order(
+        source="prom",
+        external_id="manual",
+        created_at=observed_at,
+        completed_at=observed_at,
+        customer_name="Customer",
+        city="Kyiv",
+        phone="",
+        tracking_number="20451536961000",
+        total=Decimal(100),
+        payment_method="пром оплата(оплата картой)",
+        note="",
+        sender="наш",
+        items=[OrderItem("Product", "SKU", Decimal(1), Decimal(100), Decimal(100))],
+    )
+
+    result = gateway.backfill_prom_payments([order], observed_at=observed_at, apply_changes=False)
+
+    assert result.cell_updates == 0
+
+
+@pytest.mark.parametrize(
+    ("current_payment", "prepayment"),
+    [("оплата на счет", 0), ("оплата частями", 0), ("смешанная", 0), ("наложка", 300)],
+)
+def test_routine_refresh_preserves_protected_payment_group(
+    current_payment: str,
+    prepayment: int,
+) -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:paid"
+    row[COLUMNS.payment_method - 1] = current_payment
+    row[COLUMNS.prepayment - 1] = prepayment
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    observed_at = datetime(2026, 9, 18, 10, 0, tzinfo=UTC)
+    order = Order(
+        source="prom",
+        external_id="paid",
+        created_at=observed_at,
+        completed_at=observed_at,
+        customer_name="",
+        city="",
+        phone="",
+        tracking_number="",
+        total=Decimal(100),
+        payment_method="пром оплата(оплата картой)",
+        note="",
+        sender="наш",
+        items=[],
+    )
+
+    gateway.refresh_order_details([order])
+
+    assert not any(update["range"] == "O5" for update in worksheet.updates)
 
 
 def test_refresh_order_details_repairs_text_unit_price_without_product_code() -> None:
@@ -652,7 +893,7 @@ def test_supplier_costs_write_arbitrary_text_marker_without_formula_error() -> N
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert changed.cell_updates == 1
     assert updates["Q5"] == ["замена"]
-    assert 'IF(ISNUMBER(Q5)' in updates["R5"][0]
+    assert "IF(ISNUMBER(Q5)" in updates["R5"][0]
     assert updates["J5"] == ["imaxi-com"]
     mode_by_range = {
         update["range"]: mode
@@ -661,9 +902,7 @@ def test_supplier_costs_write_arbitrary_text_marker_without_formula_error() -> N
     assert mode_by_range["Q5"] is True
     assert mode_by_range["R5"] is False
     marker_events = [
-        event
-        for event in changed.audit_events
-        if event.event_type == "supplier_cost_marker_filled"
+        event for event in changed.audit_events if event.event_type == "supplier_cost_marker_filled"
     ]
     assert len(marker_events) == 1
     assert marker_events[0].field == "supplier_cost_marker"
@@ -947,9 +1186,7 @@ def test_melad_cost_recalculates_only_with_matching_hidden_provenance() -> None:
             "Melad",
         ),
     }
-    result = gateway.update_supplier_costs(
-        costs, observed_at=datetime(2026, 8, 29, tzinfo=UTC)
-    )
+    result = gateway.update_supplier_costs(costs, observed_at=datetime(2026, 8, 29, tzinfo=UTC))
 
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert result.cell_updates == 1
@@ -1051,9 +1288,7 @@ def test_melad_recalculates_archived_supplier_row_from_hidden_provenance() -> No
     gateway = object.__new__(GoogleSheetsGateway)
     gateway.worksheet = worksheet
 
-    result = gateway.update_supplier_costs(
-        {}, observed_at=datetime(2026, 8, 29, tzinfo=UTC)
-    )
+    result = gateway.update_supplier_costs({}, observed_at=datetime(2026, 8, 29, tzinfo=UTC))
 
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert result.cell_updates == 1
@@ -1200,7 +1435,9 @@ def test_shipped_order_does_not_set_completion_marker_then_transitions_in_place(
     assert len(events) == 1
 
 
-def test_refresh_order_details_backfills_numeric_prepayment_without_overwriting_manual_value() -> None:
+def test_refresh_order_details_backfills_numeric_prepayment_without_overwriting_manual_value() -> (
+    None
+):
     rows = [[""] * LAST_COLUMN for _ in range(5)]
     row = rows[4]
     row[COLUMNS.row_type - 1] = ROW_ORDER
@@ -1243,9 +1480,7 @@ def test_completion_backfill_migrates_historical_rows_and_repeated_headers() -> 
     gateway = object.__new__(GoogleSheetsGateway)
     gateway.worksheet = worksheet
 
-    changed = gateway.backfill_completion_state(
-        observed_at=datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
-    )
+    changed = gateway.backfill_completion_state(observed_at=datetime(2026, 8, 5, 12, 0, tzinfo=UTC))
 
     updates = {update["range"]: update["values"][0] for update in worksheet.updates}
     assert changed == 3
@@ -1394,8 +1629,7 @@ def test_end_navigation_link_is_refreshed_without_rebuilding_sheet() -> None:
     assert cell["userEnteredValue"]["stringValue"] == "↓ До кінця"
     link_format = cell["textFormatRuns"][0]["format"]
     assert link_format["link"]["uri"] == (
-        "https://docs.google.com/spreadsheets/d/spreadsheet-test/edit"
-        "?gid=123#gid=123&range=A467"
+        "https://docs.google.com/spreadsheets/d/spreadsheet-test/edit?gid=123#gid=123&range=A467"
     )
     assert link_format["foregroundColorStyle"]["rgbColor"] == {
         "red": 1,
@@ -1682,9 +1916,7 @@ def test_audit_log_creates_technical_sheet_and_appends_event() -> None:
 
 def test_health_state_retries_alert_after_threshold_and_recovers() -> None:
     gateway = object.__new__(GoogleSheetsGateway)
-    health = HealthWorksheetStub(
-        [["consecutive_failures", "2"], ["alert_open", "false"]]
-    )
+    health = HealthWorksheetStub([["consecutive_failures", "2"], ["alert_open", "false"]])
 
     class Spreadsheet:
         def worksheet(self, title):
@@ -1708,9 +1940,7 @@ def test_health_state_retries_alert_after_threshold_and_recovers() -> None:
     assert repeated.alert_due
     health.values = [["consecutive_failures", "4"], ["alert_open", "true"]]
 
-    recovered = gateway.record_sync_health(
-        [], occurred_at=datetime(2026, 8, 5, 12, 30, tzinfo=UTC)
-    )
+    recovered = gateway.record_sync_health([], occurred_at=datetime(2026, 8, 5, 12, 30, tzinfo=UTC))
 
     assert recovered.consecutive_failures == 0
     assert recovered.recovered
