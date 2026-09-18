@@ -526,6 +526,9 @@ class GoogleSheetsGateway:
         )
         rows_by_key: dict[str, list[int]] = {}
         totals_by_key: dict[str, set[Decimal]] = {}
+        order_number_rows_by_key: dict[str, list[int]] = {}
+        order_numbers_by_key: dict[str, list[str]] = {}
+        order_total_rows_by_key: dict[str, list[int]] = {}
         missing_completion_keys: set[str] = set()
         managed_report_rows = {ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST}
 
@@ -554,11 +557,22 @@ class GoogleSheetsGateway:
                 errors.append(f"order row {row_number} has no Sync Key")
                 continue
             rows_by_key.setdefault(sync_key, []).append(row_number)
+            raw_order_number = (
+                row[COLUMNS.order_number - 1]
+                if len(row) >= COLUMNS.order_number
+                else ""
+            )
+            if str(raw_order_number).strip():
+                order_number_rows_by_key.setdefault(sync_key, []).append(row_number)
+                order_numbers_by_key.setdefault(sync_key, []).append(
+                    str(raw_order_number).strip()
+                )
             cost = decimal_value(row[COLUMNS.cost - 1] if len(row) >= COLUMNS.cost else "")
             if cost < 0:
                 errors.append(f"negative unit cost at Q{row_number}")
             raw_total = row[COLUMNS.order_total - 1] if len(row) >= COLUMNS.order_total else ""
             if str(raw_total).strip():
+                order_total_rows_by_key.setdefault(sync_key, []).append(row_number)
                 totals_by_key.setdefault(sync_key, set()).add(decimal_value(raw_total))
             if not str(
                 row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else ""
@@ -569,6 +583,32 @@ class GoogleSheetsGateway:
             expected = list(range(min(row_numbers), max(row_numbers) + 1))
             if row_numbers != expected:
                 errors.append(f"{sync_key}: product rows are split across the worksheet")
+            order_number_rows = order_number_rows_by_key.get(sync_key, [])
+            order_total_rows = order_total_rows_by_key.get(sync_key, [])
+            if not order_number_rows or not order_total_rows:
+                errors.append(
+                    f"{sync_key}: missing order group header; "
+                    f"order number rows {order_number_rows}, total rows {order_total_rows}"
+                )
+            elif order_number_rows != [row_numbers[0]] or order_total_rows != [
+                row_numbers[0]
+            ]:
+                errors.append(
+                    f"{sync_key}: misplaced or duplicate order group headers; "
+                    f"order number rows {order_number_rows}, total rows {order_total_rows}"
+                )
+            visible_order_numbers = order_numbers_by_key.get(sync_key, [])
+            expected_order_number = sync_key.partition(":")[2].strip()
+            if (
+                expected_order_number
+                and visible_order_numbers
+                and visible_order_numbers[0].casefold()
+                != expected_order_number.casefold()
+            ):
+                errors.append(
+                    f"{sync_key}: visible order number "
+                    f"{visible_order_numbers[0]!r} does not match Sync Key"
+                )
             totals = totals_by_key.get(sync_key, set())
             if len(totals) > 1:
                 errors.append(f"{sync_key}: conflicting order totals {sorted(totals)}")

@@ -1837,6 +1837,119 @@ def test_sheet_integrity_rejects_formula_errors_negative_cost_and_split_order() 
     assert any("split across" in error for error in report.errors)
 
 
+def test_sheet_integrity_rejects_adjacent_duplicate_order_groups() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(7)]
+    for index in (4, 5):
+        row = rows[index]
+        row[COLUMNS.row_type - 1] = ROW_ORDER
+        row[COLUMNS.sync_key - 1] = "prom:501"
+        row[COLUMNS.order_number - 1] = "501"
+        row[COLUMNS.order_total - 1] = 1000
+        row[COLUMNS.order_date - 1] = "05.08.2026"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    report = gateway.validate_integrity()
+
+    assert not report.ok
+    assert any(
+        "misplaced or duplicate order group headers" in error
+        for error in report.errors
+    )
+
+
+def test_sheet_integrity_accepts_multi_item_group_with_one_order_header() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(7)]
+    for index in (4, 5):
+        row = rows[index]
+        row[COLUMNS.row_type - 1] = ROW_ORDER
+        row[COLUMNS.sync_key - 1] = "prom:501"
+        row[COLUMNS.order_date - 1] = "05.08.2026"
+    rows[4][COLUMNS.order_number - 1] = "501"
+    rows[4][COLUMNS.order_total - 1] = 1000
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    report = gateway.validate_integrity()
+
+    assert report.ok
+
+
+@pytest.mark.parametrize(
+    ("order_number", "order_total"),
+    [("", 1000), ("501", ""), ("", "")],
+)
+def test_sheet_integrity_rejects_missing_order_group_header(
+    order_number: str,
+    order_total: int | str,
+) -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    for index in (4, 5):
+        row = rows[index]
+        row[COLUMNS.row_type - 1] = ROW_ORDER
+        row[COLUMNS.sync_key - 1] = "prom:501"
+        row[COLUMNS.order_date - 1] = "05.08.2026"
+    rows[4][COLUMNS.order_number - 1] = order_number
+    rows[4][COLUMNS.order_total - 1] = order_total
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    report = gateway.validate_integrity()
+
+    assert not report.ok
+    assert any("missing order group header" in error for error in report.errors)
+
+
+@pytest.mark.parametrize(
+    ("order_number_row", "order_total_row"),
+    [(4, 5), (5, 4), (5, 5)],
+)
+def test_sheet_integrity_rejects_misplaced_order_group_header(
+    order_number_row: int,
+    order_total_row: int,
+) -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(7)]
+    for index in (4, 5):
+        row = rows[index]
+        row[COLUMNS.row_type - 1] = ROW_ORDER
+        row[COLUMNS.sync_key - 1] = "prom:501"
+        row[COLUMNS.order_date - 1] = "05.08.2026"
+    rows[order_number_row][COLUMNS.order_number - 1] = "501"
+    rows[order_total_row][COLUMNS.order_total - 1] = 1000
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    report = gateway.validate_integrity()
+
+    assert not report.ok
+    assert any(
+        "misplaced or duplicate order group headers" in error
+        for error in report.errors
+    )
+
+
+def test_sheet_integrity_rejects_order_number_that_conflicts_with_sync_key() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:501"
+    row[COLUMNS.order_number - 1] = "999"
+    row[COLUMNS.order_total - 1] = 1000
+    row[COLUMNS.order_date - 1] = "05.08.2026"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    report = gateway.validate_integrity()
+
+    assert not report.ok
+    assert any("does not match Sync Key" in error for error in report.errors)
+
+
 def test_shipment_status_updates_create_one_audit_change_per_order() -> None:
     rows = [[""] * LAST_COLUMN for _ in range(6)]
     for index in (4, 5):
