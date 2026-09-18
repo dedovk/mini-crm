@@ -45,8 +45,10 @@ COLUMNS = SheetColumns()
 LAST_COLUMN = COLUMNS.supplier_cost_original
 LAST_COLUMN_LETTER = "AH"
 
+PROM_PAYMENT_METHOD = "пром оплата(оплата картой)"
+
 PAYMENT_OPTIONS = (
-    "пром оплата(оплата картой)",
+    PROM_PAYMENT_METHOD,
     "оплата частями",
     "наложка",
     "оплата на счет",

@@ -200,7 +200,9 @@ def test_rozetka_normalizer_formats_nested_user_name_object() -> None:
                 }
             },
             "delivery": {"city": {"name": "Самар"}, "ttn": "20451500957753"},
-            "purchases": [{"item_id": 608037110, "item_name": "Товар", "price": 999, "quantity": 1}],
+            "purchases": [
+                {"item_id": 608037110, "item_name": "Товар", "price": 999, "quantity": 1}
+            ],
         }
     )
 
@@ -286,6 +288,148 @@ def test_prom_normalizer_reads_uppercase_prepayment_from_client_notes() -> None:
     assert order.payment_method == "смешанная"
 
 
+@pytest.mark.parametrize(
+    ("order_id", "payment_status"),
+    [
+        (427844867, "paid_out"),
+        (428234493, "paid"),
+    ],
+)
+def test_prom_normalizer_prefers_settled_evopay_over_cod_label(
+    order_id: int,
+    payment_status: str,
+) -> None:
+    client = PromClient(
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    order = client._normalize(
+        {
+            "id": order_id,
+            "status": "delivered",
+            "date_created": "2026-09-17 11:42:00",
+            "delivery_provider_data": {"declaration_number": "20451536961000"},
+            "full_price": 2099,
+            "payment_option": {"name": "Наложенный платеж"},
+            "payment_data": {"type": "evopay", "status": payment_status},
+            "products": [{"sku": "SKU", "name": "Товар", "quantity": 1, "price": 2099}],
+        }
+    )
+
+    assert order.payment_method == "пром оплата(оплата картой)"
+
+
+@pytest.mark.parametrize("payment_status", ["unpaid", "", None])
+def test_prom_normalizer_does_not_treat_unsettled_evopay_as_paid(
+    payment_status: str | None,
+) -> None:
+    client = PromClient(
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    order = client._normalize(
+        {
+            "id": 1,
+            "status": "delivered",
+            "date_created": "2026-09-17 11:42:00",
+            "delivery_provider_data": {"declaration_number": "20451536961000"},
+            "full_price": 100,
+            "payment_option": {"name": "Наложенный платеж"},
+            "payment_data": {"type": "evopay", "status": payment_status},
+            "products": [{"name": "Товар", "quantity": 1, "price": 100}],
+        }
+    )
+
+    assert order.payment_method == "наложка"
+
+
+@pytest.mark.parametrize("payment_name", ["Оплата на счет", "Зачет"])
+def test_prom_normalizer_does_not_override_non_cod_method_with_evopay(
+    payment_name: str,
+) -> None:
+    client = PromClient(
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    order = client._normalize(
+        {
+            "id": 1,
+            "status": "delivered",
+            "date_created": "2026-09-17 11:42:00",
+            "delivery_provider_data": {"declaration_number": "20451536961000"},
+            "full_price": 100,
+            "payment_option": {"name": payment_name},
+            "payment_data": {"type": "evopay", "status": "paid"},
+            "products": [{"name": "Товар", "quantity": 1, "price": 100}],
+        }
+    )
+
+    expected = "оплата на счет" if "счет" in payment_name else "Зачет"
+    assert order.payment_method == expected
+
+
+@pytest.mark.parametrize("status_code", [401, 429, 503])
+def test_prom_propagates_canceled_status_integration_failures(status_code: int) -> None:
+    class PromFailureHttp:
+        def request_json(self, method: str, url: str, **kwargs):
+            if kwargs["params"]["status"] == "canceled":
+                raise ApiError("failed", status_code=status_code)
+            return {"orders": []}
+
+    client = PromClient(
+        PromFailureHttp(),  # type: ignore[arg-type]
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    with pytest.raises(ApiError, match="failed"):
+        client.fetch_orders(datetime(2026, 9, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
+
+
+def test_prom_payment_fetch_keeps_order_without_tracking_or_products() -> None:
+    class PromPaymentHttp:
+        def request_json(self, method: str, url: str, **kwargs):
+            if kwargs["params"]["status"] == "canceled":
+                return {"orders": []}
+            return {
+                "orders": [
+                    {
+                        "id": 427844867,
+                        "status": "delivered",
+                        "date_created": "2026-09-17 11:42:00",
+                        "full_price": 2099,
+                        "payment_option": {"name": "Наложенный платеж"},
+                        "payment_data": {"type": "evopay", "status": "paid"},
+                        "products": [],
+                    }
+                ]
+            }
+
+    client = PromClient(
+        PromPaymentHttp(),  # type: ignore[arg-type]
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+    since = datetime(2026, 9, 1, tzinfo=ZoneInfo("Europe/Kyiv"))
+    until = datetime(2026, 9, 18, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+    orders = client.fetch_orders_between(since, until, payment_only=True)
+
+    assert [order.external_id for order in orders] == ["427844867"]
+    assert orders[0].payment_method == "пром оплата(оплата картой)"
+
+
 def test_prom_normalizer_reads_installment_commission_separately() -> None:
     client = PromClient(
         HttpClient(max_retries=0),
@@ -314,7 +458,10 @@ def test_prom_normalizer_reads_installment_commission_separately() -> None:
 
 def test_prom_normalizer_calculates_installment_commission_from_parts_count() -> None:
     client = PromClient(
-        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
     )
     order = client._normalize(
         {
@@ -380,7 +527,10 @@ def test_prom_normalizer_does_not_guess_unknown_installment_count() -> None:
 
 def test_prom_normalizer_reads_installment_commission_from_named_charge() -> None:
     client = PromClient(
-        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
     )
     order = client._normalize(
         {
@@ -404,7 +554,10 @@ def test_prom_normalizer_reads_installment_commission_from_named_charge() -> Non
 
 def test_prom_normalizer_reads_installment_commission_from_labeled_key() -> None:
     client = PromClient(
-        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
     )
     order = client._normalize(
         {
@@ -413,9 +566,7 @@ def test_prom_normalizer_reads_installment_commission_from_labeled_key() -> None
             "date_created": "2026-08-15 18:13:00",
             "full_price": 1329,
             "payment_option": {"name": "Оплата частинами"},
-            "fees": {
-                "Комиссия по Оплатить частями": {"amount": 49.17}
-            },
+            "fees": {"Комиссия по Оплатить частями": {"amount": 49.17}},
             "products": [{"name": "Товар", "quantity": 1, "price": 1329}],
         }
     )
@@ -425,7 +576,10 @@ def test_prom_normalizer_reads_installment_commission_from_labeled_key() -> None
 
 def test_prom_normalizer_accepts_localized_negative_installment_fee() -> None:
     client = PromClient(
-        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
     )
     order = client._normalize(
         {
@@ -444,7 +598,10 @@ def test_prom_normalizer_accepts_localized_negative_installment_fee() -> None:
 
 def test_prom_normalizer_accepts_ukrainian_installment_commission_label() -> None:
     client = PromClient(
-        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
     )
     order = client._normalize(
         {
@@ -463,7 +620,10 @@ def test_prom_normalizer_accepts_ukrainian_installment_commission_label() -> Non
 
 def test_prom_normalizer_recovers_unit_price_and_nested_prepayment_note() -> None:
     client = PromClient(
-        HttpClient(max_retries=0), token="test", base_url="https://example.test", timezone="Europe/Kyiv"
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
     )
     order = client._normalize(
         {
@@ -564,10 +724,7 @@ def test_opencart_completion_accepts_boolean_text_and_localized_statuses() -> No
     assert OpenCartClient._is_completed({"order_status": "Виконано"}) is True
     assert OpenCartClient._is_completed({"order_status": "Очікує обробки"}) is False
     assert OpenCartClient._channel({"order_status": "Сделка завершена"}) == "site"
-    assert (
-        OpenCartClient._channel({"order_status": "Сделка завершена(Заказ по тел)"})
-        == "phone"
-    )
+    assert OpenCartClient._channel({"order_status": "Сделка завершена(Заказ по тел)"}) == "phone"
 
 
 class RozetkaSearchStub:
@@ -678,7 +835,11 @@ class RozetkaShippedStub:
                     "status_changed_at": "2026-08-10 09:15:00",
                     "status": 3,
                     "status_group": 1,
-                    "status_data": {"id": 3, "name": "Передано в службу доставки", "status_group": 1},
+                    "status_data": {
+                        "id": 3,
+                        "name": "Передано в службу доставки",
+                        "status_group": 1,
+                    },
                     "current_seller_comment": "предо 400",
                     "cost": "1200",
                     "user": {"name": "Тестовий Покупець", "phone": "0501234567"},
@@ -889,15 +1050,11 @@ def test_rozetka_shipped_generic_changed_time_is_not_treated_as_transition() -> 
         "changed": "2026-08-30 18:00:00",
         "status": 3,
         "delivery": {"ttn": "RMP-787478920"},
-        "purchases": [
-            {"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}
-        ],
+        "purchases": [{"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}],
         "cost": 999,
     }
 
-    order = client._normalize(
-        raw, source_status="Відправлено", observed_at=observed_at
-    )
+    order = client._normalize(raw, source_status="Відправлено", observed_at=observed_at)
 
     assert order.completed_at == observed_at
     assert not order.completion_is_exact
@@ -922,9 +1079,7 @@ def test_rozetka_returns_order_cancelled_before_detail_hydration_for_reconciliat
         timezone="Europe/Kyiv",
     )
 
-    orders = client.fetch_orders(
-        datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv"))
-    )
+    orders = client.fetch_orders(datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Kyiv")))
 
     assert len(orders) == 1
     assert orders[0].source_status == "Скасовано"
@@ -989,9 +1144,7 @@ def test_rozetka_partial_detail_does_not_erase_search_ttn_items_or_status() -> N
         {"status_data": {"status_group": 1}},
     ],
 )
-def test_rozetka_active_group_without_exact_status_requires_details(
-    raw: dict[str, object]
-) -> None:
+def test_rozetka_active_group_without_exact_status_requires_details(raw: dict[str, object]) -> None:
     assert not RozetkaClient._has_status_fields(raw)
 
 
@@ -1062,9 +1215,7 @@ def test_rozetka_detail_status_can_promote_but_not_regress_search_status(
     detail_status: str,
     expected: str,
 ) -> None:
-    assert (
-        RozetkaClient._prefer_lifecycle_status(search_status, detail_status) == expected
-    )
+    assert RozetkaClient._prefer_lifecycle_status(search_status, detail_status) == expected
 
 
 def test_rozetka_completed_order_uses_earlier_shipped_history_at_month_boundary() -> None:
@@ -1083,9 +1234,7 @@ def test_rozetka_completed_order_uses_earlier_shipped_history_at_month_boundary(
         "status": 30,
         "status_group": 2,
         "delivery": {"ttn": "RMP-787478921"},
-        "purchases": [
-            {"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}
-        ],
+        "purchases": [{"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}],
         "cost": 999,
         "order_status_history": [
             {"status_id": 3, "created": "2026-08-31 23:50:00"},
@@ -1120,9 +1269,7 @@ class RozetkaCompletedHistoryDetailStub:
             "status_data": {"id": 30, "name": "Виконано", "status_group": 2},
             "current_seller_comment": "готово",
             "delivery": {"ttn": "RMP-787478922"},
-            "purchases": [
-                {"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}
-            ],
+            "purchases": [{"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}],
             "cost": 999,
         }
         if url.endswith("/orders/902000006"):
@@ -1176,15 +1323,11 @@ def test_rozetka_duplicate_merge_prioritizes_cancellation_and_exact_transition()
         "id": "902000007",
         "created": "2026-08-30 10:00:00",
         "delivery": {"ttn": "RMP-787478923"},
-        "purchases": [
-            {"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}
-        ],
+        "purchases": [{"item_id": "SKU", "item_name": "Товар", "quantity": 1, "price": 999}],
         "cost": 999,
     }
     observed = datetime(2026, 8, 31, 10, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
-    shipped_observed = client._normalize(
-        base, source_status="Відправлено", observed_at=observed
-    )
+    shipped_observed = client._normalize(base, source_status="Відправлено", observed_at=observed)
     cancelled_exact = client._normalize(
         {**base, "status_changed_at": "2026-08-31 11:00:00"},
         source_status="Скасовано",

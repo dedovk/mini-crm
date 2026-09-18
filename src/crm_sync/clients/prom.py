@@ -8,6 +8,7 @@ from typing import Any
 
 from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.models import InstallmentCommissionSource, Order, OrderItem
+from crm_sync.sheet_schema import PROM_PAYMENT_METHOD
 from crm_sync.utils import (
     city_from_address,
     classify_payment,
@@ -25,13 +26,22 @@ from crm_sync.utils import (
 LOGGER = logging.getLogger(__name__)
 
 INSTALLMENT_RATES = {
-    2: Decimal("0.034"), 3: Decimal("0.037"), 4: Decimal("0.048"),
-    5: Decimal("0.065"), 6: Decimal("0.077"), 7: Decimal("0.089"),
-    8: Decimal("0.100"), 9: Decimal("0.113"), 10: Decimal("0.125"),
-    12: Decimal("0.150"), 15: Decimal("0.183"), 18: Decimal("0.215"),
+    2: Decimal("0.034"),
+    3: Decimal("0.037"),
+    4: Decimal("0.048"),
+    5: Decimal("0.065"),
+    6: Decimal("0.077"),
+    7: Decimal("0.089"),
+    8: Decimal("0.100"),
+    9: Decimal("0.113"),
+    10: Decimal("0.125"),
+    12: Decimal("0.150"),
+    15: Decimal("0.183"),
+    18: Decimal("0.215"),
     24: Decimal("0.276"),
 }
 COMMISSION_LABEL_MARKERS = ("комис", "коміс", "commission", "fee")
+PROM_SETTLED_PAYMENT_STATUSES = frozenset({"paid", "paid_out", "refunded"})
 
 
 def _is_installment_commission_label(value: Any) -> bool:
@@ -112,9 +122,15 @@ def _installment_cost(
     explicit = _find_named_value(
         raw,
         {
-            "installment_commission", "installments_commission", "payment_parts_commission",
-            "parts_payment_commission", "pay_parts_commission", "credit_commission",
-            "installment_fee", "payment_parts_fee", "pay_parts_fee",
+            "installment_commission",
+            "installments_commission",
+            "payment_parts_commission",
+            "parts_payment_commission",
+            "pay_parts_commission",
+            "credit_commission",
+            "installment_fee",
+            "payment_parts_fee",
+            "pay_parts_fee",
         },
     )
     explicit_amount = abs(decimal_value(explicit))
@@ -127,8 +143,13 @@ def _installment_cost(
     count_value = _find_named_value(
         raw,
         {
-            "installments_count", "installment_count", "parts_count", "payments_count",
-            "payment_parts_count", "pay_parts_count", "credit_parts_count",
+            "installments_count",
+            "installment_count",
+            "parts_count",
+            "payments_count",
+            "payment_parts_count",
+            "pay_parts_count",
+            "credit_parts_count",
         },
     )
     count_match = re.search(r"(?<!\d)(\d{1,2})(?!\d)", payment_text)
@@ -146,12 +167,37 @@ def _installment_cost(
         )
     if count == 0 and fallback_rate > 0 and total > 0:
         return (
-            (total * fallback_rate).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            ),
+            (total * fallback_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             "fallback",
         )
     return Decimal(0), ""
+
+
+def _prom_payment_method(raw: dict[str, Any], note: str) -> str:
+    """Classify Prom payments using both checkout choice and transaction state."""
+    payment_option = raw.get("payment_option")
+    payment_text = (
+        str(first_value(payment_option, "name", "title"))
+        if isinstance(payment_option, dict)
+        else str(payment_option or "")
+    )
+    classified = classify_payment(payment_text, note)
+    if classified in {"смешанная", "оплата частями"}:
+        return classified
+
+    payment_data = raw.get("payment_data")
+    if isinstance(payment_data, dict):
+        payment_type = str(first_value(payment_data, "type", "payment_type")).strip().casefold()
+        payment_status = (
+            str(first_value(payment_data, "status", "payment_status")).strip().casefold()
+        )
+        if (
+            classified == "наложка"
+            and payment_type == "evopay"
+            and payment_status in PROM_SETTLED_PAYMENT_STATUSES
+        ):
+            return PROM_PAYMENT_METHOD
+    return classified
 
 
 class PromClient:
@@ -173,13 +219,23 @@ class PromClient:
         self.installment_fallback_rate = installment_fallback_rate
 
     def fetch_orders(self, since: datetime) -> list[Order]:
+        return self.fetch_orders_between(since, datetime.now(since.tzinfo))
+
+    def fetch_orders_between(
+        self,
+        since: datetime,
+        until: datetime,
+        *,
+        payment_only: bool = False,
+    ) -> list[Order]:
+        """Fetch completed orders changed inside an explicit bounded interval."""
         if not self.token:
             LOGGER.info("Prom sync skipped: PROM_API_TOKEN is not configured")
             return []
         headers = {"Authorization": f"Bearer {self.token}"}
-        observed_at = datetime.now(since.tzinfo)
+        observed_at = until
         date_from = (since - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
-        date_to = observed_at.strftime("%Y-%m-%dT%H:%M:%S")
+        date_to = until.strftime("%Y-%m-%dT%H:%M:%S")
         raw_by_id: dict[str, dict[str, Any]] = {}
         for status in ("delivered", "canceled"):
             try:
@@ -189,15 +245,18 @@ class PromClient:
                     modified_to=date_to,
                     headers=headers,
                 )
-            except ApiError:
-                if status == "delivered":
+            except ApiError as exc:
+                if status == "delivered" or exc.status_code not in {400, 422}:
                     raise
                 LOGGER.info("Prom does not accept status spelling %s; continuing", status)
                 continue
             for raw in pages:
                 order_id = str(first_value(raw, "id", "order_id"))
                 current = raw_by_id.get(order_id)
-                if current is None or str(raw.get("status", "")).casefold() in {"canceled", "cancelled"}:
+                if current is None or str(raw.get("status", "")).casefold() in {
+                    "canceled",
+                    "cancelled",
+                }:
                     raw_by_id[order_id] = raw
         raw_orders = list(raw_by_id.values())
 
@@ -218,10 +277,10 @@ class PromClient:
             if order.is_cancelled:
                 normalized.append(order)
                 continue
-            if not order.tracking_number:
+            if not payment_only and not order.tracking_number:
                 without_tracking += 1
                 continue
-            if not order.items:
+            if not payment_only and not order.items:
                 without_items += 1
                 continue
             normalized.append(order)
@@ -277,7 +336,9 @@ class PromClient:
             if len(page) < limit:
                 return result
             try:
-                next_last_id = min(int(order["id"]) for order in page if isinstance(order, dict)) - 1
+                next_last_id = (
+                    min(int(order["id"]) for order in page if isinstance(order, dict)) - 1
+                )
             except (KeyError, TypeError, ValueError) as exc:
                 raise ApiError("Prom pagination requires numeric order IDs") from exc
             if next_last_id in seen_cursors or (last_id is not None and next_last_id >= last_id):
@@ -291,7 +352,9 @@ class PromClient:
         for product in products:
             if not isinstance(product, dict):
                 continue
-            quantity = decimal_value(first_value(product, "quantity", "count", default=1), Decimal(1))
+            quantity = decimal_value(
+                first_value(product, "quantity", "count", default=1), Decimal(1)
+            )
             unit_price = decimal_value(
                 first_value(product, "price_with_discount", "price", "unit_price", "final_price")
             )
@@ -304,7 +367,9 @@ class PromClient:
             items.append(
                 OrderItem(
                     name=str(first_value(product, "name", "title", "product_name")),
-                    product_code=str(first_value(product, "sku", "article", "external_id", "product_id", "id")),
+                    product_code=str(
+                        first_value(product, "sku", "article", "external_id", "product_id", "id")
+                    ),
                     quantity=quantity,
                     unit_price=unit_price,
                     line_total=line_total,
@@ -321,16 +386,20 @@ class PromClient:
             ),
             {},
         )
-        recipient = raw.get("delivery_recipient") if isinstance(raw.get("delivery_recipient"), dict) else {}
+        recipient = (
+            raw.get("delivery_recipient") if isinstance(raw.get("delivery_recipient"), dict) else {}
+        )
         payment = raw.get("payment_option")
         payment_text = (
-            str(first_value(payment, "name", "title")) if isinstance(payment, dict) else str(payment or "")
+            str(first_value(payment, "name", "title"))
+            if isinstance(payment, dict)
+            else str(payment or "")
         )
         prosale = raw.get("prosale_commission")
         cpa_commission = raw.get("cpa_commission")
         advertising_cost = decimal_value(prosale) or decimal_value(cpa_commission)
         total = decimal_value(first_value(raw, "full_price", "total_price", "price", "total"))
-        payment_method = classify_payment(payment_text, note)
+        payment_method = _prom_payment_method(raw, note)
         installment_commission = Decimal(0)
         installment_source: InstallmentCommissionSource = ""
         if payment_method == "оплата частями":
@@ -375,7 +444,9 @@ class PromClient:
             first_value(raw, "ttn", "declaration_number", "tracking_number", "document_number"),
             note,
         )
-        created_at = parse_datetime(first_value(raw, "date_created", "created_at", "created"), self.timezone)
+        created_at = parse_datetime(
+            first_value(raw, "date_created", "created_at", "created"), self.timezone
+        )
         exact_completed_at = parse_optional_datetime(
             first_value(raw, "completed_at", "status_changed_at", "order_status_modified"),
             self.timezone,
@@ -386,7 +457,9 @@ class PromClient:
             external_id=str(first_value(raw, "id", "order_id")),
             created_at=created_at,
             completed_at=completed_at,
-            customer_name=recipient_name or client_name or str(first_value(raw, "client_name", "customer_name")),
+            customer_name=recipient_name
+            or client_name
+            or str(first_value(raw, "client_name", "customer_name")),
             city=display_text(first_value(recipient, "city_name", "city", "locality"))
             or city_from_address(first_value(delivery, "recipient_address"))
             or city_from_address(first_value(raw, "delivery_address")),
