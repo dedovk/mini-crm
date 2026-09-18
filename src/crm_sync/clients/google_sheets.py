@@ -1985,6 +1985,11 @@ class GoogleSheetsGateway:
                     else ""
                 )
                 if index == 0:
+                    installment = decimal_value(
+                        row[COLUMNS.installment_commission - 1]
+                        if len(row) >= COLUMNS.installment_commission
+                        else ""
+                    )
                     if decimal_value(current) != expected:
                         updates.append(
                             {
@@ -1992,7 +1997,7 @@ class GoogleSheetsGateway:
                                 "values": [[decimal_for_sheet(expected)]],
                             }
                         )
-                    display = advertising_display(expected, Decimal(0))
+                    display = advertising_display(expected, installment)
                     shown = row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
                     if str(shown) != str(display):
                         updates.append(

@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from gspread.utils import a1_to_rowcol
+from gspread.utils import a1_to_rowcol, rowcol_to_a1
 
 from crm_sync.clients.google_sheets import (
     ConcurrentSheetEditError,
@@ -1789,6 +1789,32 @@ def test_update_order_expenses_writes_net_total_only_to_first_item_row() -> None
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
     assert changed == 3
     assert updates == {"S5": 183.42, "S6": "", "AA5": 183.42}
+
+
+def test_update_order_expenses_preserves_installment_commission_in_display() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "rozetka:427844867"
+    row[COLUMNS.source - 1] = "🟢 Rozetka"
+    row[COLUMNS.advertising_base - 1] = 90.11
+    row[COLUMNS.installment_commission - 1] = 49.17
+    row[COLUMNS.advertising - 1] = "90.11\n49.17"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    changed = gateway.update_order_expenses(
+        {"427844867": Decimal("149.45")}, source="rozetka"
+    )
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert changed == 2
+    assert updates == {"S5": "149.45\n49.17", "AA5": 149.45}
+    assert not any(
+        update["range"] == rowcol_to_a1(5, COLUMNS.installment_commission)
+        for update in worksheet.updates
+    )
 
 
 def test_sheet_integrity_rejects_formula_errors_negative_cost_and_split_order() -> None:
