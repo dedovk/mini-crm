@@ -3,6 +3,7 @@ from datetime import date
 from crm_sync.sheet_layout import (
     ROW_REPORT_DAY,
     ROW_REPORT_FORECAST,
+    ROW_REPORT_MTD,
     clean_customer_display,
     month_period_label,
     parse_order_day,
@@ -33,8 +34,22 @@ def test_report_formulas_filter_only_order_rows_and_operational_day() -> None:
     assert formulas[ROW_REPORT_FORECAST][6].endswith(")*31/2")
     assert formulas[ROW_REPORT_FORECAST][8].startswith("=(SUMIFS(")
     assert ")*31/2" in formulas[ROW_REPORT_FORECAST][8]
-    assert formulas[ROW_REPORT_DAY][8].startswith("=SUMIFS($M$5:$M$30;")
-    assert "-SUMIFS($R$5:$R$30;" in formulas[ROW_REPORT_DAY][8]
+    assert formulas[ROW_REPORT_DAY][8] == (
+        '=SUMIFS($M$5:$M$30;$W$5:$W$30;"ORDER";$AE$5:$AE$30;"<>EXCLUDED_REFUSAL";'
+        '$X$5:$X$30;DATE(2026;8;2))-SUMIFS($R$5:$R$30;$W$5:$W$30;"ORDER";'
+        '$AE$5:$AE$30;"<>EXCLUDED_REFUSAL";$X$5:$X$30;DATE(2026;8;2))-'
+        'SUMIFS($M$5:$M$30;$W$5:$W$30;"ORDER";$AE$5:$AE$30;"<>EXCLUDED_REFUSAL";'
+        '$X$5:$X$30;DATE(2026;8;2);$Q$5:$Q$30;"*";$Q$5:$Q$30;"<>предоплата")'
+    )
+    assert formulas[ROW_REPORT_MTD][8] == (
+        '=SUMIFS($M$5:$M$30;$W$5:$W$30;"ORDER";$AE$5:$AE$30;"<>EXCLUDED_REFUSAL";'
+        '$X$5:$X$30;">="&DATE(2026;8;1);$X$5:$X$30;"<="&DATE(2026;8;2))-'
+        'SUMIFS($R$5:$R$30;$W$5:$W$30;"ORDER";$AE$5:$AE$30;"<>EXCLUDED_REFUSAL";'
+        '$X$5:$X$30;">="&DATE(2026;8;1);$X$5:$X$30;"<="&DATE(2026;8;2))-'
+        'SUMIFS($M$5:$M$30;$W$5:$W$30;"ORDER";$AE$5:$AE$30;"<>EXCLUDED_REFUSAL";'
+        '$X$5:$X$30;">="&DATE(2026;8;1);$X$5:$X$30;"<="&DATE(2026;8;2);'
+        '$Q$5:$Q$30;"*";$Q$5:$Q$30;"<>предоплата")'
+    )
     assert '$A$5:$A$30;"*Prom*";$AA$5:$AA$30;"<>10"' in formulas[ROW_REPORT_DAY][12]
     assert '$AC$5:$AC$30' not in formulas[ROW_REPORT_DAY][12]
     assert '$A$5:$A$30;"*Rozetka*"' in formulas[ROW_REPORT_DAY][14]

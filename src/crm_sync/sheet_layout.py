@@ -161,6 +161,9 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
         f'{range_for(COLUMNS.operational_date)};"<="&{day_expr}'
     )
     source_range = range_for(COLUMNS.source)
+    cost_range = range_for(COLUMNS.cost)
+    line_total_range = range_for(COLUMNS.line_total)
+    markup_range = range_for(COLUMNS.markup)
     advertising_range = range_for(COLUMNS.advertising_base)
     installment_range = range_for(COLUMNS.installment_commission)
     elapsed = day.day
@@ -181,13 +184,22 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
         )
         return base
 
+    def cost_formula(period_filter: str) -> str:
+        """Exclude non-monetary supplier text markers from cost totals."""
+        eligible_line_total = (
+            f"SUMIFS({line_total_range};{order_filter};{period_filter})"
+        )
+        eligible_markup = f"SUMIFS({markup_range};{order_filter};{period_filter})"
+        text_marker_sales = (
+            f"SUMIFS({line_total_range};{order_filter};{period_filter};"
+            f'{cost_range};"*";{cost_range};"<>предоплата")'
+        )
+        return f"={eligible_line_total}-{eligible_markup}-{text_marker_sales}"
+
     daily = {
         4: f"=COUNTUNIQUEIFS({range_for(COLUMNS.sync_key)};{order_filter};{day_filter})",
         6: f"=SUMIFS({range_for(COLUMNS.order_total)};{order_filter};{day_filter})",
-        8: (
-            f"=SUMIFS({range_for(COLUMNS.line_total)};{order_filter};{day_filter})-"
-            f"SUMIFS({range_for(COLUMNS.markup)};{order_filter};{day_filter})"
-        ),
+        8: cost_formula(day_filter),
         10: f"=SUMIFS({range_for(COLUMNS.markup)};{order_filter};{day_filter})",
         12: advertising_formula(day_filter, "prosale"),
         14: advertising_formula(day_filter, "rozetka"),
@@ -198,10 +210,7 @@ def report_formulas(day: date, *, first_data_row: int, last_data_row: int) -> di
     mtd = {
         4: f"=COUNTUNIQUEIFS({range_for(COLUMNS.sync_key)};{order_filter};{mtd_filter})",
         6: f"=SUMIFS({range_for(COLUMNS.order_total)};{order_filter};{mtd_filter})",
-        8: (
-            f"=SUMIFS({range_for(COLUMNS.line_total)};{order_filter};{mtd_filter})-"
-            f"SUMIFS({range_for(COLUMNS.markup)};{order_filter};{mtd_filter})"
-        ),
+        8: cost_formula(mtd_filter),
         10: f"=SUMIFS({range_for(COLUMNS.markup)};{order_filter};{mtd_filter})",
         12: advertising_formula(mtd_filter, "prosale"),
         14: advertising_formula(mtd_filter, "rozetka"),
