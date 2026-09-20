@@ -719,6 +719,73 @@ def test_opencart_normalizer_reads_nova_poshta_custom_field() -> None:
     assert order.updated_at and order.updated_at.strftime("%d.%m.%Y %H:%M") == "05.08.2026 09:30"
 
 
+def test_opencart_fetch_includes_completed_ukrposhta_order() -> None:
+    class UkrposhtaOrderHttp:
+        def request_json(self, method: str, url: str, **kwargs):
+            return {
+                "success": True,
+                "orders": [
+                    {
+                        "order_id": "972",
+                        "order_status": "Сделка завершена",
+                        "is_completed": True,
+                        "date_added": "2026-09-19 05:13:48",
+                        "date_modified": "2026-09-20 05:37:44",
+                        "completed_at": "2026-09-20 05:37:44",
+                        "firstname": "Геннадій",
+                        "lastname": "Цопа",
+                        "telephone": "0976982218",
+                        "shipping_city": "Одеса",
+                        "shipping_code": "ukrposhta.standard_department",
+                        "ukrposhta_cn_number": "0505710803794",
+                        "total": "1778.00",
+                        "payment_method": "Оплата при доставці",
+                        "products": [
+                            {
+                                "product_id": "pillow_04",
+                                "name": "Подушка ортопедична",
+                                "quantity": "2",
+                                "price": "889.00",
+                                "total": "1778.00",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+    client = OpenCartClient(
+        UkrposhtaOrderHttp(),  # type: ignore[arg-type]
+        base_url="https://example.test",
+        api_key="test",
+        endpoint="/index.php?route=api/crm_orders",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders(
+        datetime(2026, 9, 19, tzinfo=ZoneInfo("Europe/Kyiv"))
+    )
+
+    assert len(orders) == 1
+    assert orders[0].sync_key == "opencart:972"
+    assert orders[0].tracking_number == "0505710803794"
+
+
+@pytest.mark.parametrize(
+    "nova_poshta_value",
+    ["stale-invalid-value", "20451234567890"],
+)
+def test_opencart_prefers_ukrposhta_ttn_for_ukrposhta_shipping(
+    nova_poshta_value: str,
+) -> None:
+    raw = {
+        "shipping_code": "ukrposhta.standard_department",
+        "novaposhta_cn_number": nova_poshta_value,
+        "ukrposhta_cn_number": "0505710803794",
+    }
+
+    assert OpenCartClient._tracking_number(raw, "") == "0505710803794"
+
+
 def test_opencart_completion_accepts_boolean_text_and_localized_statuses() -> None:
     assert OpenCartClient._is_completed({"is_completed": "true"}) is True
     assert OpenCartClient._is_completed({"order_status": "Виконано"}) is True

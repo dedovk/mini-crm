@@ -138,6 +138,25 @@ class OpenCartClient:
         phone_markers = ("по тел", "телефон", "заказ по тел", "замовлення по тел", "phone")
         return "phone" if any(marker in compact for marker in phone_markers) else "site"
 
+    @staticmethod
+    def _tracking_number(raw: dict[str, Any], note: str) -> str:
+        """Return the current carrier's TTN before considering legacy fallbacks."""
+        shipping = str(first_value(raw, "shipping_code", "shipping_method")).casefold()
+        nova_poshta = raw.get("novaposhta_cn_number")
+        ukrposhta = raw.get("ukrposhta_cn_number")
+        carrier_values = (
+            (ukrposhta, nova_poshta)
+            if "ukrposhta" in shipping or "укрпошт" in shipping
+            else (nova_poshta, ukrposhta)
+        )
+        return find_tracking_number(
+            *carrier_values,
+            raw.get("ttn"),
+            raw.get("tracking_number"),
+            raw.get("declaration_number"),
+            note,
+        )
+
     def _normalize(self, raw: dict[str, Any]) -> Order:
         products = raw.get("products") or []
         items: list[OrderItem] = []
@@ -175,16 +194,7 @@ class OpenCartClient:
             customer_name=full_name,
             city=str(first_value(raw, "shipping_city", "payment_city")),
             phone=normalize_phone(first_value(raw, "telephone", "phone")),
-            tracking_number=find_tracking_number(
-                first_value(
-                    raw,
-                    "novaposhta_cn_number",
-                    "ttn",
-                    "tracking_number",
-                    "declaration_number",
-                ),
-                note,
-            ),
+            tracking_number=self._tracking_number(raw, note),
             total=decimal_value(first_value(raw, "total")),
             payment_method=classify_payment(payment_text, note),
             note=note,

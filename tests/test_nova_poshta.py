@@ -32,7 +32,13 @@ def test_nova_poshta_filters_invalid_tracking_values() -> None:
     )
 
     statuses = client.get_statuses(
-        ["invalid", "123", "ТТН 20451234567890", "20451234567890"]
+        [
+            "invalid",
+            "123",
+            "0505710803794",
+            "ТТН 20451234567890",
+            "20451234567890",
+        ]
     )
 
     assert http.documents == [{"DocumentNumber": "20451234567890"}]
