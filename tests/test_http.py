@@ -66,3 +66,22 @@ def test_http_client_retries_invalid_json_once() -> None:
 
     assert payload == {"ok": True}
     sleep.assert_called_once_with(1)
+
+
+def test_http_client_can_disable_retries_for_optional_detail_request() -> None:
+    limited = response(429, retry_after="120")
+    client = HttpClient(max_retries=4)
+    client.session.request = Mock(return_value=limited)
+
+    with (
+        patch("crm_sync.clients.http.time.sleep") as sleep,
+        pytest.raises(ApiError),
+    ):
+        client.request_json(
+            "GET",
+            "https://example.test/orders/42",
+            retry_limit=0,
+        )
+
+    sleep.assert_not_called()
+    assert client.session.request.call_count == 1

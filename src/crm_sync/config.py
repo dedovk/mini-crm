@@ -81,7 +81,6 @@ class Settings:
     supplier_melad_spreadsheet_id: str
     prom_token: str
     prom_base_url: str
-    prom_installment_fallback_rate: Decimal
     rozetka_token: str
     rozetka_username: str
     rozetka_password: str
@@ -146,11 +145,6 @@ class Settings:
             supplier_melad_spreadsheet_id=_env("SUPPLIER_MELAD_SPREADSHEET_ID"),
             prom_token=_env("PROM_API_TOKEN"),
             prom_base_url=_env("PROM_API_BASE_URL", "https://my.prom.ua/api/v1"),
-            prom_installment_fallback_rate=_env_decimal(
-                "PROM_INSTALLMENT_FALLBACK_RATE",
-                Decimal(0),
-                maximum=Decimal(1),
-            ),
             rozetka_token=_env("ROZETKA_API_TOKEN"),
             rozetka_username=_env("ROZETKA_USERNAME"),
             rozetka_password=_env("ROZETKA_PASSWORD"),

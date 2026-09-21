@@ -26,9 +26,18 @@ class HttpClient:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "marketplace-crm-sync/0.1"})
 
-    def request_json(self, method: str, url: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
+    def request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        retry_limit: int | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any] | list[Any]:
+        """Request JSON with the default or a caller-bounded retry budget."""
         last_error: Exception | None = None
-        for attempt in range(self.max_retries + 1):
+        max_retries = self.max_retries if retry_limit is None else max(retry_limit, 0)
+        for attempt in range(max_retries + 1):
             try:
                 response = self.session.request(method, url, timeout=self.timeout, **kwargs)
                 if response.status_code == 429 or response.status_code >= 500:
@@ -51,7 +60,7 @@ class HttpClient:
                     exc.response is not None
                     and (exc.response.status_code == 429 or exc.response.status_code >= 500)
                 )
-                if not retryable or attempt >= self.max_retries:
+                if not retryable or attempt >= max_retries:
                     break
                 delay = self._retry_delay(exc, attempt)
                 status = exc.response.status_code if isinstance(exc, requests.HTTPError) and exc.response else None

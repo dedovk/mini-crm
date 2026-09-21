@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -456,7 +457,7 @@ def test_prom_normalizer_reads_installment_commission_separately() -> None:
     assert order.installment_commission_source == "reported"
 
 
-def test_prom_normalizer_calculates_installment_commission_from_parts_count() -> None:
+def test_prom_normalizer_does_not_treat_tariff_as_actual_commission() -> None:
     client = PromClient(
         HttpClient(max_retries=0),
         token="test",
@@ -474,17 +475,16 @@ def test_prom_normalizer_calculates_installment_commission_from_parts_count() ->
         }
     )
 
-    assert order.installment_commission == Decimal("164.61")
-    assert order.installment_commission_source == "tariff"
+    assert order.installment_commission == 0
+    assert order.installment_commission_source == "unresolved"
 
 
-def test_prom_normalizer_uses_configured_fallback_rate_when_api_omits_fee_details() -> None:
+def test_prom_normalizer_leaves_missing_installment_commission_unresolved() -> None:
     client = PromClient(
         HttpClient(max_retries=0),
         token="test",
         base_url="https://example.test",
         timezone="Europe/Kyiv",
-        installment_fallback_rate=Decimal("0.037"),
     )
     order = client._normalize(
         {
@@ -499,8 +499,8 @@ def test_prom_normalizer_uses_configured_fallback_rate_when_api_omits_fee_detail
     )
 
     assert order.advertising_cost == Decimal("90.11")
-    assert order.installment_commission == Decimal("49.17")
-    assert order.installment_commission_source == "fallback"
+    assert order.installment_commission == 0
+    assert order.installment_commission_source == "unresolved"
 
 
 def test_prom_normalizer_does_not_guess_unknown_installment_count() -> None:
@@ -509,7 +509,6 @@ def test_prom_normalizer_does_not_guess_unknown_installment_count() -> None:
         token="test",
         base_url="https://example.test",
         timezone="Europe/Kyiv",
-        installment_fallback_rate=Decimal("0.037"),
     )
     order = client._normalize(
         {
@@ -523,6 +522,7 @@ def test_prom_normalizer_does_not_guess_unknown_installment_count() -> None:
     )
 
     assert order.installment_commission == 0
+    assert order.installment_commission_source == "unresolved"
 
 
 def test_prom_normalizer_reads_installment_commission_from_named_charge() -> None:
@@ -616,6 +616,202 @@ def test_prom_normalizer_accepts_ukrainian_installment_commission_label() -> Non
     )
 
     assert order.installment_commission == Decimal("49.17")
+
+
+class PromInstallmentDetailStub:
+    def __init__(self, detail_payload: object) -> None:
+        self.detail_payload = detail_payload
+        self.urls: list[str] = []
+
+    def request_json(self, method: str, url: str, **kwargs: Any) -> Any:
+        self.urls.append(url)
+        if url.endswith("/orders/427933705"):
+            if isinstance(self.detail_payload, Exception):
+                raise self.detail_payload
+            return self.detail_payload
+        return {
+            "orders": [
+                {
+                    "id": 427933705,
+                    "status": "delivered",
+                    "date_created": "2026-09-16 06:53:00",
+                    "full_price": 5849,
+                    "payment_option": {"name": "Оплата частинами"},
+                    "prosale_commission": 345.68,
+                    "delivery_provider_data": {"declaration_number": "20451537282409"},
+                    "products": [
+                        {
+                            "name": "Драбина-трансформер",
+                            "sku": "MFG58",
+                            "quantity": 1,
+                            "price": 5849,
+                        }
+                    ],
+                }
+            ]
+        }
+
+
+def test_prom_fetch_uses_exact_installment_commission_from_order_detail() -> None:
+    http = PromInstallmentDetailStub(
+        {
+            "order": {
+                "id": 427933705,
+                "full_price": 1,
+                "products": [{"name": "Partial detail must not replace list data"}],
+                "commissions": [
+                    {"name": "Комиссия по Оплатить частями", "amount": 99.43}
+                ],
+            }
+        }
+    )
+    client = PromClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders_between(
+        datetime(2026, 9, 15, tzinfo=ZoneInfo("Europe/Kyiv")),
+        datetime(2026, 9, 21, tzinfo=ZoneInfo("Europe/Kyiv")),
+    )
+
+    assert len(orders) == 1
+    assert orders[0].installment_commission == Decimal("99.43")
+    assert orders[0].installment_commission_source == "reported"
+    assert orders[0].total == Decimal(5849)
+    assert orders[0].items[0].name == "Драбина-трансформер"
+    assert http.urls.count("https://example.test/orders/427933705") == 1
+
+
+def test_prom_installment_detail_is_cached_across_history_chunks() -> None:
+    http = PromInstallmentDetailStub(
+        {
+            "order": {
+                "id": 427933705,
+                "commissions": [
+                    {"name": "Комиссия по Оплатить частями", "amount": 99.43}
+                ],
+            }
+        }
+    )
+    client = PromClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+    since = datetime(2026, 9, 15, tzinfo=ZoneInfo("Europe/Kyiv"))
+    until = datetime(2026, 9, 21, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+    client.fetch_orders_between(since, until)
+    client.fetch_orders_between(since, until)
+
+    assert http.urls.count("https://example.test/orders/427933705") == 1
+
+
+def test_prom_detail_enrichment_can_be_disabled_or_limited_to_sheet_ids() -> None:
+    http = PromInstallmentDetailStub(
+        {"order": {"id": 427933705, "installment_commission": 99.43}}
+    )
+    client = PromClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+    since = datetime(2026, 9, 15, tzinfo=ZoneInfo("Europe/Kyiv"))
+    until = datetime(2026, 9, 21, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+    without_details = client.fetch_orders_between(
+        since,
+        until,
+        include_installment_details=False,
+    )
+    excluded = client.fetch_orders_between(
+        since,
+        until,
+        installment_order_ids={"different-order"},
+    )
+
+    assert without_details[0].installment_commission_source == "unresolved"
+    assert excluded[0].installment_commission_source == "unresolved"
+    assert "https://example.test/orders/427933705" not in http.urls
+
+
+def test_prom_installment_detail_circuit_stops_request_storm() -> None:
+    class FailingDetailHttp:
+        def __init__(self) -> None:
+            self.detail_calls = 0
+
+        def request_json(self, method: str, url: str, **kwargs: Any) -> Any:
+            if "/orders/" in url and not url.endswith("/orders/list"):
+                self.detail_calls += 1
+                raise ApiError("rate limited", status_code=429)
+            status = kwargs["params"]["status"]
+            if status == "canceled":
+                return {"orders": []}
+            return {
+                "orders": [
+                    {
+                        "id": order_id,
+                        "status": "delivered",
+                        "date_created": "2026-09-16 06:53:00",
+                        "full_price": 100,
+                        "payment_option": {"name": "Оплата частинами"},
+                        "products": [
+                            {"name": "Товар", "quantity": 1, "price": 100}
+                        ],
+                    }
+                    for order_id in ("one", "two", "three", "four")
+                ]
+            }
+
+    http = FailingDetailHttp()
+    client = PromClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders_between(
+        datetime(2026, 9, 15, tzinfo=ZoneInfo("Europe/Kyiv")),
+        datetime(2026, 9, 21, tzinfo=ZoneInfo("Europe/Kyiv")),
+        payment_only=True,
+    )
+
+    assert len(orders) == 4
+    assert http.detail_calls == 2
+    assert client.installment_detail_diagnostics.failures == 2
+    assert client.installment_detail_diagnostics.skipped_by_circuit == 2
+    assert client.installment_detail_diagnostics.degraded
+
+
+@pytest.mark.parametrize(
+    "detail_payload",
+    [ApiError("detail timeout"), {}, {"data": []}],
+)
+def test_prom_fetch_keeps_order_when_installment_detail_is_unavailable(
+    detail_payload: object,
+) -> None:
+    http = PromInstallmentDetailStub(detail_payload)
+    client = PromClient(
+        http,  # type: ignore[arg-type]
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    orders = client.fetch_orders_between(
+        datetime(2026, 9, 15, tzinfo=ZoneInfo("Europe/Kyiv")),
+        datetime(2026, 9, 21, tzinfo=ZoneInfo("Europe/Kyiv")),
+    )
+
+    assert len(orders) == 1
+    assert orders[0].installment_commission == 0
+    assert orders[0].installment_commission_source == "unresolved"
 
 
 def test_prom_normalizer_recovers_unit_price_and_nested_prepayment_note() -> None:

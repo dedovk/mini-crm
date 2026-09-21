@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import ROUND_HALF_UP, Decimal
-from typing import Any
+from decimal import Decimal
+from typing import AbstractSet, Any
 
 from crm_sync.clients.http import ApiError, HttpClient
 from crm_sync.models import InstallmentCommissionSource, Order, OrderItem
@@ -25,23 +26,24 @@ from crm_sync.utils import (
 
 LOGGER = logging.getLogger(__name__)
 
-INSTALLMENT_RATES = {
-    2: Decimal("0.034"),
-    3: Decimal("0.037"),
-    4: Decimal("0.048"),
-    5: Decimal("0.065"),
-    6: Decimal("0.077"),
-    7: Decimal("0.089"),
-    8: Decimal("0.100"),
-    9: Decimal("0.113"),
-    10: Decimal("0.125"),
-    12: Decimal("0.150"),
-    15: Decimal("0.183"),
-    18: Decimal("0.215"),
-    24: Decimal("0.276"),
-}
 COMMISSION_LABEL_MARKERS = ("комис", "коміс", "commission", "fee")
 PROM_SETTLED_PAYMENT_STATUSES = frozenset({"paid", "paid_out", "refunded"})
+_DETAIL_FAILURE_LIMIT = 2
+
+
+@dataclass(frozen=True, slots=True)
+class InstallmentDetailDiagnostics:
+    """Observable outcome of optional Prom installment-detail enrichment."""
+
+    requested: int = 0
+    resolved: int = 0
+    not_reported: int = 0
+    failures: int = 0
+    skipped_by_circuit: int = 0
+
+    @property
+    def degraded(self) -> bool:
+        return self.failures > 0 or self.skipped_by_circuit > 0
 
 
 def _is_installment_commission_label(value: Any) -> bool:
@@ -108,16 +110,11 @@ def _find_installment_commission_by_label(value: Any) -> Any:
 
 def _installment_cost(
     raw: dict[str, Any],
-    payment_text: str,
-    total: Decimal,
-    *,
-    fallback_rate: Decimal,
 ) -> tuple[Decimal, InstallmentCommissionSource]:
     """Return fee and provenance used to obtain it.
 
-    The lookup order is an explicit API field, a labeled nested charge, a
-    supported payment-count tariff, and finally the configured fallback rate.
-    All results are positive and rounded to kopecks.
+    Only an amount explicitly reported by Prom is accepted as financial data.
+    Missing values stay unresolved instead of being estimated from a tariff.
     """
     explicit = _find_named_value(
         raw,
@@ -139,38 +136,7 @@ def _installment_cost(
     labeled_amount = decimal_value(_find_installment_commission_by_label(raw))
     if labeled_amount > 0:
         return labeled_amount, "reported"
-
-    count_value = _find_named_value(
-        raw,
-        {
-            "installments_count",
-            "installment_count",
-            "parts_count",
-            "payments_count",
-            "payment_parts_count",
-            "pay_parts_count",
-            "credit_parts_count",
-        },
-    )
-    count_match = re.search(r"(?<!\d)(\d{1,2})(?!\d)", payment_text)
-    try:
-        count = int(decimal_value(count_value)) if count_value not in (None, "") else 0
-    except (TypeError, ValueError):
-        count = 0
-    if not count and count_match:
-        count = int(count_match.group(1))
-    rate = INSTALLMENT_RATES.get(count)
-    if rate and total > 0:
-        return (
-            (total * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
-            "tariff",
-        )
-    if count == 0 and fallback_rate > 0 and total > 0:
-        return (
-            (total * fallback_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
-            "fallback",
-        )
-    return Decimal(0), ""
+    return Decimal(0), "unresolved"
 
 
 def _prom_payment_method(raw: dict[str, Any], note: str) -> str:
@@ -210,13 +176,31 @@ class PromClient:
         token: str,
         base_url: str,
         timezone: str,
-        installment_fallback_rate: Decimal = Decimal(0),
     ) -> None:
         self.http = http
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timezone = timezone
-        self.installment_fallback_rate = installment_fallback_rate
+        self._installment_detail_cache: dict[
+            str, tuple[Decimal, InstallmentCommissionSource]
+        ] = {}
+        self._detail_requested = 0
+        self._detail_resolved = 0
+        self._detail_not_reported = 0
+        self._detail_failures = 0
+        self._detail_skipped_by_circuit = 0
+        self._detail_circuit_open = False
+
+    @property
+    def installment_detail_diagnostics(self) -> InstallmentDetailDiagnostics:
+        """Return counters used by health checks and maintenance summaries."""
+        return InstallmentDetailDiagnostics(
+            requested=self._detail_requested,
+            resolved=self._detail_resolved,
+            not_reported=self._detail_not_reported,
+            failures=self._detail_failures,
+            skipped_by_circuit=self._detail_skipped_by_circuit,
+        )
 
     def fetch_orders(self, since: datetime) -> list[Order]:
         return self.fetch_orders_between(since, datetime.now(since.tzinfo))
@@ -227,8 +211,16 @@ class PromClient:
         until: datetime,
         *,
         payment_only: bool = False,
+        include_installment_details: bool = True,
+        installment_order_ids: AbstractSet[str] | None = None,
     ) -> list[Order]:
-        """Fetch completed orders changed inside an explicit bounded interval."""
+        """Fetch completed orders changed inside an explicit bounded interval.
+
+        Detail enrichment is explicit so maintenance jobs that only reconcile
+        payment labels do not generate unrelated per-order API requests.  A
+        caller may also restrict enrichment to the sheet rows that actually
+        need an authoritative installment commission.
+        """
         if not self.token:
             LOGGER.info("Prom sync skipped: PROM_API_TOKEN is not configured")
             return []
@@ -259,6 +251,15 @@ class PromClient:
                 }:
                     raw_by_id[order_id] = raw
         raw_orders = list(raw_by_id.values())
+        if include_installment_details:
+            raw_orders = [
+                self._with_installment_detail(
+                    raw,
+                    headers,
+                    eligible_order_ids=installment_order_ids,
+                )
+                for raw in raw_orders
+            ]
 
         normalized: list[Order] = []
         not_completed = 0
@@ -302,6 +303,113 @@ class PromClient:
             len(normalized),
         )
         return normalized
+
+    def _with_installment_detail(
+        self,
+        raw: dict[str, Any],
+        headers: dict[str, str],
+        *,
+        eligible_order_ids: AbstractSet[str] | None = None,
+    ) -> dict[str, Any]:
+        """Enrich an installment order with its official Prom detail payload."""
+        note = " | ".join(dict.fromkeys(collect_note_text(raw)))
+        if _prom_payment_method(raw, note) != "оплата частями":
+            return raw
+        if _installment_cost(raw)[1] == "reported":
+            return raw
+        order_id = str(first_value(raw, "id", "order_id")).strip()
+        if not order_id:
+            LOGGER.warning("Prom installment order has no ID; commission is unresolved")
+            return raw
+        if eligible_order_ids is not None and order_id not in eligible_order_ids:
+            return raw
+        if order_id in self._installment_detail_cache:
+            return self._merge_installment_detail(
+                raw,
+                self._installment_detail_cache[order_id],
+            )
+        if self._detail_circuit_open:
+            self._detail_skipped_by_circuit += 1
+            LOGGER.warning(
+                "Prom installment detail circuit is open; order %s remains unresolved",
+                order_id,
+            )
+            return raw
+        self._detail_requested += 1
+        try:
+            payload = self.http.request_json(
+                "GET",
+                f"{self.base_url}/orders/{order_id}",
+                headers=headers,
+                retry_limit=0,
+            )
+        except ApiError as exc:
+            self._record_detail_failure()
+            LOGGER.warning(
+                "Prom installment detail for order %s is unavailable; commission is unresolved: %s",
+                order_id,
+                exc,
+            )
+            return raw
+        detail = self._detail_order(payload)
+        if detail is None:
+            self._record_detail_failure()
+            LOGGER.warning(
+                "Prom installment detail for order %s has an unsupported shape; commission is unresolved",
+                order_id,
+            )
+            return raw
+        detail_id = str(first_value(detail, "id", "order_id")).strip()
+        if detail_id and detail_id != order_id:
+            self._record_detail_failure()
+            LOGGER.warning(
+                "Prom installment detail ID mismatch for order %s: received %s",
+                order_id,
+                detail_id,
+            )
+            return raw
+        commission = _installment_cost(detail)
+        self._installment_detail_cache[order_id] = commission
+        if commission[1] == "reported":
+            self._detail_resolved += 1
+        else:
+            self._detail_not_reported += 1
+        return self._merge_installment_detail(raw, commission)
+
+    def _record_detail_failure(self) -> None:
+        """Open the detail circuit after repeated failures in one run."""
+        self._detail_failures += 1
+        if self._detail_failures >= _DETAIL_FAILURE_LIMIT:
+            self._detail_circuit_open = True
+
+    @staticmethod
+    def _merge_installment_detail(
+        raw: dict[str, Any],
+        commission: tuple[Decimal, InstallmentCommissionSource],
+    ) -> dict[str, Any]:
+        """Attach only the needed financial value, never unrelated detail fields."""
+        amount, source = commission
+        if source != "reported" or amount <= 0:
+            return raw
+        merged = dict(raw)
+        merged["installment_commission"] = amount
+        return merged
+
+    @staticmethod
+    def _detail_order(payload: Any) -> dict[str, Any] | None:
+        """Extract one order from supported Prom detail response envelopes."""
+        if not isinstance(payload, dict):
+            return None
+        for key in ("order", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, dict):
+                nested = candidate.get("order")
+                return nested if isinstance(nested, dict) else candidate
+            if isinstance(candidate, list) and len(candidate) == 1:
+                return candidate[0] if isinstance(candidate[0], dict) else None
+        if any(key in payload for key in ("id", "order_id")):
+            return payload
+        return None
 
     def _fetch_status_pages(
         self,
@@ -389,12 +497,6 @@ class PromClient:
         recipient = (
             raw.get("delivery_recipient") if isinstance(raw.get("delivery_recipient"), dict) else {}
         )
-        payment = raw.get("payment_option")
-        payment_text = (
-            str(first_value(payment, "name", "title"))
-            if isinstance(payment, dict)
-            else str(payment or "")
-        )
         prosale = raw.get("prosale_commission")
         cpa_commission = raw.get("cpa_commission")
         advertising_cost = decimal_value(prosale) or decimal_value(cpa_commission)
@@ -403,23 +505,11 @@ class PromClient:
         installment_commission = Decimal(0)
         installment_source: InstallmentCommissionSource = ""
         if payment_method == "оплата частями":
-            installment_commission, installment_source = _installment_cost(
-                raw,
-                payment_text,
-                total,
-                fallback_rate=self.installment_fallback_rate,
-            )
-            if installment_source == "fallback":
+            installment_commission, installment_source = _installment_cost(raw)
+            if installment_commission == 0:
                 LOGGER.warning(
-                    "Prom installment commission for order %s was estimated at "
-                    "configured rate %s because the API omitted fee details",
-                    first_value(raw, "id", "order_id"),
-                    self.installment_fallback_rate,
-                )
-            elif installment_commission == 0:
-                LOGGER.warning(
-                    "Prom installment order %s has no explicit commission or "
-                    "supported payment count",
+                    "Prom installment order %s has no explicit commission; "
+                    "profit remains unresolved",
                     first_value(raw, "id", "order_id"),
                 )
         recipient_name = " ".join(

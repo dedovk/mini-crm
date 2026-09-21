@@ -1,6 +1,5 @@
 import base64
 import json
-from decimal import Decimal
 
 import pytest
 
@@ -79,21 +78,3 @@ def test_supplier_sheet_id_is_optional_and_read_from_environment(
 
     monkeypatch.setenv("SUPPLIER_MELAD_SPREADSHEET_ID", "melad-sheet")
     assert Settings.from_env().supplier_melad_spreadsheet_id == "melad-sheet"
-
-
-def test_prom_installment_fallback_rate_is_explicit_and_validated(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    configure_required_environment(monkeypatch)
-    assert Settings.from_env().prom_installment_fallback_rate == 0
-
-    monkeypatch.setenv("PROM_INSTALLMENT_FALLBACK_RATE", "0.037")
-    assert Settings.from_env().prom_installment_fallback_rate == Decimal("0.037")
-
-    monkeypatch.setenv("PROM_INSTALLMENT_FALLBACK_RATE", "unknown")
-    with pytest.raises(ConfigurationError, match="must be a decimal number"):
-        Settings.from_env()
-
-    monkeypatch.setenv("PROM_INSTALLMENT_FALLBACK_RATE", "3.7")
-    with pytest.raises(ConfigurationError, match="at most 1"):
-        Settings.from_env()

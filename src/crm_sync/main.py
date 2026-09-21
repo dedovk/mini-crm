@@ -50,7 +50,6 @@ def build_service(settings: Settings) -> SyncService:
             token=settings.prom_token,
             base_url=settings.prom_base_url,
             timezone=settings.timezone,
-            installment_fallback_rate=settings.prom_installment_fallback_rate,
         ),
         rozetka,
         OpenCartClient(

@@ -6,7 +6,14 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Literal, Mapping
 
-InstallmentCommissionSource = Literal["", "reported", "tariff", "fallback", "legacy"]
+InstallmentCommissionSource = Literal[
+    "",
+    "reported",
+    "unresolved",
+    "tariff",
+    "fallback",
+    "legacy",
+]
 
 
 @dataclass(slots=True)
@@ -107,6 +114,18 @@ class PaymentBackfillResult:
     api_order_matches: int = 0
     unmatched_sheet_orders: int = 0
     missing_expected_order_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class InstallmentReconciliationResult:
+    """Outcome of an authoritative Prom installment-fee reconciliation."""
+
+    cell_updates: int = 0
+    order_updates: int = 0
+    reported_orders: int = 0
+    unresolved_orders: tuple[str, ...] = ()
+    audit_events: tuple[OrderAuditEvent, ...] = ()
+    backup_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
