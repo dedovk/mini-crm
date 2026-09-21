@@ -7,8 +7,8 @@ from crm_sync.config import ConfigurationError
 from crm_sync.payment_backfill import (
     _backfill_days,
     _expected_order_ids,
-    _fetch_historical_orders,
-    _require_prom_token,
+    fetch_historical_orders,
+    require_prom_token,
 )
 
 
@@ -35,7 +35,7 @@ def test_payment_backfill_days_rejects_unsafe_values(
 
 def test_payment_backfill_requires_prom_token() -> None:
     with pytest.raises(ConfigurationError, match="PROM_API_TOKEN"):
-        _require_prom_token("  ")
+        require_prom_token("  ")
 
 
 def test_payment_backfill_parses_expected_order_ids(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,16 +50,24 @@ def test_payment_backfill_fetches_long_history_in_bounded_chunks() -> None:
             self.calls: list[tuple[datetime, datetime]] = []
 
         def fetch_orders_between(
-            self, since: datetime, until: datetime, *, payment_only: bool = False
-        ):
+            self,
+            since: datetime,
+            until: datetime,
+            *,
+            payment_only: bool = False,
+            include_installment_details: bool = True,
+            installment_order_ids: set[str] | None = None,
+        ) -> list[SimpleNamespace]:
             assert payment_only
+            assert not include_installment_details
+            assert installment_order_ids is None
             self.calls.append((since, until))
             return [SimpleNamespace(sync_key=f"prom:{len(self.calls)}")]
 
     prom = FakeProm()
     until = datetime(2026, 9, 18, tzinfo=UTC)
 
-    orders = _fetch_historical_orders(prom, until=until, days=65, chunk_days=30)
+    orders = fetch_historical_orders(prom, until=until, days=65, chunk_days=30)
 
     assert len(prom.calls) == 3
     assert all((end - start).days <= 30 for start, end in prom.calls)

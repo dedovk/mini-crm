@@ -5,6 +5,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import AbstractSet
 from zoneinfo import ZoneInfo
 
 from crm_sync.clients.google_sheets import GoogleSheetsGateway
@@ -28,12 +29,14 @@ def _backfill_days() -> int:
     return days
 
 
-def _fetch_historical_orders(
+def fetch_historical_orders(
     prom: PromClient,
     *,
     until: datetime,
     days: int,
     chunk_days: int = 30,
+    include_installment_details: bool = False,
+    installment_order_ids: AbstractSet[str] | None = None,
 ) -> list[Order]:
     """Fetch long history in retryable chunks and deduplicate by sync key."""
     beginning = until - timedelta(days=days)
@@ -41,7 +44,13 @@ def _fetch_historical_orders(
     by_key: dict[str, Order] = {}
     while chunk_start < until:
         chunk_end = min(chunk_start + timedelta(days=chunk_days), until)
-        chunk = prom.fetch_orders_between(chunk_start, chunk_end, payment_only=True)
+        chunk = prom.fetch_orders_between(
+            chunk_start,
+            chunk_end,
+            payment_only=True,
+            include_installment_details=include_installment_details,
+            installment_order_ids=installment_order_ids,
+        )
         LOGGER.info(
             "Prom payment backfill fetched %s order(s) through %s", len(chunk), chunk_end.date()
         )
@@ -51,7 +60,7 @@ def _fetch_historical_orders(
     return list(by_key.values())
 
 
-def _require_prom_token(token: str) -> None:
+def require_prom_token(token: str) -> None:
     """Fail maintenance runs instead of silently reporting zero corrections."""
     if not token.strip():
         raise ConfigurationError("PROM_API_TOKEN is required for payment backfill")
@@ -95,7 +104,7 @@ def main() -> int:
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
         days = _backfill_days()
-        _require_prom_token(settings.prom_token)
+        require_prom_token(settings.prom_token)
         now = datetime.now(ZoneInfo(settings.timezone))
         http = HttpClient(timeout=settings.http_timeout, max_retries=settings.http_max_retries)
         prom = PromClient(
@@ -103,7 +112,6 @@ def main() -> int:
             token=settings.prom_token,
             base_url=settings.prom_base_url,
             timezone=settings.timezone,
-            installment_fallback_rate=settings.prom_installment_fallback_rate,
         )
         sheets = GoogleSheetsGateway(
             credentials_info=settings.google_service_account_info,
@@ -113,7 +121,7 @@ def main() -> int:
             sender_options=settings.sender_options,
             timeout=settings.http_timeout,
         )
-        orders = _fetch_historical_orders(prom, until=now, days=days)
+        orders = fetch_historical_orders(prom, until=now, days=days)
         expected_order_ids = _expected_order_ids()
         preview = sheets.backfill_prom_payments(
             orders,
