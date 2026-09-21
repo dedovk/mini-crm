@@ -23,6 +23,7 @@ from crm_sync.models import (
 )
 from crm_sync.sheet_layout import (
     ALL_HEADERS,
+    BUSINESS_HEADERS,
     REPORTING_EXCLUDED_REFUSAL,
     ROW_DAY,
     ROW_ORDER,
@@ -248,6 +249,35 @@ def test_negative_net_profit_has_a_red_conditional_format_rule() -> None:
         "values": [{"userEnteredValue": "0"}],
     }
     assert net_rule["booleanRule"]["format"]["backgroundColorStyle"]
+
+
+def test_unresolved_installment_has_an_orange_row_rule() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = LayoutWorksheet([])
+    gateway.header_row = 4
+
+    requests = gateway._conditional_format_requests(20)
+    formulas = [
+        request["addConditionalFormatRule"]["rule"]
+        for request in requests
+        if request["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"][
+            "type"
+        ]
+        == "CUSTOM_FORMULA"
+    ]
+    unresolved = next(
+        rule
+        for rule in formulas
+        if "unresolved"
+        in rule["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+    )
+
+    assert unresolved["ranges"][0]["startColumnIndex"] == 0
+    assert unresolved["ranges"][0]["endColumnIndex"] == len(BUSINESS_HEADERS)
+    assert (
+        unresolved["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+        == '=$AD5="unresolved"'
+    )
 
 
 def test_receipt_schema_migration_is_idempotent() -> None:
@@ -746,7 +776,7 @@ def test_refresh_preserves_known_installment_when_prom_payload_is_incomplete() -
     gateway.refresh_order_details([order])
 
     updated_ranges = {update["range"] for update in worksheet.updates}
-    assert "AD5" not in updated_ranges
+    assert "AD5" in updated_ranges
     assert "S5" not in updated_ranges
 
 
@@ -793,7 +823,7 @@ def test_refresh_does_not_replace_known_commission_with_calculation(
     assert "AC5" not in updated_ranges
 
 
-def test_refresh_replaces_old_fallback_with_new_configured_estimate() -> None:
+def test_refresh_replaces_old_fallback_with_reported_commission() -> None:
     rows = [[""] * LAST_COLUMN for _ in range(5)]
     row = rows[4]
     row[COLUMNS.row_type - 1] = ROW_ORDER
@@ -821,7 +851,7 @@ def test_refresh_replaces_old_fallback_with_new_configured_estimate() -> None:
         sender="",
         advertising_cost=Decimal("90.11"),
         installment_commission=Decimal("49.17"),
-        installment_commission_source="fallback",
+        installment_commission_source="reported",
         items=[OrderItem("Товар", "SKU", Decimal(1), Decimal(1329), Decimal(1329))],
     )
 
@@ -830,7 +860,272 @@ def test_refresh_replaces_old_fallback_with_new_configured_estimate() -> None:
     updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
     assert updates["AC5"] == 49.17
     assert updates["S5"] == "90.11\n49.17"
+    assert updates["AD5"] == "reported"
+
+
+@pytest.mark.parametrize("old_source", ["fallback", "tariff"])
+def test_refresh_clears_historical_estimate_when_commission_is_unresolved(
+    old_source: str,
+) -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:427933705"
+    row[COLUMNS.installment_commission - 1] = 216.41
+    row[COLUMNS.installment_commission_source - 1] = old_source
+    row[COLUMNS.advertising_base - 1] = 345.68
+    row[COLUMNS.advertising - 1] = "345.68\n216.41"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.header_row = 4
+    order = Order(
+        source="prom",
+        external_id="427933705",
+        created_at=datetime(2026, 9, 16, tzinfo=UTC),
+        completed_at=datetime(2026, 9, 16, tzinfo=UTC),
+        customer_name="Customer",
+        city="Korosten",
+        phone="+380671234567",
+        tracking_number="20451537282409",
+        total=Decimal(5849),
+        payment_method="оплата частями",
+        note="",
+        sender="",
+        advertising_cost=Decimal("345.68"),
+        installment_commission_source="unresolved",
+        items=[OrderItem("Товар", "MFG58", Decimal(1), Decimal(5849), Decimal(5849))],
+    )
+
+    gateway.refresh_order_details([order])
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert updates["AC5"] == ""
+    assert updates["AD5"] == "unresolved"
+    assert updates["S5"] == "345.68\nКОМІСІЯ?"
+
+
+def test_installment_reconciliation_repairs_reported_and_quarantines_estimated_values() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(6)]
+    reported_row = rows[4]
+    reported_row[COLUMNS.row_type - 1] = ROW_ORDER
+    reported_row[COLUMNS.sync_key - 1] = "prom:427933705"
+    reported_row[COLUMNS.order_number - 1] = "427933705"
+    reported_row[COLUMNS.advertising_base - 1] = 345.68
+    reported_row[COLUMNS.installment_commission - 1] = 216.41
+    reported_row[COLUMNS.installment_commission_source - 1] = "fallback"
+    reported_row[COLUMNS.advertising - 1] = "345.68\n216.41"
+    unresolved_row = rows[5]
+    unresolved_row[COLUMNS.row_type - 1] = ROW_ORDER
+    unresolved_row[COLUMNS.sync_key - 1] = "prom:older"
+    unresolved_row[COLUMNS.order_number - 1] = "older"
+    unresolved_row[COLUMNS.advertising_base - 1] = 100
+    unresolved_row[COLUMNS.installment_commission - 1] = 37
+    unresolved_row[COLUMNS.installment_commission_source - 1] = "tariff"
+    unresolved_row[COLUMNS.advertising - 1] = "100.00\n37.00"
+    worksheet = StubWorksheet(rows)
+    write_sequence: list[str] = []
+    original_batch_update = worksheet.batch_update
+
+    def tracked_batch_update(updates, **kwargs) -> None:
+        write_sequence.append("cells")
+        original_batch_update(updates, **kwargs)
+
+    worksheet.batch_update = tracked_batch_update
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.create_backup = lambda *, created_at: (
+        write_sequence.append("backup") or "backup-installments"
+    )
+    gateway._existing_audit_details = lambda: set()
+    gateway.append_audit_events = lambda events: (
+        write_sequence.append("audit") or len(events)
+    )
+    common = {
+        "source": "prom",
+        "created_at": datetime(2026, 9, 16, tzinfo=UTC),
+        "completed_at": datetime(2026, 9, 16, tzinfo=UTC),
+        "customer_name": "Customer",
+        "city": "Kyiv",
+        "phone": "+380501234567",
+        "tracking_number": "20451537282409",
+        "total": Decimal(5849),
+        "payment_method": "оплата частями",
+        "note": "",
+        "sender": "наш",
+        "items": [OrderItem("Товар", "SKU", Decimal(1), Decimal(5849), Decimal(5849))],
+    }
+    orders = [
+        Order(
+            external_id="427933705",
+            advertising_cost=Decimal("345.68"),
+            installment_commission=Decimal("99.43"),
+            installment_commission_source="reported",
+            **common,
+        ),
+        Order(
+            external_id="older",
+            advertising_cost=Decimal(100),
+            installment_commission_source="unresolved",
+            **common,
+        ),
+    ]
+
+    result = gateway.reconcile_prom_installments(
+        orders,
+        observed_at=datetime(2026, 9, 21, tzinfo=UTC),
+        apply_changes=True,
+    )
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert updates["AC5"] == 99.43
+    assert updates["AD5"] == "reported"
+    assert updates["S5"] == "345.68\n99.43"
+    assert updates["AC6"] == ""
+    assert updates["AD6"] == "unresolved"
+    assert updates["S6"] == "100.00\nКОМІСІЯ?"
+    assert updates["T5"] == net_profit_formula(5)
+    assert updates["T6"] == net_profit_formula(6)
+    assert result.order_updates == 2
+    assert result.reported_orders == 1
+    assert result.unresolved_orders == ("older",)
+    assert result.backup_name == "backup-installments"
+    assert set(worksheet.update_modes) == {False}
+    assert write_sequence == ["backup", "cells", "audit"]
+
+
+def test_installment_reconciliation_ids_exclude_already_reported_rows() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(7)]
+    for row, order_id, source in (
+        (rows[4], "427933705", "fallback"),
+        (rows[5], "reported-order", "reported"),
+        (rows[6], "cod-order", "fallback"),
+    ):
+        row[COLUMNS.row_type - 1] = ROW_ORDER
+        row[COLUMNS.sync_key - 1] = f"prom:{order_id}"
+        row[COLUMNS.order_number - 1] = order_id
+        row[COLUMNS.installment_commission_source - 1] = source
+        row[COLUMNS.payment_method - 1] = (
+            "наложка" if order_id == "cod-order" else "оплата частями"
+        )
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = StubWorksheet(rows)
+    gateway._existing_audit_details = lambda: {
+        "prom-installment-reconciliation:prom:reported-order:0 (reported)"
+    }
+
+    assert gateway.installment_reconciliation_order_ids() == {"427933705"}
+
+
+def test_installment_reconciliation_recovers_audit_after_cells_already_succeeded() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:427933705"
+    row[COLUMNS.order_number - 1] = "427933705"
+    row[COLUMNS.payment_method - 1] = "оплата частями"
+    row[COLUMNS.advertising_base - 1] = 345.68
+    row[COLUMNS.installment_commission - 1] = 99.43
+    row[COLUMNS.installment_commission_source - 1] = "reported"
+    row[COLUMNS.advertising - 1] = "345.68\n99.43"
+    row[COLUMNS.net_profit - 1] = net_profit_formula(5)
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway._existing_audit_details = lambda: set()
+    appended: list[OrderAuditEvent] = []
+    gateway.append_audit_events = lambda events: appended.extend(events) or len(events)
+    order = Order(
+        source="prom",
+        external_id="427933705",
+        created_at=datetime(2026, 9, 16, tzinfo=UTC),
+        completed_at=datetime(2026, 9, 16, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451537282409",
+        total=Decimal(5849),
+        payment_method="оплата частями",
+        note="",
+        sender="наш",
+        advertising_cost=Decimal("345.68"),
+        installment_commission=Decimal("99.43"),
+        installment_commission_source="reported",
+        items=[OrderItem("Товар", "SKU", Decimal(1), Decimal(5849), Decimal(5849))],
+    )
+
+    result = gateway.reconcile_prom_installments(
+        [order],
+        observed_at=datetime(2026, 9, 21, tzinfo=UTC),
+        apply_changes=True,
+        expected_order_ids={"427933705"},
+    )
+
+    assert result.cell_updates == 0
+    assert worksheet.updates == []
+    assert len(appended) == 1
+    assert appended[0].details == (
+        "prom-installment-reconciliation:prom:427933705:99.43 (reported)"
+    )
+
+
+def test_installment_reconciliation_reports_sheet_order_missing_from_api() -> None:
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = StubWorksheet([[""] * LAST_COLUMN])
+
+    result = gateway.reconcile_prom_installments(
+        [],
+        observed_at=datetime(2026, 9, 21, tzinfo=UTC),
+        apply_changes=False,
+        expected_order_ids={"missing-order"},
+    )
+
+    assert result.unresolved_orders == ("missing-order",)
+
+
+def test_installment_reconciliation_preserves_existing_reported_value_when_api_is_unresolved() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(5)]
+    row = rows[4]
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:427933705"
+    row[COLUMNS.order_number - 1] = "427933705"
+    row[COLUMNS.installment_commission - 1] = 99.43
+    row[COLUMNS.installment_commission_source - 1] = "reported"
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+    gateway.create_backup = lambda *, created_at: "backup-installments"
+    gateway._existing_audit_details = lambda: set()
+    gateway.append_audit_events = lambda events: len(events)
+    order = Order(
+        source="prom",
+        external_id="427933705",
+        created_at=datetime(2026, 9, 16, tzinfo=UTC),
+        completed_at=datetime(2026, 9, 16, tzinfo=UTC),
+        customer_name="Customer",
+        city="Kyiv",
+        phone="+380501234567",
+        tracking_number="20451537282409",
+        total=Decimal(5849),
+        payment_method="оплата частями",
+        note="",
+        sender="наш",
+        installment_commission_source="unresolved",
+        items=[OrderItem("Товар", "SKU", Decimal(1), Decimal(5849), Decimal(5849))],
+    )
+
+    result = gateway.reconcile_prom_installments(
+        [order],
+        observed_at=datetime(2026, 9, 21, tzinfo=UTC),
+        apply_changes=True,
+    )
+
+    updates = {update["range"]: update["values"][0][0] for update in worksheet.updates}
+    assert "AC5" not in updates
     assert "AD5" not in updates
+    assert updates["S5"] == "0.00\n99.43"
+    assert updates["T5"] == net_profit_formula(5)
+    assert result.cell_updates == 2
 
 
 def test_supplier_costs_fill_only_blank_cells_and_preserve_manual_values() -> None:

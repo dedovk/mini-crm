@@ -155,6 +155,7 @@ class SourceBatch:
     orders: tuple[Order, ...]
     counts: dict[str, int]
     failed_sources: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +242,18 @@ class SyncService:
             or has_prepayment_request(order.note)
             or order.payment_method.strip().casefold() == "смешанная"
         ]
-        warnings: list[str] = []
+        warnings: list[str] = list(source_batch.warnings)
+        unresolved_installments = sorted(
+            order.external_id
+            for order in fetched
+            if order.source.casefold() == "prom"
+            and order.installment_commission_source == "unresolved"
+        )
+        if unresolved_installments:
+            warnings.append(
+                "Prom installment commission is unresolved for order(s): "
+                + ", ".join(unresolved_installments)
+            )
 
         incoming_integrity = validate_incoming_orders(fetched)
         if not incoming_integrity.ok:
@@ -497,6 +509,7 @@ class SyncService:
     def _fetch_orders(self, since: datetime) -> SourceBatch:
         fetched: list[Order] = []
         failed_sources: list[str] = []
+        warnings: list[str] = []
         counts: dict[str, int] = {}
         for source in self.sources:
             try:
@@ -508,10 +521,21 @@ class SyncService:
             counts[source.source] = len(orders)
             LOGGER.info("%s returned %s eligible order(s)", source.source, len(orders))
             fetched.extend(orders)
+            diagnostics = getattr(source, "installment_detail_diagnostics", None)
+            if diagnostics is not None and diagnostics.degraded:
+                component = f"{source.source}-installment-detail"
+                failed_sources.append(component)
+                warning = (
+                    f"{component} is degraded: {diagnostics.failures} failure(s), "
+                    f"{diagnostics.skipped_by_circuit} request(s) skipped by circuit breaker"
+                )
+                warnings.append(warning)
+                LOGGER.warning(warning)
         return SourceBatch(
             orders=tuple(fetched),
             counts=counts,
             failed_sources=tuple(dict.fromkeys(failed_sources)),
+            warnings=tuple(warnings),
         )
 
     def _fetch_expenses(self, now: datetime) -> tuple[dict[str, Decimal] | None, str]:

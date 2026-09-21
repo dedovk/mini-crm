@@ -12,8 +12,13 @@ from google.oauth2.service_account import Credentials
 from gspread import BackOffHTTPClient
 from gspread.utils import rowcol_to_a1
 
+from crm_sync.installment_commissions import (
+    InstallmentCommissionState,
+    resolve_installment_commission,
+)
 from crm_sync.integrity import IntegrityReport
 from crm_sync.models import (
+    InstallmentReconciliationResult,
     Order,
     OrderAuditEvent,
     PaymentBackfillResult,
@@ -93,6 +98,7 @@ SUPPLIER_SENDER_DEFAULTS = {
 _USD_RATE_PATTERN = re.compile(r"^\d{2,3}(?:[.,]\d{1,4})?$")
 _MIN_USD_RATE = Decimal("20")
 _MAX_USD_RATE = Decimal("100")
+_SHEETS_UPDATE_BATCH_SIZE = 400
 
 
 class ConcurrentSheetEditError(RuntimeError):
@@ -111,6 +117,13 @@ class _SupplierCostCandidate:
     expected: ResolvedSupplierCost
     operational_day: date | None
     rate: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class _InstallmentRowPlan:
+    updates: tuple[dict[str, Any], ...]
+    old_value: str
+    new_value: str
 
 
 class GoogleSheetsGateway:
@@ -153,6 +166,39 @@ class GoogleSheetsGateway:
 
     def create_backup(self, *, created_at: datetime) -> str:
         return create_sheet_backup(self.spreadsheet, self.worksheet, created_at=created_at)
+
+    def installment_reconciliation_order_ids(self) -> set[str]:
+        """Return rows needing financial reconciliation or audit recovery."""
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        audit_details = self._existing_audit_details()
+        order_ids: set[str] = set()
+        for row in values:
+            if (
+                len(row) < COLUMNS.installment_commission_source
+                or str(row[COLUMNS.row_type - 1]).strip() != ROW_ORDER
+                or not str(row[COLUMNS.sync_key - 1])
+                .strip()
+                .casefold()
+                .startswith("prom:")
+                or str(row[COLUMNS.payment_method - 1]).strip().casefold()
+                != "оплата частями"
+            ):
+                continue
+            order_id = str(row[COLUMNS.order_number - 1]).strip()
+            if not order_id:
+                continue
+            sync_key = str(row[COLUMNS.sync_key - 1]).strip().casefold()
+            source = str(
+                row[COLUMNS.installment_commission_source - 1]
+            ).strip()
+            amount = decimal_value(row[COLUMNS.installment_commission - 1])
+            marker = (
+                "prom-installment-reconciliation:"
+                f"{sync_key}:{amount} ({source})"
+            )
+            if source != "reported" or marker not in audit_details:
+                order_ids.add(order_id)
+        return order_ids
 
     def backfill_prom_payments(
         self,
@@ -283,8 +329,10 @@ class GoogleSheetsGateway:
         missing_events = [event for event in events if event.details not in existing_audit_details]
         if missing_events:
             self.append_audit_events(missing_events)
-        for start in range(0, len(updates), 400):
-            self.worksheet.batch_update(updates[start : start + 400], raw=True)
+        for start in range(0, len(updates), _SHEETS_UPDATE_BATCH_SIZE):
+            self.worksheet.batch_update(
+                updates[start : start + _SHEETS_UPDATE_BATCH_SIZE], raw=True
+            )
         return PaymentBackfillResult(
             cell_updates=len(updates),
             order_updates=len(changed_orders),
@@ -295,6 +343,217 @@ class GoogleSheetsGateway:
             api_order_matches=len(matched_keys),
             unmatched_sheet_orders=len(sheet_prom_keys - set(expected_by_key)),
             missing_expected_order_ids=missing_expected_ids,
+        )
+
+    def reconcile_prom_installments(
+        self,
+        orders: list[Order],
+        *,
+        observed_at: datetime,
+        apply_changes: bool,
+        expected_order_ids: set[str] | None = None,
+    ) -> InstallmentReconciliationResult:
+        """Replace historical estimates with reported fees or unresolved state."""
+        expected_by_key = {
+            order.sync_key.casefold(): order
+            for order in orders
+            if order.source.casefold() == "prom"
+            and order.payment_method == "оплата частями"
+            and order.installment_commission_source in {"reported", "unresolved"}
+        }
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        updates: list[dict[str, Any]] = []
+        changed_orders: dict[str, tuple[Order, str, str]] = {}
+        auditable_orders: dict[str, tuple[Order, str, str]] = {}
+        handled_keys: set[str] = set()
+
+        for row_number, row in enumerate(values, start=1):
+            if (
+                len(row) < COLUMNS.sync_key
+                or str(row[COLUMNS.row_type - 1]).strip() != ROW_ORDER
+            ):
+                continue
+            sync_key = str(row[COLUMNS.sync_key - 1]).strip().casefold()
+            order = expected_by_key.get(sync_key)
+            if not order or sync_key in handled_keys:
+                continue
+            handled_keys.add(sync_key)
+            plan = self._plan_installment_row(row_number, row, order)
+            if plan:
+                auditable_orders[sync_key] = (
+                    order,
+                    plan.old_value,
+                    plan.new_value,
+                )
+            if plan and plan.updates:
+                updates.extend(plan.updates)
+                changed_orders[sync_key] = (
+                    order,
+                    plan.old_value,
+                    plan.new_value,
+                )
+
+        events = tuple(
+            OrderAuditEvent(
+                occurred_at=observed_at,
+                event_type="Уточнено комісію оплати частинами",
+                source=order.source,
+                order_id=order.external_id,
+                sync_key=order.sync_key,
+                tracking_number=order.tracking_number,
+                field="Комісія оплати частинами",
+                old_value=old_value,
+                new_value=new_value,
+                details=(
+                    "prom-installment-reconciliation:"
+                    f"{order.sync_key.casefold()}:{new_value}"
+                ),
+            )
+            for order, old_value, new_value in auditable_orders.values()
+        )
+        fetched_order_ids = {
+            order.external_id for order in expected_by_key.values()
+        }
+        unresolved_ids = tuple(
+            sorted(
+                {
+                    order.external_id
+                    for order in expected_by_key.values()
+                    if order.installment_commission_source == "unresolved"
+                }
+                | ((expected_order_ids or set()) - fetched_order_ids)
+            )
+        )
+        result = InstallmentReconciliationResult(
+            cell_updates=len(updates),
+            order_updates=len(changed_orders),
+            reported_orders=sum(
+                order.installment_commission_source == "reported"
+                for order in expected_by_key.values()
+            ),
+            unresolved_orders=unresolved_ids,
+            audit_events=events,
+        )
+        if not apply_changes:
+            return result
+
+        backup_name = ""
+        if updates:
+            backup_name = self.create_backup(created_at=observed_at)
+            # Keep reconciliation atomic: if this request fails, no subset of
+            # orders can be changed without its matching audit event on retry.
+            self.worksheet.batch_update(updates, raw=False)
+        existing_audit_details = self._existing_audit_details()
+        missing_events = [
+            event for event in events if event.details not in existing_audit_details
+        ]
+        if missing_events:
+            self.append_audit_events(missing_events)
+        return InstallmentReconciliationResult(
+            cell_updates=result.cell_updates,
+            order_updates=result.order_updates,
+            reported_orders=result.reported_orders,
+            unresolved_orders=result.unresolved_orders,
+            audit_events=result.audit_events,
+            backup_name=backup_name,
+        )
+
+    @staticmethod
+    def _plan_installment_row(
+        row_number: int,
+        row: list[Any],
+        order: Order,
+    ) -> _InstallmentRowPlan | None:
+        """Build cell updates for one safe authoritative state transition."""
+        visible_order_id = str(
+            row[COLUMNS.order_number - 1]
+            if len(row) >= COLUMNS.order_number
+            else ""
+        ).strip()
+        if visible_order_id and visible_order_id != order.external_id:
+            LOGGER.warning(
+                "Prom installment reconciliation skipped %s: visible order ID is %s",
+                order.sync_key,
+                visible_order_id,
+            )
+            return None
+
+        current = InstallmentCommissionState(
+            decimal_value(
+                row[COLUMNS.installment_commission - 1]
+                if len(row) >= COLUMNS.installment_commission
+                else ""
+            ),
+            str(
+                row[COLUMNS.installment_commission_source - 1]
+                if len(row) >= COLUMNS.installment_commission_source
+                else ""
+            ).strip(),  # type: ignore[arg-type]
+        )
+        incoming = InstallmentCommissionState(
+            order.installment_commission,
+            order.installment_commission_source,
+        )
+        resolved = resolve_installment_commission(current, incoming)
+        expected_display = advertising_display(
+            decimal_value(
+                row[COLUMNS.advertising_base - 1]
+                if len(row) >= COLUMNS.advertising_base
+                else ""
+            ),
+            resolved.amount,
+            resolved.source,
+        )
+        current_display = (
+            row[COLUMNS.advertising - 1]
+            if len(row) >= COLUMNS.advertising
+            else ""
+        )
+        expected_net = net_profit_formula(row_number)
+        current_net = str(
+            row[COLUMNS.net_profit - 1] if len(row) >= COLUMNS.net_profit else ""
+        )
+        planned: list[dict[str, Any]] = []
+        if current.amount != resolved.amount:
+            planned.append(
+                {
+                    "range": rowcol_to_a1(
+                        row_number, COLUMNS.installment_commission
+                    ),
+                    "values": [[
+                        decimal_for_sheet(resolved.amount)
+                        if resolved.amount > 0
+                        else ""
+                    ]],
+                }
+            )
+        if current.source != resolved.source:
+            planned.append(
+                {
+                    "range": rowcol_to_a1(
+                        row_number, COLUMNS.installment_commission_source
+                    ),
+                    "values": [[resolved.source]],
+                }
+            )
+        if str(current_display) != str(expected_display):
+            planned.append(
+                {
+                    "range": rowcol_to_a1(row_number, COLUMNS.advertising),
+                    "values": [[expected_display]],
+                }
+            )
+        if current_net != expected_net:
+            planned.append(
+                {
+                    "range": rowcol_to_a1(row_number, COLUMNS.net_profit),
+                    "values": [[expected_net]],
+                }
+            )
+        return _InstallmentRowPlan(
+            updates=tuple(planned),
+            old_value=f"{current.amount} ({current.source or 'unknown'})",
+            new_value=f"{resolved.amount} ({resolved.source})",
         )
 
     def record_sync_health(
@@ -1299,6 +1558,39 @@ class GoogleSheetsGateway:
                 "index": 0,
             }
         }
+        installment_source_column = "".join(
+            character
+            for character in rowcol_to_a1(
+                1, COLUMNS.installment_commission_source
+            )
+            if character.isalpha()
+        )
+        unresolved_installment_rule = {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [data_range],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "CUSTOM_FORMULA",
+                            "values": [
+                                {
+                                    "userEnteredValue": (
+                                        f"=${installment_source_column}{self.header_row + 1}="
+                                        '"unresolved"'
+                                    )
+                                }
+                            ],
+                        },
+                        "format": {
+                            "backgroundColorStyle": {
+                                "rgbColor": self._hex_color("#FCE5CD")
+                            }
+                        },
+                    },
+                },
+                "index": 0,
+            }
+        }
         net_profit_range = dict(
             data_range,
             startColumnIndex=COLUMNS.net_profit - 1,
@@ -1332,6 +1624,7 @@ class GoogleSheetsGateway:
             rule("Отримано", "#D9EAD3"),
             rule("дорозі", "#FFF2CC"),
             rule("Прибуло", "#FFF2CC"),
+            unresolved_installment_rule,
             refusal_block_rule,
             negative_net_profit_rule,
         ]
@@ -1700,27 +1993,18 @@ class GoogleSheetsGateway:
                         else ""
                     )
                     existing_installment = decimal_value(current_installment)
-                    effective_installment = order.installment_commission
-                    if (
-                        order.payment_method == "оплата частями"
-                        and effective_installment == 0
-                        and existing_installment > 0
-                    ):
-                        effective_installment = existing_installment
-                    incoming_source = order.installment_commission_source or (
-                        "reported" if effective_installment > 0 else ""
+                    resolved_installment = resolve_installment_commission(
+                        InstallmentCommissionState(
+                            existing_installment,
+                            current_installment_source,  # type: ignore[arg-type]
+                        ),
+                        InstallmentCommissionState(
+                            order.installment_commission,
+                            order.installment_commission_source,
+                        ),
                     )
-                    source_rank = {"fallback": 1, "tariff": 2, "reported": 3}
-                    current_rank = source_rank.get(
-                        current_installment_source,
-                        3 if existing_installment > 0 else 0,
-                    )
-                    incoming_rank = source_rank.get(incoming_source, 0)
-                    if existing_installment > 0 and incoming_rank < current_rank:
-                        effective_installment = existing_installment
-                    effective_source = current_installment_source
-                    if effective_installment == order.installment_commission:
-                        effective_source = incoming_source
+                    effective_installment = resolved_installment.amount
+                    effective_source = resolved_installment.source
                     if decimal_value(current_base) != order.advertising_cost:
                         updates.append(
                             {
@@ -1732,7 +2016,11 @@ class GoogleSheetsGateway:
                         updates.append(
                             {
                                 "range": rowcol_to_a1(row_number, COLUMNS.installment_commission),
-                                "values": [[decimal_for_sheet(effective_installment)]],
+                                "values": [[
+                                    decimal_for_sheet(effective_installment)
+                                    if effective_installment > 0
+                                    else ""
+                                ]],
                             }
                         )
                     if current_installment_source != effective_source:
@@ -1746,7 +2034,9 @@ class GoogleSheetsGateway:
                             }
                         )
                     expected_advertising = advertising_display(
-                        order.advertising_cost, effective_installment
+                        order.advertising_cost,
+                        effective_installment,
+                        effective_source,
                     )
                     current_advertising = (
                         row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
@@ -2037,7 +2327,16 @@ class GoogleSheetsGateway:
                                 "values": [[decimal_for_sheet(expected)]],
                             }
                         )
-                    display = advertising_display(expected, installment)
+                    installment_source = (
+                        str(row[COLUMNS.installment_commission_source - 1]).strip()
+                        if len(row) >= COLUMNS.installment_commission_source
+                        else ""
+                    )
+                    display = advertising_display(
+                        expected,
+                        installment,
+                        installment_source,
+                    )
                     shown = row[COLUMNS.advertising - 1] if len(row) >= COLUMNS.advertising else ""
                     if str(shown) != str(display):
                         updates.append(

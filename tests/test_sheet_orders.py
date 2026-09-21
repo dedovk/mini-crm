@@ -16,8 +16,8 @@ def test_markup_formula_uses_ukrainian_sheet_separator_and_numeric_safe_text() -
 
 def test_net_profit_formula_requires_numeric_cost_and_subtracts_all_expenses() -> None:
     assert net_profit_formula(5) == (
-        '=IF(AND(ISNUMBER(Q5);ISNUMBER(R5));'
-        'R5-IFERROR(AA5;0)-IFERROR(AC5;0);"")'
+        '=IF(OR(AD5="unresolved";NOT(AND(ISNUMBER(Q5);ISNUMBER(R5))));"";'
+        'R5-IFERROR(AA5;0)-IFERROR(AC5;0))'
     )
 
 
@@ -101,6 +101,35 @@ def test_collect_order_groups_writes_advertising_once_for_multi_item_order() -> 
     assert all(
         row[COLUMNS.operational_date - 1] == sheet_serial(date(2026, 8, 8)) for row in rows
     )
+
+
+def test_collect_order_groups_marks_unresolved_installment_profit_as_incomplete() -> None:
+    order = Order(
+        source="prom",
+        external_id="427933705",
+        created_at=datetime(2026, 9, 16, tzinfo=UTC),
+        completed_at=datetime(2026, 9, 16, tzinfo=UTC),
+        customer_name="Покупець",
+        city="Коростень",
+        phone="+380671234567",
+        tracking_number="20451537282409",
+        total=Decimal(5849),
+        payment_method="оплата частями",
+        note="",
+        sender="",
+        advertising_cost=Decimal("345.68"),
+        installment_commission_source="unresolved",
+        items=[OrderItem("Драбина", "MFG58", Decimal(1), Decimal(5849), Decimal(5849))],
+    )
+
+    groups = collect_order_groups(
+        [], [order], {}, sender_default="наш", observation_day=date(2026, 9, 16)
+    )
+
+    row = groups.rows["prom:427933705"][0]
+    assert row[COLUMNS.installment_commission - 1] == ""
+    assert row[COLUMNS.installment_commission_source - 1] == "unresolved"
+    assert row[COLUMNS.advertising - 1] == "345.68\nКОМІСІЯ?"
 
 
 def test_shipped_order_is_grouped_on_shipping_day_without_completion_marker() -> None:

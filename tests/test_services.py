@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+from crm_sync.clients.prom import InstallmentDetailDiagnostics
 from crm_sync.models import (
     Order,
     OrderItem,
@@ -146,6 +147,50 @@ class SuccessfulSource:
 
     def fetch_orders(self, since: datetime):
         self.called = True
+        return []
+
+
+class UnresolvedInstallmentPromSource:
+    source = "prom"
+
+    def fetch_orders(self, since: datetime):
+        return [
+            Order(
+                source="prom",
+                external_id="427933705",
+                created_at=datetime(2026, 9, 16, tzinfo=UTC),
+                completed_at=datetime(2026, 9, 16, tzinfo=UTC),
+                customer_name="Покупець",
+                city="Коростень",
+                phone="+380671234567",
+                tracking_number="20451537282409",
+                total=Decimal(5849),
+                payment_method="оплата частями",
+                note="",
+                sender="наш",
+                installment_commission_source="unresolved",
+                items=[
+                    OrderItem(
+                        name="Драбина",
+                        product_code="MFG58",
+                        quantity=Decimal(1),
+                        unit_price=Decimal(5849),
+                        line_total=Decimal(5849),
+                    )
+                ],
+            )
+        ]
+
+
+class DegradedInstallmentPromSource:
+    source = "prom"
+    installment_detail_diagnostics = InstallmentDetailDiagnostics(
+        requested=2,
+        failures=2,
+        skipped_by_circuit=3,
+    )
+
+    def fetch_orders(self, since: datetime) -> list[Order]:
         return []
 
 
@@ -318,6 +363,47 @@ def test_optional_finance_failure_does_not_fail_order_sync() -> None:
     assert result.source_orders == {"rozetka": 0}
     assert result.warnings == (
         "rozetka finance is unavailable; existing sheet values were preserved: finance access denied",
+    )
+
+
+def test_unresolved_installment_commission_is_reported_in_sync_warnings() -> None:
+    service = SyncService(
+        sheets=SheetsStub(),  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[UnresolvedInstallmentPromSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=True,
+        clock=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+    )
+
+    result = service.run()
+
+    assert result.warnings == (
+        "Prom installment commission is unresolved for order(s): 427933705",
+    )
+
+
+def test_degraded_installment_detail_is_persisted_in_integration_health() -> None:
+    sheets = ProductionSheetsStub()
+    service = SyncService(
+        sheets=sheets,  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[DegradedInstallmentPromSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=False,
+    )
+
+    result = service.run()
+
+    assert result.failed_sources == ("prom-installment-detail",)
+    assert sheets.health_calls == [["prom-installment-detail"]]
+    assert result.warnings == (
+        "prom-installment-detail is degraded: 2 failure(s), "
+        "3 request(s) skipped by circuit breaker",
     )
 
 

@@ -7,7 +7,7 @@ from typing import Any
 
 from gspread.utils import rowcol_to_a1
 
-from crm_sync.models import Order, ShipmentStatus
+from crm_sync.models import InstallmentCommissionSource, Order, ShipmentStatus
 from crm_sync.sheet_layout import (
     REPORTING_EXCLUDED_REFUSAL,
     ROW_ORDER,
@@ -90,14 +90,28 @@ def net_profit_formula(row_number: int) -> str:
     markup = rowcol_to_a1(row_number, COLUMNS.markup)
     advertising = rowcol_to_a1(row_number, COLUMNS.advertising_base)
     installment = rowcol_to_a1(row_number, COLUMNS.installment_commission)
+    installment_source = rowcol_to_a1(
+        row_number, COLUMNS.installment_commission_source
+    )
     return (
-        f'=IF(AND(ISNUMBER({cost});ISNUMBER({markup}));'
-        f'{markup}-IFERROR({advertising};0)-IFERROR({installment};0);"")'
+        f'=IF(OR({installment_source}="unresolved";NOT(AND(ISNUMBER({cost});'
+        f'ISNUMBER({markup}))));"";'
+        f'{markup}-IFERROR({advertising};0)-IFERROR({installment};0))'
     )
 
 
-def advertising_display(base: Decimal, installment: Decimal) -> Any:
+def advertising_display(
+    base: Decimal,
+    installment: Decimal,
+    installment_source: InstallmentCommissionSource | str = "",
+) -> Any:
     """Return a compact two-line display while numeric components stay hidden."""
+    if installment_source == "unresolved":
+        return (
+            f"{decimal_for_sheet(base):.2f}\nКОМІСІЯ?"
+            if base > 0
+            else "КОМІСІЯ?"
+        )
     if installment > 0:
         return (
             f"{decimal_for_sheet(base):.2f}\n"
@@ -248,7 +262,14 @@ def _normalize_existing_row(
         # One-time migration from the former numeric business column.
         base = decimal_value(row[COLUMNS.advertising - 1])
         row[COLUMNS.advertising_base - 1] = decimal_for_sheet(base) if base > 0 else ""
-    row[COLUMNS.advertising - 1] = advertising_display(base, installment)
+    installment_source = str(
+        row[COLUMNS.installment_commission_source - 1]
+    ).strip()
+    row[COLUMNS.advertising - 1] = advertising_display(
+        base,
+        installment,
+        installment_source,
+    )
     return key, order_day, str(row[COLUMNS.order_date - 1]), row
 
 
@@ -317,7 +338,9 @@ def _new_order_rows(
                 or ("reported" if order.installment_commission > 0 else "")
             )
             row[COLUMNS.advertising - 1] = advertising_display(
-                order.advertising_cost, order.installment_commission
+                order.advertising_cost,
+                order.installment_commission,
+                order.installment_commission_source,
             )
         row[COLUMNS.sync_key - 1] = order.sync_key
         row[COLUMNS.row_type - 1] = ROW_ORDER
