@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -84,6 +85,14 @@ def markup_formula(row_number: int) -> str:
     )
 
 
+def _numeric_formula_value(cell: str) -> str:
+    """Coerce legacy locale-dependent numeric text for arithmetic formulas."""
+    return (
+        f'IF(ISNUMBER({cell});{cell};'
+        f'IFERROR(VALUE(SUBSTITUTE({cell}&"";".";","));0))'
+    )
+
+
 def net_profit_formula(row_number: int) -> str:
     """Build net profit from margin and both marketplace commission components."""
     cost = rowcol_to_a1(row_number, COLUMNS.cost)
@@ -93,10 +102,12 @@ def net_profit_formula(row_number: int) -> str:
     installment_source = rowcol_to_a1(
         row_number, COLUMNS.installment_commission_source
     )
+    advertising_value = _numeric_formula_value(advertising)
+    installment_value = _numeric_formula_value(installment)
     return (
         f'=IF(OR({installment_source}="unresolved";NOT(AND(ISNUMBER({cost});'
         f'ISNUMBER({markup}))));"";'
-        f'{markup}-IFERROR({advertising};0)-IFERROR({installment};0))'
+        f'{markup}-{advertising_value}-{installment_value})'
     )
 
 
@@ -252,8 +263,14 @@ def _normalize_existing_row(
         and not parse_sheet_date(row[COLUMNS.first_seen_completed - 1])
     ):
         row[COLUMNS.first_seen_completed - 1] = sheet_serial(completion_day or order_day)
-    base = decimal_value(row[COLUMNS.advertising_base - 1])
-    installment = decimal_value(row[COLUMNS.installment_commission - 1])
+    base_raw = row[COLUMNS.advertising_base - 1]
+    installment_raw = row[COLUMNS.installment_commission - 1]
+    base = decimal_value(base_raw)
+    installment = decimal_value(installment_raw)
+    if _is_numeric_text(base_raw):
+        row[COLUMNS.advertising_base - 1] = decimal_for_sheet(base)
+    if _is_numeric_text(installment_raw):
+        row[COLUMNS.installment_commission - 1] = decimal_for_sheet(installment)
     if installment > 0 and not str(
         row[COLUMNS.installment_commission_source - 1]
     ).strip():
@@ -271,6 +288,14 @@ def _normalize_existing_row(
         installment_source,
     )
     return key, order_day, str(row[COLUMNS.order_date - 1]), row
+
+
+def _is_numeric_text(value: Any) -> bool:
+    """Return whether a Sheets cell is a complete number stored as text."""
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().replace("\u00a0", "").replace(" ", "")
+    return bool(re.fullmatch(r"-?\d+(?:[.,]\d+)?", normalized))
 
 
 def _new_order_rows(

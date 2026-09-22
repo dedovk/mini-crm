@@ -17,7 +17,8 @@ def test_markup_formula_uses_ukrainian_sheet_separator_and_numeric_safe_text() -
 def test_net_profit_formula_requires_numeric_cost_and_subtracts_all_expenses() -> None:
     assert net_profit_formula(5) == (
         '=IF(OR(AD5="unresolved";NOT(AND(ISNUMBER(Q5);ISNUMBER(R5))));"";'
-        'R5-IFERROR(AA5;0)-IFERROR(AC5;0))'
+        'R5-IF(ISNUMBER(AA5);AA5;IFERROR(VALUE(SUBSTITUTE(AA5&"";".";","));0))'
+        '-IF(ISNUMBER(AC5);AC5;IFERROR(VALUE(SUBSTITUTE(AC5&"";".";","));0)))'
     )
 
 
@@ -46,6 +47,27 @@ def test_collect_order_groups_normalizes_legacy_rows_without_losing_manual_value
     assert normalized[COLUMNS.cost - 1] == 700
     assert normalized[COLUMNS.receipt - 1] == "https://check.checkbox.ua/receipt/abc"
     assert normalized[COLUMNS.installment_commission_source - 1] == "legacy"
+
+
+def test_collect_order_groups_converts_legacy_numeric_text_to_sheet_numbers() -> None:
+    row = [""] * LAST_COLUMN
+    row[COLUMNS.source - 1] = "prom"
+    row[COLUMNS.tracking_number - 1] = "20451234567890"
+    row[COLUMNS.order_date - 1] = "21.09.2026"
+    row[COLUMNS.advertising_base - 1] = "345.68"
+    row[COLUMNS.installment_commission - 1] = "216.41"
+    row[COLUMNS.sync_key - 1] = "prom:text-fees"
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.operational_date - 1] = sheet_serial(date(2026, 9, 21))
+
+    groups = collect_order_groups(
+        [row], [], {}, sender_default="наш", observation_day=date(2026, 9, 22)
+    )
+
+    normalized = groups.rows["prom:text-fees"][0]
+    assert normalized[COLUMNS.advertising_base - 1] == 345.68
+    assert normalized[COLUMNS.installment_commission - 1] == 216.41
+    assert normalized[COLUMNS.advertising - 1] == "345.68\n216.41"
 
 
 def test_collect_order_groups_migrates_legacy_melad_sender() -> None:
