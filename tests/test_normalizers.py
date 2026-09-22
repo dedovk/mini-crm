@@ -350,6 +350,32 @@ def test_prom_normalizer_does_not_treat_unsettled_evopay_as_paid(
     assert order.payment_method == "наложка"
 
 
+def test_prom_normalizer_treats_fully_refunded_payment_as_cancellation() -> None:
+    client = PromClient(
+        HttpClient(max_retries=0),
+        token="test",
+        base_url="https://example.test",
+        timezone="Europe/Kyiv",
+    )
+
+    order = client._normalize(
+        {
+            "id": 425070923,
+            "status": "delivered",
+            "date_created": "2026-09-10 11:42:00",
+            "delivery_provider_data": {"declaration_number": "20451525937718"},
+            "full_price": 3549,
+            "payment_option": {"name": "Оплата частинами"},
+            "payment_data": {"type": "evopay", "status": "refunded"},
+            "products": [{"name": "Товар", "quantity": 1, "price": 3549}],
+        }
+    )
+
+    assert order.is_cancelled
+    assert order.source_status == "Скасовано"
+    assert order.installment_commission_source == ""
+
+
 @pytest.mark.parametrize("payment_name", ["Оплата на счет", "Зачет"])
 def test_prom_normalizer_does_not_override_non_cod_method_with_evopay(
     payment_name: str,

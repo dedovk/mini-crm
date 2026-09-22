@@ -95,6 +95,10 @@ class SheetGateway(Protocol):
 
     def read_existing_sync_keys(self) -> set[str]: ...
 
+    def unresolved_prom_installment_order_ids(
+        self, candidate_order_ids: set[str]
+    ) -> set[str]: ...
+
     def backfill_completion_state(self, *, observed_at: datetime) -> int: ...
 
     def record_completion_observations(
@@ -243,11 +247,14 @@ class SyncService:
             or order.payment_method.strip().casefold() == "смешанная"
         ]
         warnings: list[str] = list(source_batch.warnings)
-        unresolved_installments = sorted(
+        unresolved_candidates = {
             order.external_id
             for order in fetched
             if order.source.casefold() == "prom"
             and order.installment_commission_source == "unresolved"
+        }
+        unresolved_installments = sorted(
+            self.sheets.unresolved_prom_installment_order_ids(unresolved_candidates)
         )
         if unresolved_installments:
             warnings.append(

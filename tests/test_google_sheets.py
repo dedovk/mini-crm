@@ -167,6 +167,23 @@ def test_non_prepaid_source_cancellation_still_requires_removal() -> None:
     assert gateway.needs_refusal_reconciliation()
 
 
+def test_reported_hidden_installment_value_is_not_unresolved() -> None:
+    row = [""] * LAST_COLUMN
+    row[COLUMNS.row_type - 1] = ROW_ORDER
+    row[COLUMNS.sync_key - 1] = "prom:427933705"
+    row[COLUMNS.order_number - 1] = "427933705"
+    row[COLUMNS.installment_commission - 1] = "99.43"
+    row[COLUMNS.installment_commission_source - 1] = "reported"
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = StubWorksheet([row])
+
+    unresolved = gateway.unresolved_prom_installment_order_ids(
+        {"425070923", "427933705"}
+    )
+
+    assert unresolved == {"425070923"}
+
+
 def test_legacy_installment_column_is_atomically_moved_before_receipt_use() -> None:
     gateway = object.__new__(GoogleSheetsGateway)
     gateway.worksheet = LayoutWorksheet([])

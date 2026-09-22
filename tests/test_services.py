@@ -29,6 +29,9 @@ class SheetsStub:
     def read_existing_sync_keys(self) -> set[str]:
         return set()
 
+    def unresolved_prom_installment_order_ids(self, candidate_order_ids: set[str]) -> set[str]:
+        return set(candidate_order_ids)
+
     def validate_integrity(self):
         from crm_sync.integrity import IntegrityReport
 
@@ -383,6 +386,30 @@ def test_unresolved_installment_commission_is_reported_in_sync_warnings() -> Non
     assert result.warnings == (
         "Prom installment commission is unresolved for order(s): 427933705",
     )
+
+
+def test_manually_reported_installment_commission_suppresses_api_warning() -> None:
+    class ResolvedInstallmentSheets(SheetsStub):
+        def unresolved_prom_installment_order_ids(
+            self, candidate_order_ids: set[str]
+        ) -> set[str]:
+            assert candidate_order_ids == {"427933705"}
+            return set()
+
+    service = SyncService(
+        sheets=ResolvedInstallmentSheets(),  # type: ignore[arg-type]
+        nova_poshta=NovaPoshtaStub(),  # type: ignore[arg-type]
+        sources=[UnresolvedInstallmentPromSource()],  # type: ignore[list-item]
+        timezone="Europe/Kyiv",
+        lookback_days=7,
+        sender_default="наш",
+        dry_run=True,
+        clock=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+    )
+
+    result = service.run()
+
+    assert result.warnings == ()
 
 
 def test_degraded_installment_detail_is_persisted_in_integration_health() -> None:

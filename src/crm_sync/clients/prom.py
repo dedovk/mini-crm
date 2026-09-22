@@ -27,7 +27,8 @@ from crm_sync.utils import (
 LOGGER = logging.getLogger(__name__)
 
 COMMISSION_LABEL_MARKERS = ("комис", "коміс", "commission", "fee")
-PROM_SETTLED_PAYMENT_STATUSES = frozenset({"paid", "paid_out", "refunded"})
+PROM_SETTLED_PAYMENT_STATUSES = frozenset({"paid", "paid_out"})
+PROM_REFUNDED_PAYMENT_STATUSES = frozenset({"refunded", "fully_refunded"})
 _DETAIL_FAILURE_LIMIT = 2
 
 
@@ -164,6 +165,17 @@ def _prom_payment_method(raw: dict[str, Any], note: str) -> str:
         ):
             return PROM_PAYMENT_METHOD
     return classified
+
+
+def _prom_payment_was_refunded(raw: dict[str, Any]) -> bool:
+    """Return whether Prom reports a completed full payment refund."""
+    payment_data = raw.get("payment_data")
+    if not isinstance(payment_data, dict):
+        return False
+    status = str(
+        first_value(payment_data, "status", "payment_status")
+    ).strip().casefold()
+    return status in PROM_REFUNDED_PAYMENT_STATUSES
 
 
 class PromClient:
@@ -312,6 +324,8 @@ class PromClient:
         eligible_order_ids: AbstractSet[str] | None = None,
     ) -> dict[str, Any]:
         """Enrich an installment order with its official Prom detail payload."""
+        if _prom_payment_was_refunded(raw):
+            return raw
         note = " | ".join(dict.fromkeys(collect_note_text(raw)))
         if _prom_payment_method(raw, note) != "оплата частями":
             return raw
@@ -502,9 +516,10 @@ class PromClient:
         advertising_cost = decimal_value(prosale) or decimal_value(cpa_commission)
         total = decimal_value(first_value(raw, "full_price", "total_price", "price", "total"))
         payment_method = _prom_payment_method(raw, note)
+        payment_was_refunded = _prom_payment_was_refunded(raw)
         installment_commission = Decimal(0)
         installment_source: InstallmentCommissionSource = ""
-        if payment_method == "оплата частями":
+        if payment_method == "оплата частями" and not payment_was_refunded:
             installment_commission, installment_source = _installment_cost(raw)
             if installment_commission == 0:
                 LOGGER.warning(
@@ -563,6 +578,7 @@ class PromClient:
             source_status=(
                 "Скасовано"
                 if str(raw.get("status", "")).strip().casefold() in {"canceled", "cancelled"}
+                or payment_was_refunded
                 else "Виконано"
             ),
             items=items,

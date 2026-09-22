@@ -200,6 +200,30 @@ class GoogleSheetsGateway:
                 order_ids.add(order_id)
         return order_ids
 
+    def unresolved_prom_installment_order_ids(
+        self, candidate_order_ids: set[str]
+    ) -> set[str]:
+        """Exclude API-unresolved orders already resolved in hidden sheet cells."""
+        unresolved = {str(order_id).strip() for order_id in candidate_order_ids if str(order_id).strip()}
+        if not unresolved:
+            return set()
+        values = self.worksheet.get_all_values(value_render_option="FORMULA")
+        for row in values:
+            if (
+                len(row) < COLUMNS.installment_commission_source
+                or str(row[COLUMNS.row_type - 1]).strip() != ROW_ORDER
+                or not str(row[COLUMNS.sync_key - 1]).strip().casefold().startswith("prom:")
+            ):
+                continue
+            order_id = str(row[COLUMNS.order_number - 1]).strip()
+            if order_id not in unresolved:
+                continue
+            source = str(row[COLUMNS.installment_commission_source - 1]).strip().casefold()
+            amount = decimal_value(row[COLUMNS.installment_commission - 1])
+            if source == "reported" and amount > 0:
+                unresolved.discard(order_id)
+        return unresolved
+
     def backfill_prom_payments(
         self,
         orders: list[Order],
