@@ -251,6 +251,7 @@ class SyncService:
             order.external_id
             for order in fetched
             if order.source.casefold() == "prom"
+            and not order.is_cancelled
             and order.installment_commission_source == "unresolved"
         }
         unresolved_installments = sorted(
@@ -376,6 +377,7 @@ class SyncService:
             unique_orders
             or layout_advanced
             or refused_orders_present
+            or cancelled_existing
             or details_changed
             or repairable_sheet_errors
         ) and not backup_created:
@@ -393,6 +395,7 @@ class SyncService:
             force_rebuild=(
                 layout_advanced
                 or refused_orders_present
+                or bool(cancelled_existing)
                 or details_changed
                 or schema_migration_required
                 or repairable_sheet_errors
@@ -661,6 +664,12 @@ class SyncService:
         for order in fetched:
             key = order.sync_key.casefold()
             if key in existing_keys or key in run_keys:
+                continue
+            if order.is_cancelled and (
+                not order.tracking_number.strip() or not order.items
+            ):
+                # Cancellation-only payloads reconcile existing rows but must
+                # never materialize as incomplete new CRM orders.
                 continue
             effective_day = (
                 order.updated_at.date()

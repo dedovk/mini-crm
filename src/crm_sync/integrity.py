@@ -36,6 +36,11 @@ def validate_incoming_orders(orders: list[Order]) -> IntegrityReport:
             warnings.append(f"API returned duplicate order {order.sync_key}; duplicate will be ignored")
             continue
         seen.add(key)
+        # Marketplace cancellation payloads are reconciliation tombstones.
+        # They may legitimately omit shipment and product details; source + ID
+        # are sufficient to remove or update an existing CRM order.
+        if order.is_cancelled:
+            continue
         if not order.items:
             errors.append(f"{order.sync_key}: order has no product rows")
             continue

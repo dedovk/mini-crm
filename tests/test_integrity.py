@@ -63,3 +63,15 @@ def test_incoming_integrity_rejects_invalid_financial_fields_and_identity() -> N
     assert any("prepayment exceeds" in error for error in report.errors)
     assert any("advertising cost is negative" in error for error in report.errors)
     assert any("installment commission is negative" in error for error in report.errors)
+
+
+def test_incoming_integrity_accepts_cancellation_tombstone_without_commercial_data() -> None:
+    order = make_order()
+    order.source_status = "Скасовано"
+    order.tracking_number = ""
+    order.items = []
+
+    report = validate_incoming_orders([order])
+
+    assert report.ok
+    assert report.warnings == ()
