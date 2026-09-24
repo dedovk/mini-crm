@@ -812,6 +812,9 @@ class GoogleSheetsGateway:
         order_number_rows_by_key: dict[str, list[int]] = {}
         order_numbers_by_key: dict[str, list[str]] = {}
         order_total_rows_by_key: dict[str, list[int]] = {}
+        item_rows_by_key: dict[
+            str, dict[tuple[str, str, Decimal, Decimal, Decimal], list[int]]
+        ] = {}
         missing_completion_keys: set[str] = set()
         managed_report_rows = {ROW_REPORT_DAY, ROW_REPORT_MTD, ROW_REPORT_FORECAST}
 
@@ -857,6 +860,38 @@ class GoogleSheetsGateway:
             if str(raw_total).strip():
                 order_total_rows_by_key.setdefault(sync_key, []).append(row_number)
                 totals_by_key.setdefault(sync_key, set()).add(decimal_value(raw_total))
+            product_name = " ".join(
+                str(row[COLUMNS.product - 1] if len(row) >= COLUMNS.product else "").split()
+            ).casefold()
+            product_code = " ".join(
+                str(
+                    row[COLUMNS.product_code - 1]
+                    if len(row) >= COLUMNS.product_code
+                    else ""
+                ).split()
+            ).casefold()
+            item_fingerprint = (
+                product_code,
+                product_name,
+                decimal_value(
+                    row[COLUMNS.quantity - 1]
+                    if len(row) >= COLUMNS.quantity
+                    else ""
+                ),
+                decimal_value(
+                    row[COLUMNS.unit_price - 1]
+                    if len(row) >= COLUMNS.unit_price
+                    else ""
+                ),
+                decimal_value(
+                    row[COLUMNS.line_total - 1]
+                    if len(row) >= COLUMNS.line_total
+                    else ""
+                ),
+            )
+            item_rows_by_key.setdefault(sync_key, {}).setdefault(
+                item_fingerprint, []
+            ).append(row_number)
             if not str(
                 row[COLUMNS.order_date - 1] if len(row) >= COLUMNS.order_date else ""
             ).strip():
@@ -895,6 +930,15 @@ class GoogleSheetsGateway:
             totals = totals_by_key.get(sync_key, set())
             if len(totals) > 1:
                 errors.append(f"{sync_key}: conflicting order totals {sorted(totals)}")
+            duplicate_item_rows = [
+                duplicate_rows
+                for duplicate_rows in item_rows_by_key.get(sync_key, {}).values()
+                if len(duplicate_rows) > 1
+            ]
+            if duplicate_item_rows:
+                errors.append(
+                    f"{sync_key}: duplicate product rows {duplicate_item_rows}"
+                )
 
         if missing_completion_keys:
             warnings.append(

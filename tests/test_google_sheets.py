@@ -2180,6 +2180,16 @@ def test_sheet_integrity_accepts_multi_item_group_with_one_order_header() -> Non
         row[COLUMNS.order_date - 1] = "05.08.2026"
     rows[4][COLUMNS.order_number - 1] = "501"
     rows[4][COLUMNS.order_total - 1] = 1000
+    rows[4][COLUMNS.product - 1] = "Товар A"
+    rows[4][COLUMNS.product_code - 1] = "SKU-A"
+    rows[4][COLUMNS.quantity - 1] = 1
+    rows[4][COLUMNS.unit_price - 1] = 400
+    rows[4][COLUMNS.line_total - 1] = 400
+    rows[5][COLUMNS.product - 1] = "Товар B"
+    rows[5][COLUMNS.product_code - 1] = "SKU-B"
+    rows[5][COLUMNS.quantity - 1] = 2
+    rows[5][COLUMNS.unit_price - 1] = 300
+    rows[5][COLUMNS.line_total - 1] = 600
     worksheet = StubWorksheet(rows)
     gateway = object.__new__(GoogleSheetsGateway)
     gateway.worksheet = worksheet
@@ -2187,6 +2197,30 @@ def test_sheet_integrity_accepts_multi_item_group_with_one_order_header() -> Non
     report = gateway.validate_integrity()
 
     assert report.ok
+
+
+def test_sheet_integrity_rejects_duplicate_item_hidden_as_second_group() -> None:
+    rows = [[""] * LAST_COLUMN for _ in range(7)]
+    for index in (4, 5):
+        row = rows[index]
+        row[COLUMNS.row_type - 1] = ROW_ORDER
+        row[COLUMNS.sync_key - 1] = "prom:501"
+        row[COLUMNS.order_date - 1] = "05.08.2026"
+        row[COLUMNS.product - 1] = "Повторений товар"
+        row[COLUMNS.product_code - 1] = "SKU-1"
+        row[COLUMNS.quantity - 1] = 1
+        row[COLUMNS.unit_price - 1] = 1000
+        row[COLUMNS.line_total - 1] = 1000
+    rows[4][COLUMNS.order_number - 1] = "501"
+    rows[4][COLUMNS.order_total - 1] = 1000
+    worksheet = StubWorksheet(rows)
+    gateway = object.__new__(GoogleSheetsGateway)
+    gateway.worksheet = worksheet
+
+    report = gateway.validate_integrity()
+
+    assert not report.ok
+    assert "prom:501: duplicate product rows [[5, 6]]" in report.errors
 
 
 @pytest.mark.parametrize(
